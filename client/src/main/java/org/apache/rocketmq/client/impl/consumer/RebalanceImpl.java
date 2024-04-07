@@ -236,12 +236,14 @@ public abstract class RebalanceImpl {
             for (final Map.Entry<String, SubscriptionData> entry : subTable.entrySet()) {
                 final String topic = entry.getKey();
                 try {
+                    // 满足服务端队列分配的条件
                     if (!clientRebalance(topic)) {
                         boolean result = this.getRebalanceResultFromBroker(topic, isOrder);
                         if (!result) {
                             balanced = false;
                         }
                     } else {
+                        // 客户端执行队列分配
                         boolean result = this.rebalanceByTopic(topic, isOrder);
                         if (!result) {
                             balanced = false;
@@ -346,6 +348,9 @@ public abstract class RebalanceImpl {
         String strategyName = this.allocateMessageQueueStrategy.getName();
         Set<MessageQueueAssignment> messageQueueAssignments;
         try {
+            /**
+             * 执行 broker 端队列分配
+             */
             messageQueueAssignments = this.mQClientFactory.queryAssignment(topic, consumerGroup,
                 strategyName, messageModel, QUERY_ASSIGNMENT_TIMEOUT);
         } catch (Exception e) {
@@ -505,6 +510,13 @@ public abstract class RebalanceImpl {
         return changed;
     }
 
+    /**
+     * 更新 本地队列消费状态表，对于新增队列创建 pull/pop 请求
+     * @param topic
+     * @param assignments
+     * @param isOrder
+     * @return
+     */
     private boolean updateMessageQueueAssignment(final String topic, final Set<MessageQueueAssignment> assignments,
         final boolean isOrder) {
         boolean changed = false;
@@ -523,21 +535,26 @@ public abstract class RebalanceImpl {
             }
         }
 
+        //非重试队列
         if (!topic.startsWith(MixAll.RETRY_GROUP_TOPIC_PREFIX)) {
+            // pop 转化为 pull
             if (mq2PopAssignment.isEmpty() && !mq2PushAssignment.isEmpty()) {
                 //pop switch to push
                 //subscribe pop retry topic
                 try {
                     final String retryTopic = KeyBuilder.buildPopRetryTopic(topic, getConsumerGroup());
                     SubscriptionData subscriptionData = FilterAPI.buildSubscriptionData(retryTopic, SubscriptionData.SUB_ALL);
+                    // 订阅 pop 重试队列
                     getSubscriptionInner().put(retryTopic, subscriptionData);
                 } catch (Exception ignored) {
                 }
 
             } else if (!mq2PopAssignment.isEmpty() && mq2PushAssignment.isEmpty()) {
+                // pull 转化为 pop 模式
                 //push switch to pop
                 //unsubscribe pop retry topic
                 try {
+                    // 删除 pop 重试队列
                     final String retryTopic = KeyBuilder.buildPopRetryTopic(topic, getConsumerGroup());
                     getSubscriptionInner().remove(retryTopic);
                 } catch (Exception ignored) {
@@ -660,6 +677,7 @@ public abstract class RebalanceImpl {
             if (!allMQLocked) {
                 mQClientFactory.rebalanceLater(500);
             }
+            // 异步执行 pull消息
             this.dispatchPullRequest(pullRequestList, 500);
         }
 
@@ -686,6 +704,7 @@ public abstract class RebalanceImpl {
                 }
             }
 
+            // 异步执行 pop 请求
             this.dispatchPopPullRequest(popRequestList, 500);
         }
 

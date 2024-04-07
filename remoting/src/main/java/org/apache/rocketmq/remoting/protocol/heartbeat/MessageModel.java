@@ -21,7 +21,7 @@
 package org.apache.rocketmq.remoting.protocol.heartbeat;
 
 /**
- * Message model
+ * Message model 消息模型
  */
 public enum MessageModel {
     /**
