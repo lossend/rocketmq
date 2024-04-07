@@ -166,6 +166,12 @@ public class RebalancePushImpl extends RebalanceImpl {
         return result;
     }
 
+    /**
+     * 计算开始读取时的开始offset
+     * @param mq
+     * @return
+     * @throws MQClientException
+     */
     @Override
     public long computePullFromWhereWithException(MessageQueue mq) throws MQClientException {
         long result = -1;

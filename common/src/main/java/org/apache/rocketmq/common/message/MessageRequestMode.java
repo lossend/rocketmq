@@ -17,7 +17,7 @@
 package org.apache.rocketmq.common.message;
 
 /**
- * Message Request Mode
+ * Message Request Mode 消息请求类型
  */
 public enum MessageRequestMode {
 

@@ -498,6 +498,10 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
         }
     }
 
+    /**
+     * 发送 pop 消费请求
+     * @param popRequest
+     */
     void popMessage(final PopRequest popRequest) {
         final PopProcessQueue processQueue = popRequest.getPopProcessQueue();
         if (processQueue.isDropped()) {

@@ -141,6 +141,13 @@ public class ConsumerManageProcessor implements NettyRequestProcessor {
         }
     }
 
+    /**
+     * 客户端上报消费进度
+     * @param ctx
+     * @param request
+     * @return
+     * @throws RemotingCommandException
+     */
     private RemotingCommand updateConsumerOffset(ChannelHandlerContext ctx, RemotingCommand request)
         throws RemotingCommandException {
 

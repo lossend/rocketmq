@@ -2197,9 +2197,9 @@ public class DefaultMessageStore implements MessageStore {
                 finalDiskSpaceWarningLevelRatio = Double.parseDouble(diskSpaceWarningLevelRatio);
             }
 
-            if (finalDiskSpaceWarningLevelRatio > 0.90) {
-                finalDiskSpaceWarningLevelRatio = 0.90;
-            }
+//            if (finalDiskSpaceWarningLevelRatio > 0.90) {
+//                finalDiskSpaceWarningLevelRatio = 0.90;
+//            }
             if (finalDiskSpaceWarningLevelRatio < 0.35) {
                 finalDiskSpaceWarningLevelRatio = 0.35;
             }

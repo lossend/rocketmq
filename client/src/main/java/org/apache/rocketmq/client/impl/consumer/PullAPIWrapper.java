@@ -362,6 +362,7 @@ public class PullAPIWrapper {
     public void popAsync(MessageQueue mq, long invisibleTime, int maxNums, String consumerGroup,
                          long timeout, PopCallback popCallback, boolean poll, int initMode, boolean order, String expressionType, String expression)
         throws MQClientException, RemotingException, InterruptedException {
+        // 仅支持读取 broker master
         FindBrokerResult findBrokerResult = this.mQClientFactory.findBrokerAddressInSubscribe(mq.getBrokerName(), MixAll.MASTER_ID, true);
         if (null == findBrokerResult) {
             this.mQClientFactory.updateTopicRouteInfoFromNameServer(mq.getTopic());
