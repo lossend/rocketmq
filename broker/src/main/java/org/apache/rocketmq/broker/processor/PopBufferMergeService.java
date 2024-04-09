@@ -167,6 +167,11 @@ public class PopBufferMergeService extends ServiceThread {
         return count;
     }
 
+    /**
+     * 获取最近一次pop 消费产生ck的offset
+     * @param lockKey
+     * @return
+     */
     public long getLatestOffset(String lockKey) {
         QueueWithTime<PopCheckPointWrapper> queue = this.commitOffsets.get(lockKey);
         if (queue == null) {
@@ -431,7 +436,7 @@ public class PopBufferMergeService extends ServiceThread {
      */
     public boolean addCkJustOffset(PopCheckPoint point, int reviveQueueId, long reviveQueueOffset, long nextBeginOffset) {
         PopCheckPointWrapper pointWrapper = new PopCheckPointWrapper(reviveQueueId, reviveQueueOffset, point, nextBeginOffset, true);
-
+        // key = topic + group + queueId + startOffset + popTime + brokerName
         if (this.buffer.containsKey(pointWrapper.getMergeKey())) {
             // when mergeKey conflict
             // will cause PopBufferMergeService.scanCommitOffset cannot poll PopCheckPointWrapper
@@ -441,6 +446,7 @@ public class PopBufferMergeService extends ServiceThread {
 
         this.putCkToStore(pointWrapper, !checkQueueOk(pointWrapper));
 
+        // add point to queue
         putOffsetQueue(pointWrapper);
         this.buffer.put(pointWrapper.getMergeKey(), pointWrapper);
         this.counter.incrementAndGet();
@@ -472,6 +478,14 @@ public class PopBufferMergeService extends ServiceThread {
         }
     }
 
+    /**
+     * put add to buffer.
+     * @param point
+     * @param reviveQueueId
+     * @param reviveQueueOffset
+     * @param nextBeginOffset
+     * @return
+     */
     public boolean addCk(PopCheckPoint point, int reviveQueueId, long reviveQueueOffset, long nextBeginOffset) {
         // key: point.getT() + point.getC() + point.getQ() + point.getSo() + point.getPt()
         if (!brokerController.getBrokerConfig().isEnablePopBufferMerge()) {

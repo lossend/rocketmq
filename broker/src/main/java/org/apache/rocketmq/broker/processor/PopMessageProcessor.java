@@ -708,6 +708,7 @@ public class PopMessageProcessor implements NettyRequestProcessor {
             }
         }
 
+        // 通过ck的offset和当前已提交的offset来屏蔽处于ck的消息
         long bufferOffset = this.popBufferMergeService.getLatestOffset(lockKey);
         if (bufferOffset < 0) {
             return offset;
@@ -762,6 +763,7 @@ public class PopMessageProcessor implements NettyRequestProcessor {
         final String topic, final int reviveQid, final int queueId, final long offset,
         final GetMessageResult getMessageTmpResult, final long popTime, final String brokerName) {
         // add check point msg to revive log
+        // 构建 check point 对象
         final PopCheckPoint ck = new PopCheckPoint();
         ck.setBitMap(0);
         ck.setNum((byte) getMessageTmpResult.getMessageMapedList().size());
@@ -775,7 +777,7 @@ public class PopMessageProcessor implements NettyRequestProcessor {
         for (Long msgQueueOffset : getMessageTmpResult.getMessageQueueOffset()) {
             ck.addDiff((int) (msgQueueOffset - offset));
         }
-
+        // 添加 到内存中
         final boolean addBufferSuc = this.popBufferMergeService.addCk(
             ck, reviveQid, -1, getMessageTmpResult.getNextBeginOffset()
         );
@@ -783,6 +785,7 @@ public class PopMessageProcessor implements NettyRequestProcessor {
         if (addBufferSuc) {
             return true;
         }
+        // 添加到 内存和磁盘中
         return this.popBufferMergeService.addCkJustOffset(
             ck, reviveQid, -1, getMessageTmpResult.getNextBeginOffset()
         );

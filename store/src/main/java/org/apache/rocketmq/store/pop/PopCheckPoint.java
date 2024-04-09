@@ -21,12 +21,24 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class PopCheckPoint implements Comparable<PopCheckPoint> {
+    /**
+     * 本次pop消息的起始偏移
+     */
     @JSONField(name = "so")
     private long startOffset;
+    /**
+     * 消息pop时间
+     */
     @JSONField(name = "pt")
     private long popTime;
+    /**
+     * 消息不可见时间，默认是60s
+     */
     @JSONField(name = "it")
     private long invisibleTime;
+    /**
+     * 标记消息ack的bit位
+     */
     @JSONField(name = "bm")
     private int bitMap;
     @JSONField(name = "n")
@@ -39,6 +51,9 @@ public class PopCheckPoint implements Comparable<PopCheckPoint> {
     private String cid;
     @JSONField(name = "ro")
     private long reviveOffset;
+    /**
+     * 每条pop消息的offset和起始offset的差值
+     */
     @JSONField(name = "d")
     private List<Integer> queueOffsetDiff;
     @JSONField(name = "bn")

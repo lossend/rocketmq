@@ -35,6 +35,7 @@ public class Producer {
 
         // Uncomment the following line while debugging, namesrvAddr should be set to your local address
         producer.setNamesrvAddr(DEFAULT_NAMESRVADDR);
+        producer.setClientIP("127.0.0.1:8989");
 
         producer.start();
         for (int i = 0; i < 128; i++) {
