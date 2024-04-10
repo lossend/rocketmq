@@ -22,7 +22,7 @@ import java.util.List;
 public class TopicQueueMappingContext  {
     private String topic;
     private Integer globalId;
-    private TopicQueueMappingDetail mappingDetail;
+    private TopicQueueMappingDetail mappingDetail;// mappingDetail == null means this topic is dynamic topic
     private List<LogicQueueMappingItem> mappingItemList;
     private LogicQueueMappingItem leaderItem;
 

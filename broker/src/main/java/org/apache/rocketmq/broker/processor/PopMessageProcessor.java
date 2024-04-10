@@ -649,6 +649,7 @@ public class PopMessageProcessor implements NettyRequestProcessor {
                     if (brokerController.getBrokerConfig().isPopResponseReturnActualRetryTopic() || !isRetry) {
                         getMessageResult.addMessage(mapedBuffer);
                     } else {
+                        // 这里获取消息的时候已经带上topic信息了
                         List<MessageExt> messageExtList = MessageDecoder.decodesBatch(mapedBuffer.getByteBuffer(),
                             true, false, true);
                         mapedBuffer.release();
