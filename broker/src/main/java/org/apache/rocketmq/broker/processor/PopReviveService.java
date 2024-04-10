@@ -104,6 +104,12 @@ public class PopReviveService extends ServiceThread {
         return shouldRunPopRevive;
     }
 
+    /**
+     * 放入pop的重试队列，按照单个消息投递到重试队列中, consumer 下一次pop就会消费到（因为pop不仅消费原队列，同时也消费对应的重试队列）
+     * @param popCheckPoint
+     * @param messageExt
+     * @return
+     */
     private boolean reviveRetry(PopCheckPoint popCheckPoint, MessageExt messageExt) {
         MessageExtBrokerInner msgInner = new MessageExtBrokerInner();
         if (!popCheckPoint.getTopic().startsWith(MixAll.RETRY_GROUP_TOPIC_PREFIX)) {
@@ -547,6 +553,7 @@ public class PopReviveService extends ServiceThread {
                 POP_LOGGER.info("slave skip commit, revive topic={}, reviveQueueId={}", reviveTopic, queueId);
                 return;
             }
+            // 提交revive topic到offset
             this.brokerController.getConsumerOffsetManager().commitOffset(PopAckConstants.LOCAL_HOST, PopAckConstants.REVIVE_GROUP, reviveTopic, queueId, newOffset);
         }
         reviveOffset = newOffset;
@@ -567,6 +574,11 @@ public class PopReviveService extends ServiceThread {
 
             // retry msg
             long msgOffset = popCheckPoint.ackOffsetByIndex((byte) j);
+            // 根据topic offset queueId brokerName 从原始topic中获取消息
+            CompletableFuture<Pair<Long, Boolean>> future = getBizMessage(popCheckPoint.getTopic(), msgOffset, popCheckPoint.getQueueId(), popCheckPoint.getBrokerName())
+                .thenApply(resultPair -> {
+                    GetMessageStatus getMessageStatus = resultPair.getObject1();
+                    MessageExt message = resultPair.getObject2();
             CompletableFuture<Pair<Long, Boolean>> future = getBizMessage(popCheckPoint, msgOffset)
                 .thenApply(rst -> {
                     MessageExt message = rst.getLeft();
@@ -575,6 +587,7 @@ public class PopReviveService extends ServiceThread {
                             queueId, popCheckPoint.getTopic(), popCheckPoint.getQueueId(), msgOffset, popCheckPoint.getBrokerName(), UtilAll.frontStringAtLeast(rst.getMiddle(), 60), rst.getRight());
                         return new Pair<>(msgOffset, !rst.getRight()); // Pair.object2 means OK or not, Triple.right value means needRetry
                     }
+                    // 恢复到重试队列
                     boolean result = reviveRetry(popCheckPoint, message);
                     return new Pair<>(msgOffset, result);
                 });
@@ -584,7 +597,9 @@ public class PopReviveService extends ServiceThread {
             .whenComplete((v, e) -> {
                 for (CompletableFuture<Pair<Long, Boolean>> future : futureList) {
                     Pair<Long, Boolean> pair = future.getNow(new Pair<>(0L, false));
+                    // 如果恢复到重试队列失败
                     if (!pair.getObject2()) {
+                        // 创建一个新的ck，继续ck
                         rePutCK(popCheckPoint, pair);
                     }
                 }
@@ -596,6 +611,7 @@ public class PopReviveService extends ServiceThread {
                     PopCheckPoint oldCK = entry.getKey();
                     Pair<Long, Boolean> pair = entry.getValue();
                     if (pair.getObject2()) {
+                        // 提交revive topic 的offset
                         brokerController.getConsumerOffsetManager().commitOffset(PopAckConstants.LOCAL_HOST, PopAckConstants.REVIVE_GROUP, reviveTopic, queueId, oldCK.getReviveOffset());
                         inflightReviveRequestMap.remove(oldCK);
                     } else {
@@ -605,6 +621,11 @@ public class PopReviveService extends ServiceThread {
             });
     }
 
+    /**
+     * 回写ck消息到revive topic中, 这里的ck是新的ck，不是老的
+     * @param oldCK
+     * @param pair
+     */
     private void rePutCK(PopCheckPoint oldCK, Pair<Long, Boolean> pair) {
         int rePutTimes = oldCK.parseRePutTimes();
         if (rePutTimes >= ckRewriteIntervalsInSeconds.length && brokerController.getBrokerConfig().isSkipWhenCKRePutReachMaxTimes()) {
