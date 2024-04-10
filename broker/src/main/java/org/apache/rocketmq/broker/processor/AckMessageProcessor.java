@@ -51,7 +51,7 @@ import org.apache.rocketmq.store.pop.BatchAckMsg;
 public class AckMessageProcessor implements NettyRequestProcessor {
     private static final Logger POP_LOGGER = LoggerFactory.getLogger(LoggerName.ROCKETMQ_POP_LOGGER_NAME);
     private final BrokerController brokerController;
-    private final String reviveTopic;
+    private final String reviveTopic; // brokername维度
     private final PopReviveService[] popReviveServices;
 
     public AckMessageProcessor(final BrokerController brokerController) {
@@ -237,7 +237,7 @@ public class AckMessageProcessor implements NettyRequestProcessor {
 
         this.brokerController.getBrokerStatsManager().incBrokerAckNums(ackCount);
         this.brokerController.getBrokerStatsManager().incGroupAckNums(consumeGroup, topic, ackCount);
-
+        // 构建AckMsg对象
         ackMsg.setConsumerGroup(consumeGroup);
         ackMsg.setTopic(topic);
         ackMsg.setQueueId(qId);
@@ -246,11 +246,14 @@ public class AckMessageProcessor implements NettyRequestProcessor {
         ackMsg.setPopTime(popTime);
         ackMsg.setBrokerName(brokerName);
 
+        // 内存设置ack
         if (this.brokerController.getPopMessageProcessor().getPopBufferMergeService().addAk(rqId, ackMsg)) {
             brokerController.getPopInflightMessageCounter().decrementInFlightMessageNum(topic, consumeGroup, popTime, qId, ackCount);
             return;
         }
 
+        // 当前broker不是master或者just offset is false(需要持久化时)或者ck不存在时
+        // 把消息发送的revive topic中
         MessageExtBrokerInner msgInner = new MessageExtBrokerInner();
         msgInner.setTopic(reviveTopic);
         msgInner.setBody(JSON.toJSONString(ackMsg).getBytes(DataConverter.CHARSET_UTF8));

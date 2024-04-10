@@ -128,6 +128,13 @@ public class PopInflightMessageCounter {
         });
     }
 
+    /**
+     * 获取在途 pop消息数量
+     * @param topic
+     * @param group
+     * @param queueId
+     * @return
+     */
     public long getGroupPopInFlightMessageNum(String topic, String group, int queueId) {
         Map<Integer /* queueId */, AtomicLong> queueCounter = topicInFlightMessageNum.get(buildKey(topic, group));
         if (queueCounter == null) {
