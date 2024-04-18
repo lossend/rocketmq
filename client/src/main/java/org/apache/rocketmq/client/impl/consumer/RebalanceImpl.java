@@ -163,11 +163,13 @@ public abstract class RebalanceImpl {
             requestBody.getMqSet().add(mq);
 
             try {
+                // 远端broker上锁
                 Set<MessageQueue> lockedMq =
                     this.mQClientFactory.getMQClientAPIImpl().lockBatchMQ(findBrokerResult.getBrokerAddr(), requestBody, 1000);
                 for (MessageQueue mmqq : lockedMq) {
                     ProcessQueue processQueue = this.processQueueTable.get(mmqq);
                     if (processQueue != null) {
+                        // 本地处理队列设置上锁
                         processQueue.setLocked(true);
                         processQueue.setLastLockTimestamp(System.currentTimeMillis());
                     }
@@ -211,6 +213,7 @@ public abstract class RebalanceImpl {
                     for (MessageQueue mq : mqs) {
                         ProcessQueue processQueue = this.processQueueTable.get(mq);
                         if (processQueue != null) {
+                            // rebalance后的队列才会加锁
                             if (lockOKMQSet.contains(mq)) {
                                 if (!processQueue.isLocked()) {
                                     log.info("the message queue locked OK, Group: {} {}", this.consumerGroup, mq);
