@@ -131,7 +131,7 @@ public class TimerMessageStore {
     protected volatile long preReadTimeMs;
     protected volatile long commitReadTimeMs;
     protected volatile long currQueueOffset; //only one queue that is 0
-    protected volatile long commitQueueOffset;
+    protected volatile long commitQueueOffset; // 读取rmq_sys_wheel_timer的commitOffset
     protected volatile long lastCommitReadTimeMs;
     protected volatile long lastCommitQueueOffset;
 
@@ -190,7 +190,7 @@ public class TimerMessageStore {
         // timerRollWindow contains the fixed number of slots regardless of precision.
         if (storeConfig.getTimerRollWindowSlot() > slotsTotal - TIMER_BLANK_SLOTS
             || storeConfig.getTimerRollWindowSlot() < 2) {
-            this.timerRollWindowSlots = slotsTotal - TIMER_BLANK_SLOTS;
+            this.timerRollWindowSlots = slotsTotal - TIMER_BLANK_SLOTS; // 7days-60s
         } else {
             this.timerRollWindowSlots = storeConfig.getTimerRollWindowSlot();
         }
@@ -549,6 +549,9 @@ public class TimerMessageStore {
         }
     }
 
+    /**
+     * 移动一个单位精度的时间
+     */
     private void moveReadTime() {
         currReadTimeMs = currReadTimeMs + precisionMs;
         commitReadTimeMs = currReadTimeMs;
@@ -721,18 +724,29 @@ public class TimerMessageStore {
         return false;
     }
 
+    /**
+     * 写入timerlog
+     * @param offsetPy
+     * @param sizePy
+     * @param delayedTime
+     * @param messageExt
+     * @return
+     */
     public boolean doEnqueue(long offsetPy, int sizePy, long delayedTime, MessageExt messageExt) {
         LOGGER.debug("Do enqueue [{}] [{}]", new Timestamp(delayedTime), messageExt);
         //copy the value first, avoid concurrent problem
         long tmpWriteTimeMs = currWriteTimeMs;
+        // 延迟时间delta 大于时间轮盘
         boolean needRoll = delayedTime - tmpWriteTimeMs >= (long) timerRollWindowSlots * precisionMs;
         int magic = MAGIC_DEFAULT;
         if (needRoll) {
             magic = magic | MAGIC_ROLL;
+            // 延迟时间超出部分 < 时间轮盘1/3， 设置为时间轮盘的中间位置
             if (delayedTime - tmpWriteTimeMs - (long) timerRollWindowSlots * precisionMs < (long) timerRollWindowSlots / 3 * precisionMs) {
                 //give enough time to next roll
                 delayedTime = tmpWriteTimeMs + (long) (timerRollWindowSlots / 2) * precisionMs;
             } else {
+                // 延迟时间设置为时间轮盘的末尾slot
                 delayedTime = tmpWriteTimeMs + (long) timerRollWindowSlots * precisionMs;
             }
         }
@@ -753,10 +767,12 @@ public class TimerMessageStore {
         tmpBuffer.putInt(sizePy); //size
         tmpBuffer.putInt(hashTopicForMetrics(realTopic)); //hashcode of real topic
         tmpBuffer.putLong(0); //reserved value, just set to 0 now
+        // 写入timerLog(写磁盘)
         long ret = timerLog.append(tmpBuffer.array(), 0, TimerLog.UNIT_SIZE);
         if (-1 != ret) {
             // If it's a delete message, then slot's total num -1
             // TODO: check if the delete msg is in the same slot with "the msg to be deleted".
+            // 写入时间轮盘对应的slot，数据以链表形式串起来，写磁盘
             timerWheel.putSlot(delayedTime, slot.firstPos == -1 ? ret : slot.firstPos, ret,
                 isDelete ? slot.num - 1 : slot.num + 1, slot.magic);
             addMetric(messageExt, isDelete ? -1 : 1);
@@ -901,8 +917,11 @@ public class TimerMessageStore {
             return -1;
         }
 
+        // 当前时间所在的slot
         Slot slot = timerWheel.getSlot(currReadTimeMs);
+        // 当前slot没有数据
         if (-1 == slot.timeMs) {
+            // 移动一个单位的时间
             moveReadTime();
             return 0;
         }
@@ -917,6 +936,7 @@ public class TimerMessageStore {
             LinkedList<SelectMappedBufferResult> sbrs = new LinkedList<>();
             SelectMappedBufferResult timeSbr = null;
             //read the timer log one by one
+            // 读取相同slot的所有延迟请求
             while (currOffsetPy != -1) {
                 perfCounterTicks.startTick("dequeue_read_timerlog");
                 if (null == timeSbr || timeSbr.getStartOffset() > currOffsetPy) {
@@ -977,6 +997,7 @@ public class TimerMessageStore {
 
             CountDownLatch normalLatch = new CountDownLatch(normalMsgStack.size());
             //read the normal msg
+            // 分批添加到dequeueGetQueue
             for (List<TimerRequest> normalList : splitIntoLists(normalMsgStack)) {
                 for (TimerRequest tr : normalList) {
                     tr.setLatch(normalLatch);
@@ -991,6 +1012,7 @@ public class TimerMessageStore {
             if (!isRunningDequeue()) {
                 return -1;
             }
+            // 处理完当前slot后，读取时间移动一个单位精度时间
             moveReadTime();
         } catch (Throwable t) {
             LOGGER.error("Unknown error in dequeue process", t);
@@ -1288,6 +1310,20 @@ public class TimerMessageStore {
 
     }
 
+    /**
+     * 延迟消息写入到rmq_sys_wheel_timer topic
+     * SendMessageProcessor#sendMessage() ->
+     * 读取rmq_sys_wheel_timer写入到内存队列enqueuePutQueue
+     * TimerEnqueueGetService#run ->
+     * 读内存队列enqueuePutQueue ，写入到timerLog和timerWheel 文件中
+     * TimerEnqueuePutService#run ->
+     * 读取timerWheel写入到内存队列dequeueGetQueue中
+     * TimerDequeueGetService ->
+     * 读取dequeueGetQueue，写入到dequeuePutQueue队列
+     * TimerDequeueGetMessageService ->
+     * 读取dequeuePutQueue队列，写入rmq_sys_wheel_timer或者真实队列
+     * TimerDequeuePutMessageService
+     */
     public class TimerEnqueueGetService extends ServiceThread {
 
         @Override
@@ -1322,6 +1358,9 @@ public class TimerMessageStore {
         return brokerIdentifier;
     }
 
+    /**
+     * 从enqueuePutQueue获取TimeRequest，写入timerlog和timerWheel
+     */
     public class TimerEnqueuePutService extends ServiceThread {
 
         @Override
@@ -1330,7 +1369,7 @@ public class TimerMessageStore {
         }
 
         /**
-         * collect the requests
+         * collect the requests，默认10个
          */
         protected List<TimerRequest> fetchTimerRequests() throws InterruptedException {
             List<TimerRequest> trs = null;
@@ -1356,6 +1395,7 @@ public class TimerMessageStore {
             try {
                 perfCounterTicks.startTick(ENQUEUE_PUT);
                 DefaultStoreMetricsManager.incTimerEnqueueCount(getRealTopic(req.getMsg()));
+                // 当前时间大于延迟时间，跳过timerlog和timerWheel, 直接写入dequeuePutQueue
                 if (shouldRunningDequeue && req.getDelayTime() < currWriteTimeMs) {
                     req.setEnqueueTime(Long.MAX_VALUE);
                     dequeuePutQueue.put(req);
@@ -1398,7 +1438,9 @@ public class TimerMessageStore {
                     holdMomentForUnknownError();
                 }
             }
+            // 更新offset, 单线程
             commitQueueOffset = trs.get(trs.size() - 1).getMsg().getQueueOffset();
+            // 更新当前写时间，感觉是用了一些技巧，让读写时间不要偏离太多，同时不用频繁的获取当前时间
             maybeMoveWriteTime();
         }
 
@@ -1434,6 +1476,7 @@ public class TimerMessageStore {
                         continue;
                     }
                     if (-1 == TimerMessageStore.this.dequeue()) {
+                        // 等待1/10延迟精度的时间
                         waitForRunning(100L * precisionMs / 1000);
                     }
                 } catch (Throwable e) {
@@ -1495,6 +1538,8 @@ public class TimerMessageStore {
                                 }
                                 addMetric(msgExt, -1);
                                 MessageExtBrokerInner msg = convert(msgExt, tr.getEnqueueTime(), needRoll(tr.getMagic()));
+                                // 如果是超过时间轮盘的周期的延迟消息，重新回写到topic rmq_sys_wheel_timer中
+                                // 否则时间到达，写到真实的队列中
                                 doRes = PUT_NEED_RETRY != doPut(msg, needRoll(tr.getMagic()));
                                 while (!doRes && !isStopped()) {
                                     if (!isRunningDequeue()) {
@@ -1642,6 +1687,10 @@ public class TimerMessageStore {
         return (magic & MAGIC_DELETE) != 0;
     }
 
+    /**
+     * 持久化timeerlog、timerwheel刷新数据到磁盘
+     * 持久化TimerCheckpoint， 包括最新的读时间，timerlog commitOffset
+     */
     public class TimerFlushService extends ServiceThread {
         private final SimpleDateFormat sdf = new SimpleDateFormat("MM-dd HH:mm:ss");
 
@@ -1705,6 +1754,7 @@ public class TimerMessageStore {
         if (congestNum >= storeConfig.getTimerCongestNumEachSlot() * 2L) {
             return true;
         }
+        // 如果大于1倍，小于2倍最大相同slot的消息数量
         if (RANDOM.nextInt(1000) > 1000 * (congestNum - storeConfig.getTimerCongestNumEachSlot()) / (storeConfig.getTimerCongestNumEachSlot() + 0.1)) {
             return true;
         }

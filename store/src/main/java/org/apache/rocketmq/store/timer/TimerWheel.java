@@ -139,6 +139,15 @@ public class TimerWheel {
         localBuffer.get().putLong(firstPos);
         localBuffer.get().putLong(lastPos);
     }
+
+    /**
+     * 时间轮盘slot只记录链表的开始和结束，各个节点的prev指针保存在各个节点的数据上
+     * @param timeMs
+     * @param firstPos
+     * @param lastPos
+     * @param num
+     * @param magic
+     */
     public void putSlot(long timeMs, long firstPos, long lastPos, int num, int magic) {
         localBuffer.get().position(getSlotIndex(timeMs) * Slot.SIZE);
         localBuffer.get().putLong(timeMs / precisionMs);

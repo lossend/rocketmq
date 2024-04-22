@@ -126,25 +126,35 @@ public class HookUtils {
         return null;
     }
 
+    /**
+     * 延迟消息处理入口
+     * @param brokerController
+     * @param msg
+     * @return
+     */
     public static PutMessageResult handleScheduleMessage(BrokerController brokerController,
         final MessageExtBrokerInner msg) {
         final int tranType = MessageSysFlag.getTransactionValue(msg.getSysFlag());
         if (tranType == MessageSysFlag.TRANSACTION_NOT_TYPE
             || tranType == MessageSysFlag.TRANSACTION_COMMIT_TYPE) {
             if (!isRolledTimerMessage(msg)) {
+                // 5.x设置延迟时间或者延迟时间戳的消息
                 if (checkIfTimerMessage(msg)) {
                     if (!brokerController.getMessageStoreConfig().isTimerWheelEnable()) {
                         //wheel timer is not enabled, reject the message
                         return new PutMessageResult(PutMessageStatus.WHEEL_TIMER_NOT_ENABLE, null);
                     }
+                    // 统一转化为时间轮盘消息
                     PutMessageResult transformRes = transformTimerMessage(brokerController, msg);
                     if (null != transformRes) {
                         return transformRes;
                     }
                 }
             }
+            // 4.x 设置延迟等级的延迟消息
             // Delay Delivery
             if (msg.getDelayTimeLevel() > 0) {
+                // 统一转化为时间轮盘消息
                 transformDelayLevelMessage(brokerController, msg);
             }
         }
@@ -182,6 +192,7 @@ public class HookUtils {
         int delayLevel = msg.getDelayTimeLevel();
         long deliverMs;
         try {
+            // 延时秒/毫秒转化为具体的timestamp
             if (msg.getProperty(MessageConst.PROPERTY_TIMER_DELAY_SEC) != null) {
                 deliverMs = System.currentTimeMillis() + Long.parseLong(msg.getProperty(MessageConst.PROPERTY_TIMER_DELAY_SEC)) * 1000;
             } else if (msg.getProperty(MessageConst.PROPERTY_TIMER_DELAY_MS) != null) {
@@ -197,6 +208,7 @@ public class HookUtils {
                 return new PutMessageResult(PutMessageStatus.WHEEL_TIMER_MSG_ILLEGAL, null);
             }
 
+            // 精度取整，默认精度是1s
             int timerPrecisionMs = brokerController.getMessageStoreConfig().getTimerPrecisionMs();
             if (deliverMs % timerPrecisionMs == 0) {
                 deliverMs -= timerPrecisionMs;
@@ -211,8 +223,8 @@ public class HookUtils {
             MessageAccessor.putProperty(msg, MessageConst.PROPERTY_REAL_TOPIC, msg.getTopic());
             MessageAccessor.putProperty(msg, MessageConst.PROPERTY_REAL_QUEUE_ID, String.valueOf(msg.getQueueId()));
             msg.setPropertiesString(MessageDecoder.messageProperties2String(msg.getProperties()));
-            msg.setTopic(TimerMessageStore.TIMER_TOPIC);
-            msg.setQueueId(0);
+            msg.setTopic(TimerMessageStore.TIMER_TOPIC); // 写到时间轮盘中
+            msg.setQueueId(0); // 时间轮盘只有一个分区
         } else if (null != msg.getProperty(MessageConst.PROPERTY_TIMER_DEL_UNIQKEY)) {
             return new PutMessageResult(PutMessageStatus.WHEEL_TIMER_MSG_ILLEGAL, null);
         }
