@@ -121,7 +121,7 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
     private final ArrayList<ConsumeMessageHook> consumeMessageHookList = new ArrayList<>();
     private final RPCHook rpcHook;
     private volatile ServiceState serviceState = ServiceState.CREATE_JUST;
-    private MQClientInstance mQClientFactory;// 和broker直接交互的客户
+    private MQClientInstance mQClientFactory; // 和broker直接交互的客户端
     private PullAPIWrapper pullAPIWrapper;
     private volatile boolean pause = false;
     private boolean consumeOrderly = false;
