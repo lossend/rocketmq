@@ -229,6 +229,11 @@ public abstract class RebalanceImpl {
         return true;
     }
 
+    /**
+     * 客户端请求rebalance真正实现
+     * @param isOrder
+     * @return
+     */
     public boolean doRebalance(final boolean isOrder) {
         boolean balanced = true;
         Map<String, SubscriptionData> subTable = this.getSubscriptionInner();
@@ -267,6 +272,12 @@ public abstract class RebalanceImpl {
         return subscriptionInner;
     }
 
+    /**
+     * 客户端rebalance核心逻辑
+     * @param topic
+     * @param isOrder
+     * @return
+     */
     private boolean rebalanceByTopic(final String topic, final boolean isOrder) {
         boolean balanced = true;
         switch (messageModel) {
@@ -428,6 +439,13 @@ public abstract class RebalanceImpl {
         }
     }
 
+    /**
+     * 更新本地的processqueue表，删除、添加
+     * @param topic
+     * @param mqSet
+     * @param isOrder
+     * @return
+     */
     private boolean updateProcessQueueTableInRebalance(final String topic, final Set<MessageQueue> mqSet,
         final boolean needLockMq) {
         boolean changed = false;
@@ -486,6 +504,7 @@ public abstract class RebalanceImpl {
                         log.info("doRebalance, {}, mq already exists, {}", consumerGroup, mq);
                     } else {
                         log.info("doRebalance, {}, add a new mq, {}", consumerGroup, mq);
+                        // 新增队列提交pullrequest
                         PullRequest pullRequest = new PullRequest();
                         pullRequest.setConsumerGroup(consumerGroup);
                         pullRequest.setNextOffset(nextOffset);
@@ -505,6 +524,7 @@ public abstract class RebalanceImpl {
             mQClientFactory.rebalanceLater(500);
         }
 
+        // 请求pullrequest
         this.dispatchPullRequest(pullRequestList, 500);
 
         return changed;
