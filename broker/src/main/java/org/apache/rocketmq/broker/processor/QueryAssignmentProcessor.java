@@ -93,7 +93,7 @@ public class QueryAssignmentProcessor implements NettyRequestProcessor {
     }
 
     /**
-     *
+     * 服务端队列分配逻辑
      */
     private RemotingCommand queryAssignment(ChannelHandlerContext ctx, RemotingCommand request)
         throws RemotingCommandException {

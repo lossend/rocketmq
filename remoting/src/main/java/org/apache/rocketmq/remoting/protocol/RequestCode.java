@@ -217,7 +217,7 @@ public class RequestCode {
 
     public static final int LITE_PULL_MESSAGE = 361;
 
-    public static final int QUERY_ASSIGNMENT = 400;
+    public static final int QUERY_ASSIGNMENT = 400; // 请求broker队列分配
     public static final int SET_MESSAGE_REQUEST_MODE = 401;
     public static final int GET_ALL_MESSAGE_REQUEST_MODE = 402;
 
