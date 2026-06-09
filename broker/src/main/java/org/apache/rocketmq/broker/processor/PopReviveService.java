@@ -575,10 +575,6 @@ public class PopReviveService extends ServiceThread {
             // retry msg
             long msgOffset = popCheckPoint.ackOffsetByIndex((byte) j);
             // 根据topic offset queueId brokerName 从原始topic中获取消息
-            CompletableFuture<Pair<Long, Boolean>> future = getBizMessage(popCheckPoint.getTopic(), msgOffset, popCheckPoint.getQueueId(), popCheckPoint.getBrokerName())
-                .thenApply(resultPair -> {
-                    GetMessageStatus getMessageStatus = resultPair.getObject1();
-                    MessageExt message = resultPair.getObject2();
             CompletableFuture<Pair<Long, Boolean>> future = getBizMessage(popCheckPoint, msgOffset)
                 .thenApply(rst -> {
                     MessageExt message = rst.getLeft();

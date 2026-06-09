@@ -696,14 +696,13 @@ public class PopBufferMergeService extends ServiceThread {
         }
     }
 
-    private void putAckToStore(final PopCheckPointWrapper pointWrapper, byte msgIndex, AtomicInteger count) {
     /**
      * ack行为发送到revive topic中保存
      * @param pointWrapper
      * @param msgIndex
      * @return
      */
-    private boolean putAckToStore(final PopCheckPointWrapper pointWrapper, byte msgIndex) {
+    private void putAckToStore(final PopCheckPointWrapper pointWrapper, byte msgIndex, AtomicInteger count) {
         PopCheckPoint point = pointWrapper.getCk();
         MessageExtBrokerInner msgInner = new MessageExtBrokerInner();
         final AckMsg ackMsg = new AckMsg();
