@@ -1,0 +1,128 @@
+@startuml normal-send
+!theme plain
+skinparam backgroundColor #ffffff
+skinparam shadowing false
+skinparam defaultFontName "Heiti SC"
+skinparam sequence {
+  ArrowColor #2563eb
+  ActorBorderColor #d1d5db
+  ActorBackgroundColor #ffffff
+  ActorFontColor #111827
+  ParticipantBorderColor #d1d5db
+  ParticipantBackgroundColor #ffffff
+  ParticipantFontColor #111827
+  LifeLineBorderColor #d1d5db
+  LifeLineBackgroundColor #ffffff
+  BoxBorderColor #d1d5db
+  BoxBackgroundColor #f9fafb
+  GroupBorderColor #d1d5db
+  GroupBackgroundColor #f9fafb
+}
+
+title 普通消息发送：Java Producer -> Proxy -> Broker -> CommitLog
+autonumber
+
+actor App as "应用线程"
+box "Client / rocketmq-clients" #eef6ff
+participant Producer as "ProducerImpl\nclient/impl/producer"
+participant Route as "PublishingLoadBalancer\nclient/impl/producer"
+participant RPC as "ClientManagerImpl\nRpcClientImpl"
+end box
+box "Proxy / rocketmq/proxy" #eefaf3
+participant ProxyGrpc as "GrpcMessagingApplication\nproxy/grpc/v2"
+participant ProxySend as "SendMessageActivity\nProducerProcessor"
+participant MsgSvc as "MessageService\nCluster / Local"
+end box
+box "Broker / rocketmq/broker" #fff7ed
+participant Broker as "SendMessageProcessor\nbroker/processor"
+end box
+box "Store / rocketmq/store" #f5f3ff
+participant Store as "DefaultMessageStore\nstore"
+end box
+box "CommitLog 写入层 / rocketmq/store" #fff1f2
+participant CL as "CommitLog\nstore"
+participant MF as "MappedFileQueue\nMappedFile"
+participant Flush as "FlushManager\nflush services"
+end box
+box "Disk / broker store path" #f8fafc
+database Disk as "服务端磁盘\ncommitlog files"
+end box
+
+App -> Producer: send(Message)
+activate Producer
+Producer -> Producer: PublishingMessageImpl(message, txEnabled=false)
+note right
+无 messageGroup、deliveryTimestamp、
+liteTopic、priority 时判定为 NORMAL
+end note
+Producer -> Route: getPublishingLoadBalancer(topic)
+Route --> Producer: writable master queues
+Producer -> Route: takeMessageQueues(isolated, maxAttempts)
+Route --> Producer: retry candidates
+Producer -> Producer: wrapSendMessageRequest\nMessageType.NORMAL, body, properties, queueId
+
+Producer -> RPC: sendMessage(endpoints, request, timeout)
+activate RPC
+RPC -> ProxyGrpc: gRPC MessagingService.SendMessage
+deactivate RPC
+
+activate ProxyGrpc
+ProxyGrpc -> ProxySend: producerThreadPoolExecutor
+activate ProxySend
+ProxySend -> ProxySend: validate topic/body/properties
+ProxySend -> ProxySend: v2 Message -> common Message\nset uniqId, bornTimestamp, producerGroup
+ProxySend -> ProxySend: TopicMessageType.validate(NORMAL)
+ProxySend -> MsgSvc: sendMessage(ctx, selectedQueue, messages, header)
+activate MsgSvc
+alt cluster proxy
+  MsgSvc -> Broker: MQClientAPIExt.sendMessageAsync\nRequestCode.SEND_MESSAGE_V2
+else local proxy
+  MsgSvc -> Broker: getSendMessageProcessor().processRequest(...)
+end
+deactivate MsgSvc
+
+activate Broker
+Broker -> Broker: parse SendMessageRequestHeader\nbuild MessageExtBrokerInner
+Broker -> Broker: no transaction flag\nno sharding/delay special transform
+Broker -> Store: asyncPutMessage(msgInner)\nor putMessage(msgInner)
+activate Store
+Store -> Store: execute PutMessageHook list
+Store -> CL: asyncPutMessage(msgInner)
+activate CL
+CL -> CL: set storeTimestamp/bodyCRC\nassign queue offset; encode
+CL -> MF: getLastMappedFile / create if needed
+activate MF
+CL -> MF: appendMessage(encoded msg)
+MF --> CL: AppendMessageResult(wroteOffset, wroteBytes, queueOffset)
+deactivate MF
+
+alt SYNC_FLUSH and waitStoreMsgOK
+  CL -> Flush: GroupCommitService.putRequest(nextOffset)
+  activate Flush
+  Flush -> MF: mappedFileQueue.flush(0)
+  MF -> Disk: mappedByteBuffer.force()\nor fileChannel.force(false)
+  Flush --> CL: PUT_OK or FLUSH_DISK_TIMEOUT
+  deactivate Flush
+else ASYNC_FLUSH
+  CL -> Flush: wakeup flush/commit service
+  Flush --> CL: completed PUT_OK\n后台稍后 force 到磁盘
+  Flush -> Disk: later: flush commitlog
+end
+
+CL --> Store: PutMessageResult
+deactivate CL
+Store --> Broker: PutMessageResult
+deactivate Store
+Broker -> Broker: handlePutMessageResult\nset msgId, queueOffset
+Broker --> ProxySend: SendResult / Remoting response
+deactivate Broker
+ProxySend --> ProxyGrpc: SendMessageResponse(entries)
+deactivate ProxySend
+ProxyGrpc --> RPC: gRPC response
+deactivate ProxyGrpc
+RPC --> Producer: SendMessageResponse
+Producer -> Producer: SendReceiptImpl.processResponseInvocation
+Producer --> App: SendReceipt
+deactivate Producer
+
+@enduml

@@ -1,0 +1,100 @@
+@startuml fifo-send
+!theme plain
+skinparam backgroundColor #ffffff
+skinparam shadowing false
+skinparam defaultFontName "Heiti SC"
+skinparam sequence {
+  ArrowColor #2563eb
+  ActorBorderColor #d1d5db
+  ActorBackgroundColor #ffffff
+  ActorFontColor #111827
+  ParticipantBorderColor #d1d5db
+  ParticipantBackgroundColor #ffffff
+  ParticipantFontColor #111827
+  LifeLineBorderColor #d1d5db
+  LifeLineBackgroundColor #ffffff
+  BoxBorderColor #d1d5db
+  BoxBackgroundColor #f9fafb
+  GroupBorderColor #d1d5db
+  GroupBackgroundColor #f9fafb
+}
+
+title 顺序消息发送：messageGroup -> 固定队列 -> CommitLog
+autonumber
+
+actor App as "应用线程"
+box "Client / rocketmq-clients" #eef6ff
+participant Builder as "MessageBuilder\nclient/message"
+participant Producer as "ProducerImpl\nclient/impl/producer"
+participant Route as "PublishingLoadBalancer\nclient/impl/producer"
+participant RPC as "ClientManager\nRpcClient"
+end box
+box "Proxy / rocketmq/proxy" #eefaf3
+participant ProxySend as "SendMessageActivity\nProducerProcessor"
+participant MsgSvc as "MessageService\nCluster / Local"
+end box
+box "Broker / rocketmq/broker" #fff7ed
+participant Broker as "SendMessageProcessor\nbroker/processor"
+end box
+box "Store / rocketmq/store" #f5f3ff
+participant Store as "DefaultMessageStore\nstore"
+end box
+box "CommitLog 写入层 / rocketmq/store" #fff1f2
+participant CL as "CommitLog\nstore"
+end box
+box "Disk / broker store path" #f8fafc
+database Disk as "服务端磁盘\ncommitlog files"
+end box
+
+App -> Builder: setMessageGroup(group)
+Builder -> Builder: reject coexistence with\nDeliveryTimestamp/Lite/Priority
+App -> Producer: send(message)
+activate Producer
+Producer -> Producer: PublishingMessageImpl -> MessageType.FIFO
+Producer -> Producer: collect messageGroups\nmust be same group
+Producer -> Route: takeMessageQueueByMessageGroup(group)
+Route -> Route: sipHash24(group) % writableMasterQueues
+Route --> Producer: singleton candidate queue
+note right of Producer
+FIFO 发送和重试都只使用该 group
+映射出的同一个 queue
+end note
+Producer -> RPC: SendMessageRequest\nMessageType.FIFO + messageGroup + queueId
+RPC -> ProxySend: gRPC SendMessage
+
+activate ProxySend
+ProxySend -> ProxySend: validate messageGroup
+ProxySend -> ProxySend: put PROPERTY_SHARDING_KEY=messageGroup
+ProxySend -> ProxySend: SendMessageQueueSelector\nconsistentHash(shardingKey)\nselect write queue
+ProxySend -> ProxySend: TopicMessageType.validate(FIFO)
+ProxySend -> MsgSvc: sendMessage(..., selectedQueue, header)
+activate MsgSvc
+MsgSvc -> Broker: SEND_MESSAGE_V2
+deactivate MsgSvc
+
+activate Broker
+Broker -> Broker: build MessageExtBrokerInner\nproperties include SHARDING_KEY
+Broker -> Store: asyncPutMessage / putMessage
+activate Store
+Store -> CL: asyncPutMessage(msgInner)
+activate CL
+CL -> CL: assign queue offset under topicQueueLock\nencode and append
+CL -> Disk: append CommitLog and flush per config
+CL --> Store: PutMessageResult
+deactivate CL
+Store --> Broker: PutMessageResult
+deactivate Store
+Broker --> ProxySend: SendResult(queueOffset)
+deactivate Broker
+ProxySend --> RPC: SendMessageResponse
+deactivate ProxySend
+RPC --> Producer: response
+Producer --> App: SendReceipt
+deactivate Producer
+
+note over Store,CL
+顺序语义依赖同一 messageGroup 固定到同一队列，
+队列内 offset 单调递增；CommitLog 仍是全局追加文件。
+end note
+
+@enduml

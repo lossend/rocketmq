@@ -1,0 +1,109 @@
+@startuml delay-send-retry
+!theme plain
+skinparam backgroundColor #ffffff
+skinparam shadowing false
+skinparam defaultFontName "Heiti SC"
+skinparam sequence {
+  ArrowColor #2563eb
+  ActorBorderColor #d1d5db
+  ActorBackgroundColor #ffffff
+  ActorFontColor #111827
+  ParticipantBorderColor #d1d5db
+  ParticipantBackgroundColor #ffffff
+  ParticipantFontColor #111827
+  LifeLineBorderColor #d1d5db
+  LifeLineBackgroundColor #ffffff
+  BoxBorderColor #d1d5db
+  BoxBackgroundColor #f9fafb
+  GroupBorderColor #d1d5db
+  GroupBackgroundColor #f9fafb
+}
+
+title 延迟消息发送重试：deliveryTimestamp 保持不变，服务端重写到 timer/schedule
+autonumber
+
+actor App as "应用线程"
+box "Client / rocketmq-clients" #eef6ff
+participant Producer as "ProducerImpl\nclient/impl/producer"
+participant Route as "PublishingLoadBalancer\nclient/impl/producer"
+participant RPC as "ClientManager\nRpcClient"
+participant Scheduler as "Client scheduler"
+end box
+box "Proxy / rocketmq/proxy" #eefaf3
+participant Proxy as "SendMessageActivity\nProducerProcessor"
+end box
+box "Broker / rocketmq/broker" #fff7ed
+participant Broker as "SendMessageProcessor\nbroker/processor"
+participant Hook as "HookUtils\nPutMessageHook"
+participant Timer as "ScheduleMessageService\nbroker/schedule"
+end box
+box "Store / rocketmq/store" #f5f3ff
+participant Store as "DefaultMessageStore\nstore"
+end box
+box "CommitLog 写入层 / rocketmq/store" #fff1f2
+participant CL as "CommitLog\nstore"
+end box
+box "Disk / broker store path" #f8fafc
+database Disk as "服务端磁盘\ncommitlog files"
+end box
+
+App -> Producer: send(message with deliveryTimestamp)
+activate Producer
+Producer -> Producer: PublishingMessageImpl\nmessageType=DELAY\nmessageId 只生成一次
+Producer -> Route: takeMessageQueues(isolated, maxAttempts)
+Route --> Producer: 多个 writable queue 候选
+
+loop attempt = 1..maxAttempts
+  Producer -> Producer: mq = candidates[(attempt-1) % size]\ntoProtobuf resets bornTimestamp\nkeeps deliveryTimestamp
+  Producer -> RPC: sendMessage(MessageType.DELAY)
+  RPC -> Proxy: gRPC SendMessage
+  Proxy -> Proxy: fillDelayMessageProperty\nPROPERTY_TIMER_DELIVER_MS\noptional PROPERTY_DELAY_TIME_LEVEL
+  Proxy -> Broker: SEND_MESSAGE_V2
+  Broker -> Broker: build MessageExtBrokerInner
+  Broker -> Store: asyncPutMessage(msg)
+  Store -> Hook: execute HookUtils.handleScheduleMessage
+  alt timer wheel message
+    Hook -> Hook: save REAL_TOPIC / REAL_QUEUE_ID\nrewrite topic to RMQ_SYS_TRANS_TIMER_TOPIC
+  else delay level message
+    Hook -> Hook: save REAL_TOPIC / REAL_QUEUE_ID\nrewrite topic to SCHEDULE_TOPIC_XXXX
+  end
+  Store -> CL: asyncPutMessage(rewritten msg)
+  CL -> Disk: append timer/schedule message
+
+  alt 写入成功并收到 OK 响应
+    Disk --> CL: append result
+    CL --> Store: OK
+    Store --> Broker: OK
+    Broker --> Proxy: SendResult(queueOffset, recallHandle)
+    Proxy --> RPC: SendMessageResponse OK
+    RPC --> Producer: SendReceipt
+    Producer --> App: return SendReceipt
+    break success
+  else 错误或响应丢失
+    RPC --> Producer: ClientException
+    Producer -> Producer: isolate(failed endpoints)
+    alt attempt >= maxAttempts
+      Producer --> App: throw ClientException
+      break failed finally
+    else TooManyRequestsException
+      Producer -> Scheduler: schedule next attempt\nretryPolicy delay
+      Scheduler -> Producer: retry
+    else other failure
+      Producer -> Producer: immediate retry
+    end
+  end
+end
+
+... delivery time arrives ...
+Timer -> Disk: read timer/schedule entry
+Timer -> Store: restore REAL_TOPIC / REAL_QUEUE_ID\nput real message
+Store -> CL: append real-topic message
+CL -> Disk: flush sync or async
+
+note over Producer,Disk
+deliveryTimestamp 是消息属性，重试不会改变它；bornTimestamp 每次 toProtobuf 会更新。
+若服务端已写入 timer/schedule entry 但响应丢失，后续重试可能产生重复定时投递。
+end note
+
+deactivate Producer
+@enduml

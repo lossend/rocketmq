@@ -1,0 +1,96 @@
+@startuml normal-send-retry
+!theme plain
+skinparam backgroundColor #ffffff
+skinparam shadowing false
+skinparam defaultFontName "Heiti SC"
+skinparam sequence {
+  ArrowColor #2563eb
+  ActorBorderColor #d1d5db
+  ActorBackgroundColor #ffffff
+  ActorFontColor #111827
+  ParticipantBorderColor #d1d5db
+  ParticipantBackgroundColor #ffffff
+  ParticipantFontColor #111827
+  LifeLineBorderColor #d1d5db
+  LifeLineBackgroundColor #ffffff
+  BoxBorderColor #d1d5db
+  BoxBackgroundColor #f9fafb
+  GroupBorderColor #d1d5db
+  GroupBackgroundColor #f9fafb
+}
+
+title 普通消息发送重试：候选队列轮转直到写入 CommitLog 或耗尽次数
+autonumber
+
+actor App as "应用线程"
+box "Client / rocketmq-clients" #eef6ff
+participant Producer as "ProducerImpl\nclient/impl/producer"
+participant Route as "PublishingLoadBalancer\nclient/impl/producer"
+participant RPC as "ClientManager\nRpcClient"
+participant Scheduler as "Client scheduler"
+end box
+box "Proxy / rocketmq/proxy" #eefaf3
+participant Proxy as "SendMessageActivity\nProducerProcessor"
+end box
+box "Broker / rocketmq/broker" #fff7ed
+participant Broker as "SendMessageProcessor\nbroker/processor"
+end box
+box "Store / rocketmq/store" #f5f3ff
+participant Store as "DefaultMessageStore\nstore"
+end box
+box "CommitLog 写入层 / rocketmq/store" #fff1f2
+participant CL as "CommitLog\nstore"
+end box
+box "Disk / broker store path" #f8fafc
+database Disk as "服务端磁盘\ncommitlog files"
+end box
+
+App -> Producer: send(normal message)
+activate Producer
+Producer -> Producer: PublishingMessageImpl\nmessageType=NORMAL\nmessageId 只生成一次
+Producer -> Route: takeMessageQueues(isolated, maxAttempts)
+Route --> Producer: 多个 writable master queue 候选
+
+loop attempt = 1..maxAttempts
+  Producer -> Producer: mq = candidates[(attempt-1) % size]\ntoProtobuf resets bornTimestamp
+  Producer -> RPC: sendMessage(endpoints, SendMessageRequest)
+  RPC -> Proxy: gRPC SendMessage
+  Proxy -> Proxy: validate NORMAL\nselect queue / build header
+  Proxy -> Broker: SEND_MESSAGE_V2
+  Broker -> Broker: build MessageExtBrokerInner
+  Broker -> Store: asyncPutMessage(msg)
+  Store -> CL: asyncPutMessage(msg)
+  CL -> Disk: append mapped file\nflush sync or async
+
+  alt 写入成功并收到 OK 响应
+    Disk --> CL: append result
+    CL --> Store: PutMessageResult OK
+    Store --> Broker: OK
+    Broker --> Proxy: SendResult(msgId, queueOffset)
+    Proxy --> RPC: SendMessageResponse OK
+    RPC --> Producer: SendReceipt
+    Producer --> App: return SendReceipt
+    break success
+  else 网络错误、非 OK 状态或响应丢失
+    Proxy --> RPC: exception or error response
+    RPC --> Producer: ClientException
+    Producer -> Producer: doAfter(ERROR)\nisolate(failed endpoints)
+    alt attempt >= maxAttempts
+      Producer --> App: throw ClientException
+      break failed finally
+    else TooManyRequestsException
+      Producer -> Scheduler: schedule next attempt\nretryPolicy delay
+      Scheduler -> Producer: retry
+    else other failure
+      Producer -> Producer: immediate retry
+    end
+  end
+end
+
+note over Producer,Disk
+如果 CommitLog 已写入但 OK 响应在返回途中丢失，下一次重试会再次发送同一个 messageId。
+普通发送路径不在客户端提供 exactly-once 语义。
+end note
+
+deactivate Producer
+@enduml

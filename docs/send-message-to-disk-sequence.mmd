@@ -1,0 +1,112 @@
+%%{init: {"theme": "base", "themeVariables": {"background": "#ffffff", "primaryColor": "#ffffff", "primaryBorderColor": "#d1d5db", "primaryTextColor": "#111827", "lineColor": "#2563eb", "actorBorder": "#d1d5db", "actorBkg": "#ffffff", "actorTextColor": "#111827", "activationBkgColor": "#eff6ff", "activationBorderColor": "#2563eb", "noteBkgColor": "#f9fafb", "noteBorderColor": "#d1d5db", "noteTextColor": "#111827", "fontFamily": "Helvetica Neue, Arial, PingFang SC, Microsoft YaHei, sans-serif"}}}%%
+sequenceDiagram
+    autonumber
+    actor App as 应用线程
+    participant Producer as ProducerImpl<br/>rocketmq-clients
+    participant CM as ClientManagerImpl<br/>RpcClientImpl
+    participant ProxyGrpc as GrpcMessagingApplication<br/>rocketmq/proxy
+    participant ProxySend as SendMessageActivity<br/>ProducerProcessor
+    participant MsgSvc as MessageService<br/>Cluster/Local
+    participant Broker as SendMessageProcessor<br/>rocketmq/broker
+    participant Store as DefaultMessageStore
+    participant CL as CommitLog
+    participant MF as MappedFileQueue<br/>MappedFile
+    participant Flush as FlushManager<br/>Flush services
+    participant Disk as 服务端磁盘<br/>commitlog files
+    participant Reput as ReputMessageService<br/>CQ/Index dispatch
+
+    App->>Producer: send(Message) at ProducerImpl.java:214
+    activate Producer
+    Producer->>Producer: send(singletonList(message), false)
+    Producer->>Producer: build PublishingMessageImpl<br/>校验 topic/type/FIFO group
+    Producer->>Producer: getPublishingLoadBalancer(topic)<br/>选择 MessageQueue 和 broker endpoints
+    Producer->>CM: sendMessage(endpoints, SendMessageRequest, timeout)
+    activate CM
+    CM->>CM: client.sign(); getRpcClient(endpoints)
+    CM->>ProxyGrpc: gRPC MessagingService.SendMessage(request)
+    deactivate CM
+
+    activate ProxyGrpc
+    ProxyGrpc->>ProxySend: producerThreadPoolExecutor 执行 sendMessage(ctx, request)
+    activate ProxySend
+    ProxySend->>ProxySend: validate topic/body/properties<br/>v2 Message -> common Message
+    ProxySend->>ProxySend: select queue; set uniqId;<br/>build SendMessageRequestHeader
+    ProxySend->>MsgSvc: sendMessage(ctx, AddressableMessageQueue, messages, header)
+    activate MsgSvc
+
+    alt Proxy cluster mode
+        MsgSvc->>Broker: MQClientAPIExt.invoke<br/>RequestCode.SEND_MESSAGE_V2 + body
+    else Proxy local mode
+        MsgSvc->>Broker: brokerController.getSendMessageProcessor().processRequest(...)
+    end
+    deactivate MsgSvc
+
+    activate Broker
+    Broker->>Broker: parse header; hooks before;<br/>build MessageExtBrokerInner
+    Broker->>Broker: set body/properties/tagsCode<br/>born/store host, reconsumeTimes
+
+    alt brokerConfig.asyncSendEnable = true
+        Broker->>Store: asyncPutMessage(msgInner)
+        activate Store
+        Store->>CL: asyncPutMessage(msgInner)
+    else brokerConfig.asyncSendEnable = false
+        Broker->>Store: putMessage(msgInner)
+        activate Store
+        Store->>CL: asyncPutMessage(msgInner)<br/>并 wait future
+    end
+
+    activate CL
+    CL->>CL: set storeTimestamp/bodyCRC/version<br/>assign queue offset; encode
+    CL->>MF: get or create last mapped file
+    activate MF
+    CL->>MF: appendMessage(msg, appendCallback)
+    MF->>MF: write encoded message to mmap<br/>or transient writeBuffer/FileChannel
+    MF-->>CL: AppendMessageResult(wroteOffset, wroteBytes, queueOffset)
+    deactivate MF
+    CL->>CL: increase queue offset; build PutMessageResult
+
+    alt SYNC_FLUSH and waitStoreMsgOK
+        CL->>Flush: GroupCommitService.putRequest(nextOffset)
+        activate Flush
+        Flush->>MF: mappedFileQueue.flush(0)
+        activate MF
+        MF->>Disk: mappedByteBuffer.force()<br/>or fileChannel.force(false)
+        Disk-->>MF: data durable to commitlog file
+        MF-->>Flush: flushedWhere >= nextOffset
+        deactivate MF
+        Flush-->>CL: future PUT_OK or FLUSH_DISK_TIMEOUT
+        deactivate Flush
+    else ASYNC_FLUSH
+        CL->>Flush: wakeup flush or commit service
+        activate Flush
+        Flush-->>CL: completed PUT_OK<br/>producer 不等待磁盘 force
+        Flush-->>MF: later: commit writeBuffer to FileChannel
+        Flush-->>MF: later: mappedFileQueue.flush(...)
+        MF-->>Disk: later: force data to commitlog file
+        deactivate Flush
+    end
+
+    CL-->>Store: PutMessageResult
+    deactivate CL
+    Store-->>Broker: PutMessageResult
+    deactivate Store
+
+    Broker->>Broker: handlePutMessageResult<br/>set response code and offsets
+    Broker-->>ProxySend: SendResult / Remoting response
+    deactivate Broker
+    ProxySend-->>ProxyGrpc: SendMessageResponse(entries)
+    deactivate ProxySend
+    ProxyGrpc-->>CM: gRPC SendMessageResponse
+    deactivate ProxyGrpc
+    CM-->>Producer: SendMessageResponse
+    Producer->>Producer: SendReceiptImpl.processResponseInvocation
+    Producer-->>App: SendReceipt(messageId, queueOffset, recallHandle)
+    deactivate Producer
+
+    par 消费索引异步构建
+        Reput->>CL: getData(reputFromOffset)
+        CL-->>Reput: commitlog bytes
+        Reput->>Reput: checkMessageAndReturnSize -> DispatchRequest
+        Reput->>Store: doDispatch(dispatchRequest)
+        Store->>Disk: ConsumeQueue / Index files are updated asynchronously
+    end

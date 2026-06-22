@@ -1,0 +1,97 @@
+@startuml fifo-send-retry
+!theme plain
+skinparam backgroundColor #ffffff
+skinparam shadowing false
+skinparam defaultFontName "Heiti SC"
+skinparam sequence {
+  ArrowColor #2563eb
+  ActorBorderColor #d1d5db
+  ActorBackgroundColor #ffffff
+  ActorFontColor #111827
+  ParticipantBorderColor #d1d5db
+  ParticipantBackgroundColor #ffffff
+  ParticipantFontColor #111827
+  LifeLineBorderColor #d1d5db
+  LifeLineBackgroundColor #ffffff
+  BoxBorderColor #d1d5db
+  BoxBackgroundColor #f9fafb
+  GroupBorderColor #d1d5db
+  GroupBackgroundColor #f9fafb
+}
+
+title 顺序消息发送重试：messageGroup 固定队列，重试不换队列
+autonumber
+
+actor App as "应用线程"
+box "Client / rocketmq-clients" #eef6ff
+participant Producer as "ProducerImpl\nclient/impl/producer"
+participant Route as "PublishingLoadBalancer\nclient/impl/producer"
+participant RPC as "ClientManager\nRpcClient"
+participant Scheduler as "Client scheduler"
+end box
+box "Proxy / rocketmq/proxy" #eefaf3
+participant Proxy as "SendMessageActivity\nQueueSelector"
+end box
+box "Broker / rocketmq/broker" #fff7ed
+participant Broker as "SendMessageProcessor\nbroker/processor"
+end box
+box "Store / rocketmq/store" #f5f3ff
+participant Store as "DefaultMessageStore\nstore"
+end box
+box "CommitLog 写入层 / rocketmq/store" #fff1f2
+participant CL as "CommitLog\nstore"
+end box
+box "Disk / broker store path" #f8fafc
+database Disk as "服务端磁盘\ncommitlog files"
+end box
+
+App -> Producer: send(message with messageGroup)
+activate Producer
+Producer -> Producer: PublishingMessageImpl\nmessageType=FIFO\nmessageId 只生成一次
+Producer -> Route: takeMessageQueueByMessageGroup(group)
+Route -> Route: sipHash24(group) % queueCount
+Route --> Producer: singleton candidate queue
+
+loop attempt = 1..maxAttempts
+  Producer -> Producer: mq = same candidate[0]\ntoProtobuf sets queueId and messageGroup
+  Producer -> RPC: sendMessage(endpoints, request)
+  RPC -> Proxy: gRPC SendMessage
+  Proxy -> Proxy: messageGroup -> PROPERTY_SHARDING_KEY
+  Proxy -> Proxy: QueueSelector consistentHash(shardingKey)\nselect write queue
+  Proxy -> Broker: SEND_MESSAGE_V2
+  Broker -> Broker: build MessageExtBrokerInner\nkeep sharding key property
+  Broker -> Store: asyncPutMessage(msg)
+  Store -> CL: asyncPutMessage(msg)
+  CL -> Disk: append same queue order
+
+  alt 写入成功并收到 OK 响应
+    Disk --> CL: append result
+    CL --> Store: OK
+    Store --> Broker: OK
+    Broker --> Proxy: SendResult(queueOffset)
+    Proxy --> RPC: SendMessageResponse OK
+    RPC --> Producer: SendReceipt
+    Producer --> App: return SendReceipt
+    break success
+  else 错误或响应丢失
+    RPC --> Producer: ClientException
+    Producer -> Producer: isolate(failed endpoints)
+    alt attempt >= maxAttempts
+      Producer --> App: throw ClientException
+      break failed finally
+    else TooManyRequestsException
+      Producer -> Scheduler: schedule next attempt\nretryPolicy delay
+      Scheduler -> Producer: retry same queue
+    else other failure
+      Producer -> Producer: immediate retry same queue
+    end
+  end
+end
+
+note over Producer,Disk
+顺序消息的候选队列只有一个：同一 messageGroup 的每次发送和重试都落到同一队列。
+若服务端已写入但响应丢失，重试仍可能在同一队列追加重复消息。
+end note
+
+deactivate Producer
+@enduml

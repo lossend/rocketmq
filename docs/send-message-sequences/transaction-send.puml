@@ -1,0 +1,154 @@
+@startuml transaction-send
+!theme plain
+skinparam backgroundColor #ffffff
+skinparam shadowing false
+skinparam defaultFontName "Heiti SC"
+skinparam sequence {
+  ArrowColor #2563eb
+  ActorBorderColor #d1d5db
+  ActorBackgroundColor #ffffff
+  ActorFontColor #111827
+  ParticipantBorderColor #d1d5db
+  ParticipantBackgroundColor #ffffff
+  ParticipantFontColor #111827
+  LifeLineBorderColor #d1d5db
+  LifeLineBackgroundColor #ffffff
+  BoxBorderColor #d1d5db
+  BoxBackgroundColor #f9fafb
+  GroupBorderColor #d1d5db
+  GroupBackgroundColor #f9fafb
+}
+
+title 事务消息发送：半消息写入 + commit/rollback 结束事务
+autonumber
+
+actor App as "应用线程"
+box "Client / rocketmq-clients" #eef6ff
+participant Tx as "TransactionImpl\nclient/impl/producer"
+participant Producer as "ProducerImpl\nclient/impl/producer"
+participant RPC as "ClientManagerImpl\nRpcClientImpl"
+end box
+box "Proxy / rocketmq/proxy" #eefaf3
+participant ProxyGrpc as "GrpcMessagingApplication\nproxy/grpc/v2"
+participant ProxySend as "SendMessageActivity\nProducerProcessor"
+participant MsgSvc as "MessageService\nCluster / Local"
+participant TxEndProxy as "EndTransactionActivity\nTransactionProcessor"
+end box
+box "Broker / rocketmq/broker" #fff7ed
+participant Broker as "SendMessageProcessor\nbroker/processor"
+participant TxStore as "TransactionalMessageService\nTransactionalMessageBridge\nbroker/transaction/queue"
+participant EndBroker as "EndTransactionProcessor\nbroker/processor"
+end box
+box "Store / rocketmq/store" #f5f3ff
+participant Store as "DefaultMessageStore\nstore"
+end box
+box "CommitLog 写入层 / rocketmq/store" #fff1f2
+participant CL as "CommitLog\nstore"
+end box
+box "Disk / broker store path" #f8fafc
+database Disk as "服务端磁盘\ncommitlog files"
+end box
+
+== Phase 1: 发送事务半消息 ==
+App -> Producer: beginTransaction()
+Producer --> App: TransactionImpl
+App -> Producer: send(message, transaction)
+activate Producer
+Producer -> Tx: tryAddMessage(message)
+Tx -> Tx: PublishingMessageImpl(txEnabled=true)\nMessageType.TRANSACTION
+Tx --> Producer: publishingMessage
+Producer -> RPC: sendMessage(v2 SendMessageRequest)
+activate RPC
+RPC -> ProxyGrpc: gRPC SendMessage
+deactivate RPC
+
+activate ProxyGrpc
+ProxyGrpc -> ProxySend: sendMessage(ctx, request)
+activate ProxySend
+ProxySend -> ProxySend: buildSysFlag\nTRANSACTION_PREPARED_TYPE
+ProxySend -> ProxySend: put PROPERTY_TRANSACTION_PREPARED=true\nproducerGroup=topic
+ProxySend -> MsgSvc: sendMessage(..., SendMessageRequestHeader)
+activate MsgSvc
+MsgSvc -> Broker: SEND_MESSAGE_V2
+deactivate MsgSvc
+
+activate Broker
+Broker -> Broker: build MessageExtBrokerInner
+Broker -> Broker: detect PROPERTY_TRANSACTION_PREPARED
+Broker -> TxStore: asyncPrepareMessage(msgInner)\nor prepareMessage(msgInner)
+activate TxStore
+TxStore -> TxStore: parseHalfMessageInner\nsave REAL_TOPIC/REAL_QUEUE_ID\nreset transaction sysFlag
+TxStore -> Store: asyncPutMessage(half msg)\ntopic=TRANS_HALF_TOPIC, queueId=0
+activate Store
+Store -> CL: append half message
+activate CL
+CL -> Disk: append CommitLog and flush per config
+CL --> Store: PutMessageResult
+deactivate CL
+Store --> TxStore: PutMessageResult
+deactivate Store
+TxStore --> Broker: PutMessageResult
+deactivate TxStore
+Broker -> Broker: responseHeader.transactionId=uniqId\nmsgId/queueOffset from half msg
+Broker --> ProxySend: SendResult
+deactivate Broker
+ProxySend -> ProxySend: fillTransactionData\nbrokerName, half queueOffset,\ncommitLogOffset, transactionId
+ProxySend --> ProxyGrpc: SendMessageResponse(transactionId)
+deactivate ProxySend
+ProxyGrpc --> RPC: gRPC response
+deactivate ProxyGrpc
+RPC --> Producer: SendMessageResponse
+Producer -> Tx: tryAddReceipt(publishingMessage, receipt)
+Producer --> App: SendReceipt
+deactivate Producer
+
+== Phase 2: 本地事务结束后提交或回滚 ==
+App -> App: execute local transaction
+alt commit
+  App -> Tx: commit()
+else rollback
+  App -> Tx: rollback()
+end
+activate Tx
+Tx -> Producer: endTransaction(endpoints, messageId,\ntransactionId, COMMIT/ROLLBACK)
+activate Producer
+Producer -> RPC: gRPC EndTransactionRequest
+activate RPC
+RPC -> ProxyGrpc: MessagingService.EndTransaction
+deactivate RPC
+ProxyGrpc -> TxEndProxy: endTransaction(ctx, request)
+activate TxEndProxy
+TxEndProxy -> TxEndProxy: validate topic/transactionId\nmap resolution to COMMIT/ROLLBACK
+TxEndProxy -> TxEndProxy: poll transactionData by\nproducerGroup + transactionId\nbuild EndTransactionRequestHeader
+TxEndProxy -> MsgSvc: endTransactionOneway(brokerName, header)
+activate MsgSvc
+MsgSvc -> EndBroker: RequestCode.END_TRANSACTION
+deactivate MsgSvc
+
+activate EndBroker
+alt COMMIT
+  EndBroker -> TxStore: commitMessage(header)\nlookup half by commitLogOffset
+  TxStore --> EndBroker: prepareMessage
+  EndBroker -> EndBroker: restore real topic/queue\nreset sysFlag to COMMIT
+  EndBroker -> Store: sendFinalMessage(msgInner)
+  activate Store
+  Store -> CL: append final message to real topic
+  CL -> Disk: append CommitLog and flush per config
+  CL --> Store: PutMessageResult
+  deactivate Store
+  EndBroker -> TxStore: deletePrepareMessage(half)
+else ROLLBACK
+  EndBroker -> TxStore: rollbackMessage(header)\nlookup half by commitLogOffset
+  TxStore --> EndBroker: prepareMessage
+  EndBroker -> TxStore: deletePrepareMessage(half)
+end
+EndBroker --> TxEndProxy: one-way broker processing result
+deactivate EndBroker
+TxEndProxy --> Producer: EndTransactionResponse OK if proxy call accepted
+deactivate TxEndProxy
+Producer --> Tx: done
+deactivate Producer
+Tx --> App: done
+deactivate Tx
+
+@enduml

@@ -1,0 +1,139 @@
+@startuml send-message-to-disk-sequence
+!theme plain
+skinparam backgroundColor #ffffff
+skinparam shadowing false
+skinparam defaultFontName "Helvetica Neue, Arial, PingFang SC, Microsoft YaHei, sans-serif"
+skinparam sequence {
+  ArrowColor #2563eb
+  ActorBorderColor #d1d5db
+  ActorBackgroundColor #ffffff
+  ActorFontColor #111827
+  ParticipantBorderColor #d1d5db
+  ParticipantBackgroundColor #ffffff
+  ParticipantFontColor #111827
+  LifeLineBorderColor #d1d5db
+  LifeLineBackgroundColor #ffffff
+  BoxBorderColor #d1d5db
+  BoxBackgroundColor #f9fafb
+  GroupBorderColor #d1d5db
+  GroupBackgroundColor #f9fafb
+}
+
+title RocketMQ Java Producer send 到服务端磁盘主路径
+autonumber
+
+actor App as "应用线程"
+participant Producer as "ProducerImpl\nrocketmq-clients"
+participant CM as "ClientManagerImpl\nRpcClientImpl"
+participant ProxyGrpc as "GrpcMessagingApplication\nrocketmq/proxy"
+participant ProxySend as "SendMessageActivity\nProducerProcessor"
+participant MsgSvc as "MessageService\nCluster/Local"
+participant Broker as "SendMessageProcessor\nrocketmq/broker"
+participant Store as "DefaultMessageStore"
+participant CL as "CommitLog"
+participant MF as "MappedFileQueue\nMappedFile"
+participant Flush as "FlushManager\nFlush services"
+database Disk as "服务端磁盘\ncommitlog files"
+participant Reput as "ReputMessageService\nCQ/Index dispatch"
+
+App -> Producer: send(Message)\nProducerImpl.java:214
+activate Producer
+Producer -> Producer: send(singletonList(message), false)
+Producer -> Producer: build PublishingMessageImpl\n校验 topic/type/FIFO group
+Producer -> Producer: getPublishingLoadBalancer(topic)\n选择 MessageQueue 和 broker endpoints
+Producer -> CM: sendMessage(endpoints, SendMessageRequest, timeout)
+activate CM
+CM -> CM: client.sign(); getRpcClient(endpoints)
+CM -> ProxyGrpc: gRPC MessagingService.SendMessage(request)
+deactivate CM
+
+activate ProxyGrpc
+ProxyGrpc -> ProxySend: producerThreadPoolExecutor\nsendMessage(ctx, request)
+activate ProxySend
+ProxySend -> ProxySend: validate topic/body/properties\nv2 Message -> common Message
+ProxySend -> ProxySend: select queue; set uniqId\nbuild SendMessageRequestHeader
+ProxySend -> MsgSvc: sendMessage(ctx, queue, messages, header)
+activate MsgSvc
+
+alt Proxy cluster mode
+  MsgSvc -> Broker: MQClientAPIExt.invoke\nRequestCode.SEND_MESSAGE_V2 + body
+else Proxy local mode
+  MsgSvc -> Broker: brokerController.getSendMessageProcessor().processRequest(...)
+end
+deactivate MsgSvc
+
+activate Broker
+Broker -> Broker: parse header; execute hooks before\nbuild MessageExtBrokerInner
+Broker -> Broker: set body/properties/tagsCode\nborn/store host, reconsumeTimes
+
+alt brokerConfig.asyncSendEnable = true
+  Broker -> Store: asyncPutMessage(msgInner)
+  activate Store
+  Store -> CL: asyncPutMessage(msgInner)
+else brokerConfig.asyncSendEnable = false
+  Broker -> Store: putMessage(msgInner)
+  activate Store
+  Store -> CL: asyncPutMessage(msgInner)\nthen wait future
+end
+
+activate CL
+CL -> CL: set storeTimestamp/bodyCRC/version\nassign queue offset; encode
+CL -> MF: get or create last mapped file
+activate MF
+CL -> MF: appendMessage(msg, appendCallback)
+MF -> MF: write encoded message to mmap\nor transient writeBuffer/FileChannel
+MF --> CL: AppendMessageResult\nwroteOffset/wroteBytes/queueOffset
+deactivate MF
+CL -> CL: increase queue offset\nbuild PutMessageResult
+
+alt SYNC_FLUSH and waitStoreMsgOK
+  CL -> Flush: GroupCommitService.putRequest(nextOffset)
+  activate Flush
+  Flush -> MF: mappedFileQueue.flush(0)
+  activate MF
+  MF -> Disk: mappedByteBuffer.force()\nor fileChannel.force(false)
+  Disk --> MF: durable in commitlog file
+  MF --> Flush: flushedWhere >= nextOffset
+  deactivate MF
+  Flush --> CL: future PUT_OK\nor FLUSH_DISK_TIMEOUT
+  deactivate Flush
+else ASYNC_FLUSH
+  CL -> Flush: wakeup flush or commit service
+  activate Flush
+  Flush --> CL: completed PUT_OK\nproducer does not wait for force()
+  Flush -> MF: later: commit writeBuffer to FileChannel
+  Flush -> MF: later: mappedFileQueue.flush(...)
+  MF -> Disk: later: force data to commitlog file
+  deactivate Flush
+end
+
+CL --> Store: PutMessageResult
+deactivate CL
+Store --> Broker: PutMessageResult
+deactivate Store
+
+Broker -> Broker: handlePutMessageResult\nset response code and offsets
+Broker --> ProxySend: SendResult / Remoting response
+deactivate Broker
+ProxySend --> ProxyGrpc: SendMessageResponse(entries)
+deactivate ProxySend
+ProxyGrpc --> CM: gRPC SendMessageResponse
+deactivate ProxyGrpc
+CM --> Producer: SendMessageResponse
+Producer -> Producer: SendReceiptImpl.processResponseInvocation
+Producer --> App: SendReceipt(messageId, queueOffset, recallHandle)
+deactivate Producer
+
+== 消费索引异步构建，不是 producer send 主等待路径 ==
+Reput -> CL: getData(reputFromOffset)
+CL --> Reput: commitlog bytes
+Reput -> Reput: checkMessageAndReturnSize\n-> DispatchRequest
+Reput -> Store: doDispatch(dispatchRequest)
+Store -> Disk: update ConsumeQueue / Index files asynchronously
+
+note over Disk
+默认 commitlog 目录: ${user.home}/store/commitlog
+默认单文件大小: 1 GiB
+end note
+
+@enduml

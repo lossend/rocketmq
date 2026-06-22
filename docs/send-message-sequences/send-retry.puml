@@ -1,0 +1,103 @@
+@startuml send-retry
+!theme plain
+skinparam backgroundColor #ffffff
+skinparam shadowing false
+skinparam defaultFontName "Heiti SC"
+skinparam sequence {
+  ArrowColor #2563eb
+  ActorBorderColor #d1d5db
+  ActorBackgroundColor #ffffff
+  ActorFontColor #111827
+  ParticipantBorderColor #d1d5db
+  ParticipantBackgroundColor #ffffff
+  ParticipantFontColor #111827
+  LifeLineBorderColor #d1d5db
+  LifeLineBackgroundColor #ffffff
+  BoxBorderColor #d1d5db
+  BoxBackgroundColor #f9fafb
+  GroupBorderColor #d1d5db
+  GroupBackgroundColor #f9fafb
+}
+
+title 发送重试：ProducerImpl.send0 失败后的客户端重试循环
+autonumber
+
+actor App as "应用线程"
+box "Client / rocketmq-clients" #eef6ff
+participant Producer as "ProducerImpl\nclient/impl/producer"
+participant Route as "PublishingLoadBalancer\nclient/impl/producer"
+participant RPC as "ClientManager\nRpcClient"
+participant Checker as "SendReceiptImpl\nStatusChecker"
+participant Scheduler as "Client scheduler"
+end box
+box "Proxy / rocketmq/proxy" #eefaf3
+participant Proxy as "SendMessageActivity\nProducerProcessor"
+end box
+box "Broker / rocketmq/broker" #fff7ed
+participant Broker as "SendMessageProcessor\nbroker/processor"
+end box
+box "Store / rocketmq/store" #f5f3ff
+participant Store as "DefaultMessageStore\nstore"
+end box
+box "CommitLog 写入层 / rocketmq/store" #fff1f2
+participant CL as "CommitLog\nMappedFile"
+end box
+box "Disk / broker store path" #f8fafc
+database Disk as "服务端磁盘\ncommitlog files"
+end box
+
+App -> Producer: send(message)
+activate Producer
+Producer -> Producer: refine PublishingMessageImpl\nmessageId generated once
+Producer -> Route: get route and prepare candidates
+alt 普通/延迟/事务半消息
+  Route --> Producer: takeMessageQueues(isolated, maxAttempts)\n多个 broker/queue 候选
+else 顺序消息
+  Route --> Producer: singleton queue from\nmessageGroup hash
+end
+
+loop attempt = 1..maxAttempts
+  Producer -> Producer: mq = candidates[(attempt-1) % size]
+  Producer -> Producer: wrapSendMessageRequest\nbornTimestamp reset each attempt\nmessageId unchanged
+  Producer -> RPC: sendMessage(endpoints, request, timeout)
+  RPC -> Proxy: gRPC SendMessage
+  Proxy -> Broker: SEND_MESSAGE_V2
+  Broker -> Store: asyncPutMessage / putMessage
+  Store -> CL: asyncPutMessage
+  CL -> Disk: append and flush per config
+  alt server/proxy returns OK
+    Disk --> CL: append result
+    CL --> Store: PutMessageResult OK
+    Store --> Broker: OK
+    Broker --> Proxy: SendResult
+    Proxy --> RPC: SendMessageResponse OK
+    RPC --> Checker: processResponseInvocation
+    Checker --> Producer: SendReceipt list
+    Producer -> Producer: doAfter(SEND, OK)
+    Producer --> App: SendReceipt
+    break success
+  else network error or non-OK status
+    Proxy --> RPC: exception or error response
+    RPC --> Checker: processResponseInvocation
+    Checker --> Producer: throws ClientException\nTooManyRequests maps specially
+    Producer -> Producer: doAfter(SEND, ERROR)\nisolate(failed endpoints)
+    alt attempt >= maxAttempts
+      Producer --> App: ClientException
+      break failed finally
+    else t is TooManyRequestsException
+      Producer -> Producer: delay = retryPolicy.getNextAttemptDelay(nextAttempt)
+      Producer -> Scheduler: schedule send0(nextAttempt)
+      Scheduler -> Producer: retry after delay
+    else other failure
+      Producer -> Producer: immediate send0(nextAttempt)
+    end
+  end
+end
+deactivate Producer
+
+note over Producer,Disk
+如果第一次请求已在服务端写入但响应丢失，后续重试可能再次写入。
+客户端复用同一个 messageId，但发送路径本身不把“响应丢失后重试”变成 exactly-once。
+end note
+
+@enduml

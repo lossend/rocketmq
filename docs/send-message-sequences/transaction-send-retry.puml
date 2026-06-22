@@ -1,0 +1,122 @@
+@startuml transaction-send-retry
+!theme plain
+skinparam backgroundColor #ffffff
+skinparam shadowing false
+skinparam defaultFontName "Heiti SC"
+skinparam sequence {
+  ArrowColor #2563eb
+  ActorBorderColor #d1d5db
+  ActorBackgroundColor #ffffff
+  ActorFontColor #111827
+  ParticipantBorderColor #d1d5db
+  ParticipantBackgroundColor #ffffff
+  ParticipantFontColor #111827
+  LifeLineBorderColor #d1d5db
+  LifeLineBackgroundColor #ffffff
+  BoxBorderColor #d1d5db
+  BoxBackgroundColor #f9fafb
+  GroupBorderColor #d1d5db
+  GroupBackgroundColor #f9fafb
+}
+
+title 事务消息发送重试：重试发送半消息，成功后再 EndTransaction
+autonumber
+
+actor App as "应用线程"
+box "Client / rocketmq-clients" #eef6ff
+participant Tx as "TransactionImpl\nclient/impl/producer"
+participant Producer as "ProducerImpl\nclient/impl/producer"
+participant Route as "PublishingLoadBalancer\nclient/impl/producer"
+participant RPC as "ClientManager\nRpcClient"
+participant Scheduler as "Client scheduler"
+end box
+box "Proxy / rocketmq/proxy" #eefaf3
+participant Proxy as "SendMessageActivity\nProducerProcessor"
+end box
+box "Broker / rocketmq/broker" #fff7ed
+participant Broker as "SendMessageProcessor\nbroker/processor"
+participant Bridge as "TransactionalMessageBridge\nbroker/transaction/queue"
+participant EndTx as "EndTransactionProcessor\nbroker/processor"
+end box
+box "Store / rocketmq/store" #f5f3ff
+participant Store as "DefaultMessageStore\nstore"
+end box
+box "CommitLog 写入层 / rocketmq/store" #fff1f2
+participant CL as "CommitLog\nstore"
+end box
+box "Disk / broker store path" #f8fafc
+database Disk as "服务端磁盘\ncommitlog files"
+end box
+
+App -> Producer: beginTransaction()
+Producer --> App: TransactionImpl
+App -> Producer: send(message, transaction)
+activate Producer
+Producer -> Tx: tryAddMessage(message)
+Tx --> Producer: PublishingMessageImpl\nmessageType=TRANSACTION
+Producer -> Route: takeMessageQueues(isolated, maxAttempts)
+Route --> Producer: 半消息候选队列
+
+loop half message attempt = 1..maxAttempts
+  Producer -> Producer: mq = candidates[(attempt-1) % size]\ntoProtobuf resets bornTimestamp\nmessageId unchanged
+  Producer -> RPC: sendMessage(MessageType.TRANSACTION)
+  RPC -> Proxy: gRPC SendMessage
+  Proxy -> Proxy: set TRANSACTION_PREPARED_TYPE\nPROPERTY_TRANSACTION_PREPARED=true
+  Proxy -> Broker: SEND_MESSAGE_V2
+  Broker -> Broker: detect prepared transaction flag
+  Broker -> Bridge: asyncPrepareMessage(msg)
+  Bridge -> Bridge: save REAL_TOPIC / REAL_QUEUE_ID\nrewrite topic to half topic
+  Bridge -> Store: asyncPutMessage(half msg)
+  Store -> CL: asyncPutMessage(half msg)
+  CL -> Disk: append half message
+
+  alt 半消息写入成功并返回事务数据
+    Disk --> CL: append result
+    CL --> Store: PutMessageResult OK
+    Store --> Bridge: OK
+    Bridge --> Broker: OK
+    Broker --> Proxy: SendResult(transactionId, offsets)
+    Proxy -> Proxy: fillTransactionData\nrecord half offsets by transactionId
+    Proxy --> RPC: SendMessageResponse OK
+    RPC --> Producer: SendReceipt(transactionId)
+    Producer -> Tx: tryAddReceipt(message, receipt)
+    Producer --> App: SendReceipt
+    break half send success
+  else 错误或响应丢失
+    RPC --> Producer: ClientException
+    Producer -> Producer: isolate(failed endpoints)
+    alt attempt >= maxAttempts
+      Producer --> App: throw ClientException\ntransaction has no usable receipt
+      break failed finally
+    else TooManyRequestsException
+      Producer -> Scheduler: schedule next attempt\nretryPolicy delay
+      Scheduler -> Producer: retry
+    else other failure
+      Producer -> Producer: immediate retry
+    end
+  end
+end
+
+alt 应用本地事务提交
+  App -> Tx: commit()
+  Tx -> Producer: endTransaction(COMMIT)
+  Producer -> RPC: EndTransactionRequest(messageId, transactionId)
+  RPC -> Proxy: gRPC EndTransaction
+  Proxy -> EndTx: END_TRANSACTION
+  EndTx -> Disk: read half by offset\nwrite final real-topic message\nmark half consumed
+else 应用本地事务回滚
+  App -> Tx: rollback()
+  Tx -> Producer: endTransaction(ROLLBACK)
+  Producer -> RPC: EndTransactionRequest(messageId, transactionId)
+  RPC -> Proxy: gRPC EndTransaction
+  Proxy -> EndTx: END_TRANSACTION
+  EndTx -> Disk: read half by offset\nmark half consumed only
+end
+
+note over Producer,Disk
+重试只发生在半消息发送阶段。若某次半消息已落盘但响应丢失，后续重试可能再写一条半消息；
+客户端最终只把成功返回的 transactionId 绑定到 TransactionImpl。
+end note
+
+deactivate Producer
+@enduml

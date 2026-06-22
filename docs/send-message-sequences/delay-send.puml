@@ -1,0 +1,110 @@
+@startuml delay-send
+!theme plain
+skinparam backgroundColor #ffffff
+skinparam shadowing false
+skinparam defaultFontName "Heiti SC"
+skinparam sequence {
+  ArrowColor #2563eb
+  ActorBorderColor #d1d5db
+  ActorBackgroundColor #ffffff
+  ActorFontColor #111827
+  ParticipantBorderColor #d1d5db
+  ParticipantBackgroundColor #ffffff
+  ParticipantFontColor #111827
+  LifeLineBorderColor #d1d5db
+  LifeLineBackgroundColor #ffffff
+  BoxBorderColor #d1d5db
+  BoxBackgroundColor #f9fafb
+  GroupBorderColor #d1d5db
+  GroupBackgroundColor #f9fafb
+}
+
+title 延迟消息发送：deliveryTimestamp -> timer/schedule topic -> CommitLog
+autonumber
+
+actor App as "应用线程"
+box "Client / rocketmq-clients" #eef6ff
+participant Builder as "MessageBuilder\nclient/message"
+participant Producer as "ProducerImpl\nclient/impl/producer"
+participant RPC as "ClientManager\nRpcClient"
+end box
+box "Proxy / rocketmq/proxy" #eefaf3
+participant ProxySend as "SendMessageActivity\nProducerProcessor"
+participant MsgSvc as "MessageService\nCluster / Local"
+end box
+box "Broker / rocketmq/broker" #fff7ed
+participant Broker as "SendMessageProcessor\nbroker/processor"
+participant Hook as "HookUtils.handleScheduleMessage\nbroker/util"
+participant Timer as "ScheduleMessageService\nbroker/schedule"
+end box
+box "Store / rocketmq/store" #f5f3ff
+participant Store as "DefaultMessageStore\nstore"
+end box
+box "CommitLog 写入层 / rocketmq/store" #fff1f2
+participant CL as "CommitLog\nstore"
+end box
+box "Disk / broker store path" #f8fafc
+database Disk as "服务端磁盘\ncommitlog files"
+end box
+
+App -> Builder: setDeliveryTimestamp(deliverMs)
+Builder -> Builder: reject coexistence with\nmessageGroup/Lite/Priority
+App -> Producer: send(message)
+activate Producer
+Producer -> Producer: PublishingMessageImpl -> MessageType.DELAY
+Producer -> RPC: SendMessageRequest\nMessageType.DELAY + deliveryTimestamp
+RPC -> ProxySend: gRPC SendMessage
+
+activate ProxySend
+ProxySend -> ProxySend: validate deliveryTimestamp <= maxDelay
+ProxySend -> ProxySend: fillDelayMessageProperty
+alt proxy useDelayLevel=true
+  ProxySend -> ProxySend: PROPERTY_DELAY_TIME_LEVEL=computeDelayLevel(deliverMs)
+end
+ProxySend -> ProxySend: PROPERTY_TIMER_DELIVER_MS=deliverMs
+ProxySend -> ProxySend: TopicMessageType.validate(DELAY)
+ProxySend -> MsgSvc: sendMessage(..., header)
+activate MsgSvc
+MsgSvc -> Broker: SEND_MESSAGE_V2
+deactivate MsgSvc
+
+activate Broker
+Broker -> Broker: build MessageExtBrokerInner\nproperties include TIMER_DELIVER_MS\nand maybe DELAY level
+Broker -> Store: asyncPutMessage / putMessage
+activate Store
+Store -> Hook: executeBeforePutMessage(msgInner)
+activate Hook
+alt timer timestamp path
+  Hook -> Hook: checkIfTimerMessage=true
+  Hook -> Hook: transformTimerMessage\nset TIMER_OUT_MS, REAL_TOPIC, REAL_QUEUE_ID
+  Hook -> Hook: topic=rmq_sys_wheel_timer\nqueueId=0
+else delay level path
+  Hook -> Hook: transformDelayLevelMessage\nset REAL_TOPIC, REAL_QUEUE_ID
+  Hook -> Hook: topic=SCHEDULE_TOPIC_XXXX\nqueueId=delayLevel2QueueId(level)
+end
+Hook --> Store: transformed msg or error
+deactivate Hook
+
+Store -> CL: asyncPutMessage(transformed msg)
+activate CL
+CL -> Disk: append system-topic message\nand flush per config
+CL --> Store: PutMessageResult
+deactivate CL
+Store --> Broker: PutMessageResult
+deactivate Store
+Broker -> Broker: attach recallHandle if TIMER_OUT_MS exists
+Broker --> ProxySend: SendResult / recallHandle
+deactivate Broker
+ProxySend --> RPC: SendMessageResponse
+deactivate ProxySend
+RPC --> Producer: response
+Producer --> App: SendReceipt(recallHandle optional)
+deactivate Producer
+
+... 到达投递时间后，异步从系统 topic 投递到真实 topic ...
+Timer -> Store: read timer/schedule queue
+Timer -> Store: restore REAL_TOPIC/REAL_QUEUE_ID\nputMessage(real topic)
+Store -> CL: append final visible message
+CL -> Disk: append CommitLog and flush per config
+
+@enduml
