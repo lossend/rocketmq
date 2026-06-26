@@ -1,0 +1,4 @@
+{"ts":"2026-06-26T17:15:57.861Z","hook":"session-init","projectRoot":"/Users/lossend/opensource/rocketmq","gitBranch":"develop"}
+{"ts":"2026-06-26T17:16:32.483Z","hook":"iteration-context","action":"skip","iterationCount":1}
+{"ts":"2026-06-26T17:16:32.483Z","hook":"dev-rules-reminder","action":"inject","iterationCount":0}
+{"ts":"2026-06-26T17:17:42.738Z","hook":"iteration-context","action":"skip","iterationCount":2}
