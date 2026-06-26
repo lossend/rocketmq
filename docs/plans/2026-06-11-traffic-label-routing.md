@@ -91,6 +91,104 @@ labelState(messageTrafficLabel, routeContext):
 
 直连 remoting 路径没有 Proxy 集群快照，只能使用 Broker 本地 `ConsumerManager#hasConsumerWithTrafficLabel(group, topic, label)`。这条路径无法天然覆盖“Consumer 连到其他 Proxy”的情况，所以 Java 5.x + Proxy v1 必须走 `PROXY_SNAPSHOT`。
 
+### 两类 Consumer 消费流程图
+
+以下流程图都以 POP 为入口，在流程内部区分标准消息和隔离消息。非 FIFO 的“跳过”表示先写 deferred ledger 再继续扫描；FIFO 不跳过队头。标准消息被隔离 Consumer 跳过时，deferred record 的 `messageTrafficLabel` 为空，只能被标准 Consumer 重新取出。
+
+#### 标准 Consumer 读取消息
+
+```mermaid
+flowchart TD
+    A["标准 Consumer 发起 POP<br/>trafficLabel=空"] --> B["Broker 先查 deferred index"]
+    B --> C{"存在标准可消费 deferred?"}
+    C -->|是| D["读取 deferred 原消息"]
+    C -->|否| E["扫描 retry topic / 正常 consume queue"]
+    D --> F{"消息 label 为空?"}
+    E --> F
+    F -->|是| G["DELIVER<br/>标准消息给标准 Consumer"]
+    F -->|否| H{"Proxy 在线 label 快照新鲜?"}
+    H -->|否| I{"是否 FIFO?"}
+    H -->|是| J{"onlineTrafficLabels<br/>包含消息 label?"}
+    J -->|否| G2["DELIVER<br/>隔离消息 fallback 给标准 Consumer"]
+    J -->|是| I
+    I -->|FIFO| K["BLOCK<br/>返回空结果<br/>不推进 offset"]
+    I -->|非 FIFO| L["DEFER<br/>写 deferred record<br/>POP cursor 继续扫描"]
+    L --> E
+    G --> M["写入 POP in-flight/checkpoint"]
+    G2 --> M
+    M --> N["返回给标准 Consumer"]
+    N --> O{"Consumer ack?"}
+    O -->|是| P["ACK 写入 revive topic<br/>消费完成"]
+    O -->|否| Q["invisible time 到期"]
+    Q --> R["PopReviveService 写入 POP retry topic"]
+    R --> A
+```
+
+#### 隔离 Consumer 读取消息
+
+```mermaid
+flowchart TD
+    A["gray1 Consumer 发起 POP<br/>trafficLabel=gray1"] --> B["先查 byLabel deferred<br/>messageTrafficLabel=gray1"]
+    B --> C{"命中 deferred?"}
+    C -->|是| D["按 commitLogOffset/messageSize<br/>读取原消息"]
+    C -->|否| E["扫描 retry topic / 正常 consume queue"]
+    D --> F["重新执行 subscription filter"]
+    E --> G{"消息 label 是 gray1?"}
+    G -->|是| F
+    G -->|否，label 为空| H{"是否 FIFO?"}
+    G -->|否，其他隔离 label| H
+    H -->|FIFO| I["BLOCK<br/>返回空结果<br/>不推进 offset"]
+    H -->|非 FIFO| J["DEFER<br/>按原消息 label 写 deferred record"]
+    J --> E
+    F --> K{"filter 通过?"}
+    K -->|否| E
+    K -->|是| L["DELIVER<br/>匹配隔离消息给 gray1 Consumer"]
+    L --> M["写入 POP in-flight/checkpoint"]
+    M --> N["返回给 gray1 Consumer"]
+    N --> O{"Consumer ack?"}
+    O -->|是| P["ACK 写入 revive topic<br/>消费完成"]
+    O -->|否| Q["invisible time 到期"]
+    Q --> R["PopReviveService 写入 POP retry topic"]
+    R --> S["下一次 POP 重新按最新在线 label 快照判路由"]
+    S --> A
+```
+
+#### 单条消息在 Queue、Retry Queue 和 Deferred Ledger 间流转
+
+```mermaid
+flowchart LR
+    P["Producer 写入消息<br/>标准或隔离 label"] --> NQ["正常 consume queue"]
+
+    NQ --> Scan["POP 扫描候选消息"]
+    RQ["POP retry topic"] --> Scan
+    DL["Deferred Ledger<br/>缓冲不可投递消息"] --> ScanDeferred["POP 前优先查 deferred"]
+    ScanDeferred --> EligibleFromDeferred{"当前 Consumer<br/>是否 eligible?"}
+    EligibleFromDeferred -->|是| Inflight["POP in-flight/checkpoint"]
+    EligibleFromDeferred -->|否| DL
+
+    Scan --> Route{"路由判定"}
+    Route -->|DELIVER| Inflight
+    Route -->|DEFER<br/>非 FIFO| DL
+    Route -->|BLOCK<br/>FIFO| Stay["留在队头<br/>不推进 offset"]
+
+    Inflight --> Ack{"ack?"}
+    Ack -->|是| Done["消费完成<br/>ack 写 revive topic"]
+    Ack -->|否| Invisible["等待 invisible time 到期"]
+    Invisible --> Revive["revive topic<br/>PopCheckPoint 无匹配 ack"]
+    Revive --> Retry["PopReviveService#reviveRetry"]
+    Retry --> RQ
+
+    DL --> Recheck["后续 POP<br/>按最新在线 label 快照重判"]
+    Recheck --> ScanDeferred
+```
+
+关键点：
+
+- `Deferred Ledger` 是非 FIFO 跳过缓冲，不是 retry queue，也不代表消费失败。
+- `POP retry topic` 是 POP in-flight 后未 ack 的失败恢复路径。
+- 从正常 queue 或 retry queue 读到的消息都必须走同一套路由判定；不 eligible 且非 FIFO 时都可以进入 deferred ledger。
+- deferred record 必须记录 `sourceType=NORMAL|RETRY`、`deferStage=FIRST_DEFER|RETRY_DEFER` 以及真实存储位置，避免 retry 消息被 deferred 后回读错队列，也方便区分首次路由跳过和消费失败后的再次路由跳过。
+
 ### 标准 Consumer 遇到有标消息时怎么处理
 
 当标准环境 Consumer 拉取到 `gray1` 消息，且 Broker 基于本次请求携带的 Proxy 集群在线 label 快照判断 `gray1` 隔离 Consumer 在线：
@@ -111,15 +209,136 @@ deferred ledger 是非 FIFO 场景下被跳过消息的二级待投递索引。�
 隔离 Consumer 消费 deferred 消息的流程：
 
 1. `gray1` Consumer 发起 POP，请求携带 `trafficLabel=gray1`。
-2. Broker 在扫描正常 consume queue 前，先查本地 deferred index，条件是 `group/topic/queueId` 匹配且 `messageTrafficLabel == gray1`。
-3. 命中的 deferred record 通过 `commitLogOffset/messageSize` 读取原始消息体，并重新执行 subscription filter。
-4. filter 通过后，把消息放入现有 POP in-flight/checkpoint 流程，返回给 `gray1` Consumer。
-5. record 被成功放入 POP in-flight/checkpoint 后，写删除 tombstone 或删除 deferred record。
-6. 如果 `gray1` Consumer 未 ack，后续仍按 POP invisible/revive/retry 恢复；恢复后再次按最新在线 label 快照判路由。
+2. Broker 在扫描正常 consume queue 前，先查本地 deferred index，条件是 `group/logicalTopic/queueId` 匹配且 `messageTrafficLabel == gray1`。
+3. 命中的 deferred record 通过 `storageTopic/queueId/commitLogOffset/messageSize` 读取原始消息体，并重新执行 subscription filter。
+4. filter 通过后，先把消息放入现有 POP in-flight/checkpoint 流程，再返回给 `gray1` Consumer。
+5. 只有 POP checkpoint 已经持久化成功后，才能写删除 tombstone 或删除 deferred record。
+6. 如果 `gray1` Consumer 未 ack，deferred ledger 不再负责这条消息；后续由 POP invisible/revive/retry 恢复。
+7. revive/retry 后消息重新变为可投递状态，再按最新在线 label 快照判路由。
+8. 如果此时 `gray1` 已离线且 lease 已过期，标准 Consumer 可以 fallback 消费；如果 `gray1` 又上线，则继续优先给 `gray1`。
 
 标准 Consumer 不能抢走仍有在线 owner 的 deferred 消息：标准 Consumer 查询 deferred 时必须检查 `onlineTrafficLabels`，只允许返回“当前快照中没有对应 `messageTrafficLabel` owner”的 record。
 
-deferred record 只负责保存“原始 consume queue 已经被正常 POP cursor 越过，但消息还没有被成功交给某个 eligible Consumer”的状态。消息一旦被放入现有 POP in-flight/checkpoint 流程，deferred record 可以删除，后续失败恢复交给 RocketMQ 现有 POP 不可见时间和 revive/retry 机制。
+deferred record 只负责保存“原始 consume queue 已经被正常 POP cursor 越过，但消息还没有被成功交给某个 eligible Consumer”的状态。消息一旦被持久化放入现有 POP in-flight/checkpoint 流程，deferred record 可以删除，后续失败恢复交给 RocketMQ 现有 POP 不可见时间和 revive/retry 机制。
+
+### Deferred Ledger 组件具体实现
+
+ledger 组件不实现第二套消费队列，只做三件事：记录被路由跳过的消息位置、为 POP 热路径提供可按 label 查询的索引、在消息重新进入 POP checkpoint 后删除这条跳过记录。
+
+不是所有消息都会写 `RMQ_SYS_TRAFFIC_LABEL_DEFERRED_TOPIC`。业务消息仍写原业务 Topic、POP retry topic、延迟/事务内部 Topic 等现有存储路径；deferred topic 只保存“非 FIFO POP 扫描时当前 Consumer 不可消费、但允许跳过”的状态事件。
+
+会写 deferred topic 的情况：
+
+- 标准 Consumer 扫到 `gray1` 消息，且 `gray1` Consumer 在线或在线状态未知，非 FIFO 下写 ACTIVE 后继续扫描。
+- `gray1` Consumer 扫到无 label 标准消息或其他 label 消息，非 FIFO 下写 ACTIVE 后继续扫描。
+- 从 POP retry topic 读到的消息重新判路由后仍不可被当前 Consumer 消费，非 FIFO 下写 ACTIVE。
+
+不会写 deferred topic 的情况：
+
+- 当前 Consumer eligible，消息直接进入 POP checkpoint。
+- FIFO 队头不属于当前 Consumer，只 BLOCK，不创建 deferred record。
+- Producer 普通发送、延迟消息未到期、事务半消息未 commit，这些路径不做消费路由。
+- POP in-flight 后未 ack 的失败恢复，走现有 revive/retry，不写 deferred，除非 retry 消息下次被 POP 扫描时再次路由不匹配。
+
+组件划分：
+
+- `TrafficLabelDeferredRecord`：一条 deferred 状态记录，包含原消息定位、业务 topic、真实存储 topic、消息 label、来源类型和当前状态。
+- `TrafficLabelDeferredStore`：Broker 内部服务，负责写 ACTIVE/TOMBSTONE 事件、重建索引、查询并 claim deferred record。
+- `TrafficLabelDeferredIndex`：本地 RocksDB 索引，只服务查询；源数据不是 RocksDB，而是 commitlog-backed 内部主题。
+
+持久化模型：
+
+```text
+RMQ_SYS_TRAFFIC_LABEL_DEFERRED_TOPIC
+  event key   = recordKey
+  event value = TrafficLabelDeferredRecord
+  event state = ACTIVE | TOMBSTONE
+```
+
+`RMQ_SYS_TRAFFIC_LABEL_DEFERRED_TOPIC` 是 Broker 内部 changelog topic，不是按业务维度消费的队列。逻辑隔离必须按 `topic + consumerGroup` 做，但体现在 `recordKey` 和 RocksDB index 前缀里，不需要为每个 `topic/group` 创建一个物理内部 topic。
+
+也就是说，多个业务 Topic、多个 ConsumerGroup 的 deferred 事件可以写入同一个系统 topic，但每条 record 都带完整维度：
+
+```text
+recordKey = brokerName/group/logicalTopic/storageTopic/queueId/queueOffset
+byLabel   = brokerName/group/logicalTopic/messageTrafficLabel/storageTopic/queueId/queueOffset
+byQueue   = brokerName/group/logicalTopic/storageTopic/queueId/queueOffset
+```
+
+POP 查询只查 RocksDB 的 `group/logicalTopic` 前缀，不扫描内部 topic。因此 `topicA/groupA` 的 deferred record 不会被 `topicB/groupA` 或 `topicA/groupB` 查到。
+
+标准环境 Consumer 不直接读取 `RMQ_SYS_TRAFFIC_LABEL_DEFERRED_TOPIC`。它仍然只对业务 Topic 发 POP 请求；Broker 收到 POP 后在本地 `TrafficLabelDeferredIndex` 做一次前缀查询：
+
+```text
+standard POP(topicA, groupA)
+  -> Broker query RocksDB prefix brokerName/groupA/topicA/*
+  -> 命中 deferred record 后读取原消息位置
+  -> 进入 POP checkpoint
+```
+
+所以 100 个 `topic + consumerGroup` 组合不会变成 100 个 Consumer 同时扫系统 topic，而是变成 Broker 上 100 类 RocksDB 前缀查询。每次查询还有 `trafficLabelDeferredMaxScanPerPop` 上限。
+
+标准 Consumer 发起 POP 时，Broker 确实要先查 deferred ledger，再查 POP retry topic 和正常 consume queue。这里的“先查 deferred ledger”指先用本地 `activeLabelCache` 找到 BLANK 和当前离线 label，再查这些 label 对应的 `byLabel` 索引，并对每条 record 用本次 POP 携带的最新 `onlineTrafficLabels` 重新判定：
+
+```text
+if messageTrafficLabel is blank:
+    deliver to standard consumer
+else if snapshot is fresh and messageTrafficLabel not in onlineTrafficLabels:
+    deliver to standard consumer by fallback
+else:
+    keep deferred and continue scanning within trafficLabelDeferredMaxScanPerPop
+```
+
+如果本轮没有 eligible deferred record，Broker 才继续扫 POP retry topic 和正常 consume queue。
+
+`RMQ_SYS_TRAFFIC_LABEL_DEFERRED_TOPIC` 只被 Broker 内部使用：
+
+- 写入：路由跳过时追加 ACTIVE/TOMBSTONE 事件。
+- 恢复：Broker 启动、index 丢失或主从切换时重放，重建 RocksDB index。
+- 清理：后台根据 TOMBSTONE 和 replay checkpoint 做压缩或过期清理。
+
+它的拥挤风险不是“标准 Consumer 抢读”，而是 deferred 事件写入量和 Broker 恢复重放时间。v1 用多队列系统 topic，按 `positiveHash(recordKey) % writeQueueNums` 分散写入；正常运行时依赖持久 RocksDB index 和 replay offset，不在每次 POP 时重放系统 topic。
+
+不按 `topic + group` 创建内部 topic 的原因很简单：否则隔离环境一多会产生大量系统 topic 和元数据。v1 使用一个系统 topic 多队列承载 changelog，通过 key/index 隔离；如果后续恢复时间或写入吞吐真的成为瓶颈，再把该系统 topic 按固定 shard 数拆分，而不是按业务 topic/group 无限拆分。
+
+同一个 `recordKey` 的 ACTIVE 和 TOMBSTONE 必须写入同一个内部主题队列，例如 `positiveHash(recordKey) % writeQueueNums`，这样 Broker 重放内部主题时可以按写入顺序得到该 record 的最新状态。Broker 正常重启时可以直接加载本地 RocksDB index；index 丢失、Broker 迁移或主从切换时，从内部主题重放 ACTIVE/TOMBSTONE 重建 index。
+
+写入 deferred 的顺序：
+
+```text
+1. POP 扫描到当前 Consumer 不可消费、但非 FIFO 可跳过的消息。
+2. 构造 recordKey = brokerName/group/storageTopic/queueId/queueOffset。
+3. 向内部主题写 ACTIVE event。
+4. ACTIVE 写入成功后，更新 RocksDB byLabel/byQueue 索引。
+5. ACTIVE event 和本地 index 更新都成功后，才允许 POP cursor 继续越过这条消息。
+```
+
+查询和投递 deferred 的顺序：
+
+```text
+1. 本次 POP 先按当前 Consumer label 查询 RocksDB index。
+2. 取出候选 record 后，再用本次请求的 onlineTrafficLabels 重新判定 eligibility。
+3. Broker 用内存 claimedKeys 对 recordKey 做本进程内 claim，避免同一 Broker 并发 POP 重复取同一条 deferred record。
+4. 通过 record 中的 storageTopic/queueId/commitLogOffset/messageSize 读取原消息。
+5. 重新执行 subscription filter。
+6. 写入现有 POP checkpoint。
+7. checkpoint 成功后，写 TOMBSTONE event 并删除本地 index。
+8. TOMBSTONE 成功后返回消息给 Consumer；后续 ack、change invisible、retry、DLQ 走原 POP 流程。
+```
+
+`claimedKeys` 只需要内存态，不需要持久化。Broker 崩溃后 claim 会丢失，但 ACTIVE record 仍在内部主题或 RocksDB 中，消息最多重复投递，不会丢失。这符合 RocketMQ POP 的 at-least-once 语义。
+
+TOMBSTONE 不能早于 POP checkpoint 写入。否则 checkpoint 写失败时，deferred record 已经删除，消息会失去可达性。正确性优先级是“不丢消息”高于“完全避免重复”。因此 v1 不做 ledger 和 POP checkpoint 之间的分布式事务；如果 Broker 在 checkpoint 成功、TOMBSTONE 成功前崩溃，恢复后可能从 deferred ledger 和 POP retry 路径看到同一条消息，属于允许的重复投递窗口。
+
+失败处理：
+
+- ACTIVE event 写失败：当前消息不能被跳过，本次 POP 对该 queue 停止继续扫描并返回已有结果或空结果。
+- RocksDB index 更新失败：不推进 cursor，并同步写 TOMBSTONE 回滚刚才的 ACTIVE event；如果回滚也失败，当前 queue 的 traffic-label POP 必须 fail closed，等恢复任务修复该 record 后再继续。
+- checkpoint 写失败：释放内存 claim，保留 ACTIVE record，后续 POP 可重新读取。
+- TOMBSTONE 写失败：本次不返回这条 deferred 消息给 Consumer，保留内存 claim 并进入限次重试；如果 Broker 崩溃，恢复后可能重复投递，但不会丢消息。
+- TOMBSTONE 已持久化但本地 index 删除失败：保留内存 claim 并后台重试删除；Broker 重启后以内部主题 TOMBSTONE 为准重建索引。
+
+v1 只保存原消息定位，不复制完整消息体。这样写放大最小，也能复用现有 POP checkpoint/revive/retry 逻辑。代价是 deferred record 的最长保留时间必须小于原消息 commitlog 可读时间；需要增加 deferred backlog 年龄指标和告警。如果业务要求隔离 backlog 长时间保留超过消息保留期，后续版本再把 ACTIVE event 扩展为携带完整消息快照的模式。
 
 ### Deferred Ledger 数据结构和高性能查询
 
@@ -128,69 +347,276 @@ deferred ledger 分两层：commitlog-backed 内部主题保存源数据，本�
 源数据 record：
 
 ```text
-key = brokerName/group/topic/queueId/queueOffset
+key = brokerName/group/storageTopic/queueId/queueOffset
 value = {
     brokerName,
     group,
-    topic,
+    logicalTopic,
+    storageTopic,
+    sourceType: NORMAL | RETRY,
+    deferStage: FIRST_DEFER | RETRY_DEFER,
     queueId,
     queueOffset,
     commitLogOffset,
     messageSize,
     messageTrafficLabel,
+    reconsumeTimes,
     storeTimestamp,
     state: ACTIVE | TOMBSTONE
 }
 ```
 
-本地 index 至少维护两类 key：
+本地 index 至少维护三类 key，另有一个可重建的内存 label cache：
 
 ```text
+recordByKey:
+  recordKey -> TrafficLabelDeferredRecord
+
 byLabel:
-  brokerName/group/topic/messageTrafficLabel/queueId/queueOffset -> recordKey
+  brokerName/group/logicalTopic/messageTrafficLabel/storageTopic/queueId/queueOffset -> recordKey
 
 byQueue:
-  brokerName/group/topic/queueId/queueOffset -> recordKey
+  brokerName/group/logicalTopic/storageTopic/queueId/queueOffset -> recordKey
+
+labelStats:
+  brokerName/group/logicalTopic/storageTopic/queueId/messageTrafficLabel -> {activeCount, lastUpdateTimestamp}
+
+activeLabelCache:
+  brokerName/group/logicalTopic/storageTopic/queueId -> labels with activeCount > 0
 ```
 
 多隔离环境下，隔离 Consumer 查询只走 `byLabel` 前缀，不扫其他 label：
 
 ```text
-pollDeferredForIsolation(group, topic, queueId, consumerLabel, maxNum):
-    prefix = brokerName/group/topic/consumerLabel/queueId
-    return first maxNum ACTIVE records ordered by queueOffset
+pollDeferredForIsolation(group, logicalTopic, queueId, consumerLabel, maxNum):
+    scan byLabel prefixes in order:
+        brokerName/group/logicalTopic/consumerLabel/retryStorageTopic/queueId
+        brokerName/group/logicalTopic/consumerLabel/logicalTopic/queueId
+    return first maxNum ACTIVE records, preserving retry-before-normal priority
 ```
 
-标准 Consumer 查询不能扫所有 deferred label。实现上用本次请求的 `onlineTrafficLabels` 做差集过滤：
+标准 Consumer 查询不能扫所有 deferred label。实现上先从内存 `activeLabelCache` 得到当前 queue 有积压的 label，再和本次请求的 `onlineTrafficLabels` 做差集，只扫描当前标准环境可消费的 label：
 
 ```text
-pollDeferredForStandard(group, topic, queueId, onlineTrafficLabels, maxNum):
-    scan byQueue prefix brokerName/group/topic/queueId ordered by queueOffset
-    return first maxNum ACTIVE records where messageTrafficLabel not in onlineTrafficLabels
+pollDeferredForStandard(group, logicalTopic, queueId, onlineTrafficLabels, maxNum):
+    if snapshot missing or expired:
+        eligibleLabels = {BLANK}
+    else:
+        labelsWithBacklog = activeLabelCache.labels(group, logicalTopic, queueId)
+        eligibleLabels = labelsWithBacklog - onlineTrafficLabels
+        eligibleLabels += BLANK
+
+    labels = pick up to trafficLabelDeferredMaxLabelsPerPop by round-robin cursor
+
+    scan byLabel prefixes in order:
+        for label in labels:
+            brokerName/group/logicalTopic/label/retryStorageTopic/queueId
+        for label in labels:
+            brokerName/group/logicalTopic/label/logicalTopic/queueId
+
+    return first maxNum ACTIVE records
 ```
 
-`byQueue` 可能包含多个隔离 label，但它只按当前 queue 的 deferred backlog 顺序扫描，并受 `trafficLabelDeferredMaxScanPerPop` 限制。这样标准 Consumer 不需要按 label 建 N 个查询，也不会扫全 Broker。
+这样当同一个 `topic + consumerGroup` 下有 10 个以上隔离环境时，标准 Consumer 不会扫描仍在线的隔离 label backlog。比如 `gray1..gray10` 都在线，标准 Consumer 只扫 BLANK；如果只有 `gray7` 离线，标准 Consumer 只扫 BLANK 和 `gray7`。
+
+`byQueue` 保留给小 backlog 顺序扫描、诊断和兜底修复，不作为多 label 场景下标准 Consumer 的主查询路径。
+
+`FIRST_DEFER` 和 `RETRY_DEFER` 使用同一套 ledger 和索引，不拆两套存储。查询时 retry storage prefix 排在 normal storage prefix 前面，保证消费失败后的 retry 消息优先重新投递；是否进入 DLQ 仍由 RocketMQ 现有 retry/reconsume 规则决定。
+
+### 超过 10 个隔离环境的性能和容量策略
+
+同一个 `consumerGroup + topic` 下存在标准环境和多个隔离环境时，性能目标是：每个 Consumer 只查自己可能消费的 deferred record，不按隔离环境总数或 deferred 总量线性扫描。
+
+查询复杂度：
+
+- `grayN` 隔离 Consumer：只查 `byLabel(grayN)`，复杂度约为 `O(resultSize)`。
+- 标准 Consumer：用 `activeLabelCache - onlineTrafficLabels` 得到离线 label 集合，只查 BLANK 和离线 label，复杂度约为 `O(resultSize + eligibleLabelCount)`。
+- `onlineTrafficLabels` 在单次 POP 请求开始时解析成 `HashSet`，不要对每条 record 做线性 contains。
+- 每次 POP 最多扫描 `trafficLabelDeferredMaxScanPerPop` 条 record，最多扫描 `trafficLabelDeferredMaxLabelsPerPop` 个 label。
+- `activeLabelCache` 由 ACTIVE/TOMBSTONE 写路径同步更新；Broker 重启时从 RocksDB `labelStats` 重建，不需要每次 POP 扫 RocksDB stats。
+
+写入成本：
+
+- 第一次 defer 一条消息：1 次内部主题 ACTIVE 写入 + 1 个 RocksDB WriteBatch。
+- WriteBatch 至少更新 `recordByKey`、`byLabel`、`byQueue`、`labelStats`，并同步更新内存 `activeLabelCache`。
+- 如果 `recordByKey` 已经存在 ACTIVE，`appendActive` 直接幂等返回，不重复追加索引。
+- TOMBSTONE 成功后用一个 WriteBatch 删除 `recordByKey`、`byLabel`、`byQueue`，递减 `labelStats.activeCount`；计数到 0 时从 `activeLabelCache` 移除该 label。
+
+读取成本：
+
+- 隔离 Consumer 不看其他 label，不看 `byQueue`。
+- 标准 Consumer 不扫描在线 label，只对 BLANK 和离线 label 打开 `byLabel` 前缀 iterator。
+- 每个 label 前缀最多取 `remainingMaxNum` 条；达到 `trafficLabelDeferredMaxScanPerPop` 后立即停止。
+- 多个离线 label 同时有积压时，用每个 `group/topic/queueId` 的 round-robin cursor 轮转，避免某个 label 长期压住其他 label。
+
+不会在正常队列和 deferred ledger 之间反复搬运：
+
+- 消息第一次从正常 consume queue 或 POP retry topic 被判定不可由当前 Consumer 消费时，才写一条 ACTIVE deferred record。
+- 一旦 ACTIVE 写成功，当前 consumer group 的 POP cursor 才能越过原队列位置；后续不会再从正常 consume queue 重新扫描同一个位置。
+- 后续 POP 如果发现该 deferred record 仍不可消费，只保留在 ledger 中，不再写新的 ACTIVE。
+- deferred record 被投递并写入 POP checkpoint 后写 TOMBSTONE；如果 Consumer 未 ack，后续走 POP retry topic。
+- retry 消息如果再次因为路由不匹配进入 deferred，会生成 `sourceType=RETRY` 的新 record；它受 RocketMQ 现有 retry 次数和 DLQ 规则约束，不会无限增长。
+- 同一 `recordKey` 的重复 defer 是 no-op，不会产生多条 ACTIVE。
+
+容量上限：
+
+- deferred ledger 不保存消息 body，只保存原消息 locator 和少量路由字段，active 大小约等于“已被跳过但还没进入 POP checkpoint 的消息数”。
+- 每个 record 以 `recordKey` 幂等，重复扫描 deferred 不会追加新 record。
+- TOMBSTONE 成功后立即删除 RocksDB active index，并减少 `labelStats.activeCount`。
+- 增加硬上限：`trafficLabelDeferredMaxRecordsPerQueue` 和 `trafficLabelDeferredMaxBytesPerBroker`。
+- 达到上限时，Broker 停止继续 deferred 新消息，不推进当前 queue 的 POP cursor；压力回到原 consume queue，而不是让 ledger 无限制膨胀。
+- `trafficLabelDeferredMaxHoldMs` 必须小于原消息保留时间和 deferred 内部 changelog 可恢复时间；超过后告警和限流，不静默 fallback 或删除。
+
+这里有一个必须接受的边界：如果标准 Consumer 持续遇到大量在线隔离 label 的消息，而对应隔离 Consumer 长期消费不过来，系统只能二选一：继续把跳过位置写入 deferred ledger，或者在达到上限后停止跳过并让标准 Consumer 在原 queue 上阻塞。v1 选择后者作为保护策略，不能让 deferred ledger 无限替慢隔离环境缓存。
+
+建议默认值：
+
+```text
+trafficLabelDeferredMaxScanPerPop = min(popMaxMsgNums * 4, 1024)
+trafficLabelDeferredMaxLabelsPerPop = 16
+trafficLabelDeferredMaxRecordsPerQueue = 100000
+trafficLabelDeferredMaxBytesPerBroker = broker disk budget based value
+trafficLabelDeferredMaxHoldMs < messageStoreConfig.fileReservedTime
+```
+
+需要监控的指标：
+
+- `traffic_label_deferred_active_records{topic,group,label}`
+- `traffic_label_deferred_active_bytes{broker}`
+- `traffic_label_deferred_oldest_age_ms{topic,group,label}`
+- `traffic_label_deferred_append_total{result}`
+- `traffic_label_deferred_poll_scan_total{consumerLabel}`
+- `traffic_label_deferred_over_limit_total{limitType}`
+- `traffic_label_deferred_cache_label_count{topic,group,queueId}`
+
+### 多隔离 label 的 Ledger 共享与隔离
+
+`gray1`、`gray2` 等隔离环境共享同一个 deferred ledger 存储组件和同一个内部主题，不为每个 label 创建独立 ledger。隔离靠 record key 和查询前缀完成：
+
+- record 中必须写入 `messageTrafficLabel`。
+- `byLabel` 把 `messageTrafficLabel` 放在 key 前缀中。
+- `gray1` Consumer 只查 `.../messageTrafficLabel=gray1/...` 前缀。
+- `gray2` Consumer 只查 `.../messageTrafficLabel=gray2/...` 前缀。
+- 标准 Consumer 先用 `activeLabelCache - onlineTrafficLabels` 选出 BLANK 和离线 label，再按这些 label 走 `byLabel` 前缀。
+
+示例：
+
+```text
+gray1 Consumer:
+  scan byLabel brokerA/groupA/topicA/gray1/retryTopic/q0/*
+  scan byLabel brokerA/groupA/topicA/gray1/topicA/q0/*
+
+gray2 Consumer:
+  scan byLabel brokerA/groupA/topicA/gray2/retryTopic/q0/*
+  scan byLabel brokerA/groupA/topicA/gray2/topicA/q0/*
+
+standard Consumer:
+  active labels = {BLANK, gray1, gray2}
+  online labels = {gray1}
+  eligible labels = {BLANK, gray2}
+  scan byLabel brokerA/groupA/topicA/BLANK/retryTopic/q0/*
+  scan byLabel brokerA/groupA/topicA/gray2/retryTopic/q0/*
+  scan byLabel brokerA/groupA/topicA/BLANK/topicA/q0/*
+  scan byLabel brokerA/groupA/topicA/gray2/topicA/q0/*
+```
+
+隔离要求：
+
+- `gray1` Consumer 永远不能消费 `gray2` deferred record。
+- `gray2` Consumer 永远不能消费 `gray1` deferred record。
+- 如果 `gray1` 在线、`gray2` 离线，标准 Consumer 只能 fallback 消费 `gray2` deferred record，不能消费 `gray1` deferred record。
+- 如果两个 label 都在线，标准 Consumer 只能消费标准 deferred record。
+- 如果两个 label 都离线，标准 Consumer 可以按 label round-robin fallback 消费两个 label 的 deferred record。
 
 性能约束：
 
 - 隔离 Consumer 查询复杂度约为 `O(resultSize)`，因为 label 已在 key 前缀里。
-- 标准 Consumer 查询复杂度约为 `O(scannedInQueue)`，上限由 `trafficLabelDeferredMaxScanPerPop` 控制。
+- 标准 Consumer 查询复杂度约为 `O(resultSize + eligibleLabelCount)`，不会扫描在线 label backlog。
 - `onlineTrafficLabels` 应在 Broker 收到请求时解析为 `HashSet`，避免每条 record 做线性 contains。
 - record 删除使用 tombstone 写入内部主题，再异步清理本地 index；POP 热路径只做幂等状态检查。
-- 每个 `group/topic/queueId` 可以维护一个 round-robin 或 last-scan cursor，避免大量不 eligible 的 deferred record 长期压在头部导致重复扫描。
+- 每个 `group/topic/queueId` 维护一个 label round-robin cursor，避免某个离线 label 长期压住其他离线 label。
 - 如果某个 queue 的 deferred backlog 超过阈值，输出限频日志和 metrics，不自动扩大扫描上限。
+
+### Deferred Ledger 设计来源和参考依据
+
+这个设计不是照搬某个现成开源项目的 `deferred ledger` 模块，而是把 RocketMQ 现有机制和通用日志索引模式组合起来：
+
+- RocketMQ POP 消费模型已经使用 checkpoint、ack、revive topic 和 retry topic 来恢复未确认消息，说明“消费中间态由 Broker 内部状态流转承载”是 RocketMQ-native 的模式。
+- RocketMQ 事务消息把 half message 先存为不可见状态，commit 后再变成真实 Topic 可消费消息，说明“内部状态队列不直接暴露给业务 Consumer，最终可见消息再进入正常消费链路”是现有语义。
+- Kafka Streams 的 fault-tolerant state store 使用 changelog topic 备份本地状态，说明“可靠日志作为 source of truth，本地 store/index 负责热查询”是成熟模式。
+- Kafka log compaction 保证同 key 至少保留最新状态，说明 `recordKey + tombstone` 可以作为恢复本地索引的基础模型。
+
+参考资料：
+
+- RocketMQ Consumption Retry: `https://rocketmq.apache.org/docs/featureBehavior/10consumerretrypolicy/`
+- RocketMQ Transaction Message: `https://rocketmq.apache.org/docs/featureBehavior/04transactionmessage/`
+- RocketMQ 5.0 POP Consumption Model: `https://www.alibabacloud.com/blog/rocketmq-5-0-pop-consumption-model_598836`
+- Kafka Streams state store changelog: `https://kafka.apache.org/36/streams/developer-guide/processor-api/#state-stores`
+- Kafka log compaction: `https://docs.confluent.io/kafka/design/log_compaction.html`
 
 ### 隔离 Consumer 消费中突然下线且未 ack
 
 如果 `gray1` 隔离 Consumer 已经拿到 `gray1` 消息，但在 ack 前进程退出或网络断开：
 
 1. 在 POP invisible time 未到期前，这条消息仍处于 in-flight 状态，标准 Consumer 不能立即消费它，否则会破坏 POP 的不可见时间和 at-least-once 语义。
-2. invisible time 到期后，现有 POP revive/retry 机制让该消息重新变为可投递状态。
+2. invisible time 到期后，现有 POP revive/retry 机制让该消息重新变为可投递状态；这时消息不再依赖 deferred ledger，而是走 POP retry/revive 投递路径。
 3. 重新投递时必须再次执行流量标路由判定，而不是沿用上一次投递给隔离 Consumer 的结果。
-4. 如果此时 Broker 已经确认没有 `gray1` 隔离 Consumer 在线，标准 Consumer 可以通过 fallback 消费这条消息。
+4. 如果此时 Proxy/Broker 基于最新快照确认没有 `gray1` 隔离 Consumer 在线，标准 Consumer 可以通过 fallback 消费这条消息。
 5. 如果 `gray1` 隔离 Consumer 在重试投递前已经重新上线，则消息仍优先由 `gray1` 隔离 Consumer 消费。
 
 这意味着路由归属是“每次可见、每次投递时动态计算”的，不是“第一次匹配后永久归属隔离环境”。
+
+准确时间线：
+
+```text
+t0: Broker 将 gray1 消息投递给 gray1 Consumer，并持久化 POP checkpoint。
+t1: deferred record 删除或写 tombstone，因为消息已经进入 POP in-flight。
+t2: gray1 Consumer 下线且没有 ack。
+t3: invisible time 未到期，消息仍不可见，标准 Consumer 不能消费。
+t4: invisible time 到期，PopReviveService 扫描 revive topic 中的 PopCheckPoint。
+t5: 如果没有匹配 ack，PopReviveService#reviveRetry 将原业务消息写入该 consumer group 的 POP retry topic。
+t6: 后续 Consumer 再发 POP，PopMessageProcessor 先从 retry topic 拉取，再从正常 topic 拉取。
+t7: Broker 基于最新 Proxy 在线 label 快照重新判路由。
+```
+
+标准环境能否重新消费，取决于 `t7` 的在线状态：
+
+- 如果 `gray1` 的 unregister 已同步，或 presence lease 已过期，`onlineTrafficLabels` 不包含 `gray1`，标准 Consumer 可以 fallback 消费。
+- 如果 Proxy 快照仍认为 `gray1` 在线，标准 Consumer 仍不能消费；非 FIFO 继续 deferred，FIFO 继续 block。
+- 如果 `gray1` 在 `t4` 到 `t7` 之间重新上线，消息继续优先投递给 `gray1`。
+
+因此标准环境最早可消费时间是：`POP invisible time 到期` 且 `gray1 在线 lease 已失效或注销已同步`。两者缺一不可。
+
+实际代码入口：
+
+- `PopMessageProcessor#appendCheckPoint` 把 `PopCheckPoint` 写入 revive topic。
+- `AckMessageProcessor` 把 ack 写入同一个 revive topic。
+- `PopReviveService` 消费 revive topic，合并 checkpoint 和 ack。
+- checkpoint 到期且没有 ack 时，`PopReviveService#reviveRetry` 把原消息写入 POP retry topic。
+- `PopMessageProcessor` 后续 POP 会读取 retry topic；这里必须重新执行流量标路由。
+
+标准 fallback 后失败的场景也一样：
+
+```text
+t0: gray1 消息因 gray1 Consumer 离线，被标准 Consumer fallback 消费。
+t1: 标准 Consumer 未 ack，invisible time 到期。
+t2: PopReviveService#reviveRetry 将消息写入 POP retry topic，并保留 __RMQ_TRAFFIC_LABEL=gray1。
+t3: gray1 Consumer 上线并发起 POP。
+t4: PopMessageProcessor 先读取 POP retry topic。
+t5: Broker 重新执行流量标路由，发现 gray1 在线且消息 label=gray1。
+t6: 消息投递给 gray1 Consumer，而不是继续给标准 Consumer。
+```
+
+因此，标准环境 fallback 消费失败后，retry topic 中的 `gray1` 消息可以被后来上线的 `gray1` Consumer 读取。前提是 `PopReviveService#reviveRetry` 保留原始 `__RMQ_TRAFFIC_LABEL`，且 retry topic 读取路径重新调用 `TrafficLabelRouteManager`。
+
+对 `gray1` Consumer 客户端的可见影响：
+
+- 业务 payload、keys、tags、user properties 应保持不变，`__RMQ_TRAFFIC_LABEL=gray1` 也必须保留。
+- 默认情况下，Broker 从 retry topic 返回消息时会把 topic recode 成原始业务 topic；客户端不应该看到 POP retry topic，除非开启了 `popResponseReturnActualRetryTopic`。
+- `reconsumeTimes` 会继承标准 Consumer 失败后的次数，因为 retry 预算属于同一个 consumer group，不属于某个环境。
+- retry 是重新写入 POP retry topic，Broker 物理 `msgId`、store offset 可能变化；业务幂等应使用业务 key 或保留下来的唯一消息属性，不要依赖物理存储位置。
+- 客户端不应该依赖“上一次是谁消费失败”做业务判断；默认不新增 previous consumer label 给业务层。
+- 如果业务代码按 `reconsumeTimes` 做告警、降级或幂等分支，那么 `gray1` Consumer 会看到这不是第一次投递，这是预期影响。
 
 ### retry 与 DLQ 路由规则
 
@@ -378,6 +804,10 @@ FIFO 的核心取舍是保证顺序优先于吞吐：标准环境不能越过队
    - `enableTrafficLabelRouting=false`
    - `trafficLabelRoutingMaxScanPerPop=1024`
    - `trafficLabelDeferredMaxScanPerPop=1024`
+   - `trafficLabelDeferredMaxLabelsPerPop=16`
+   - `trafficLabelDeferredMaxRecordsPerQueue`
+   - `trafficLabelDeferredMaxBytesPerBroker`
+   - `trafficLabelDeferredMaxHoldMs`：deferred record 最大建议持有时间，必须小于原消息 commitlog 可读时间；超过后只告警和限流，不自动改变路由语义。
    - `trafficLabelRoutingMaxSnapshotAgeMs=30000`
    - `trafficLabelRoutingFallbackOnStateUnknown=false`
 2. 在 `BrokerController` 初始化 `TrafficLabelRouteManager`。
@@ -393,7 +823,8 @@ FIFO 的核心取舍是保证顺序优先于吞吐：标准环境不能越过队
    - `BLOCK`：FIFO 下当前 Consumer 不可消费，当前 queue 返回空结果。
    - `UNKNOWN`：在线 label 状态缺失或过期，且当前 Consumer 是标准环境、消息有 label。
 5. 具体判断：
-   - 消息 label 为空：只允许标准 Consumer 消费。
+   - 消息 label 为空且当前 Consumer 是标准环境：允许消费。
+   - 消息 label 为空且当前 Consumer 是隔离环境：非 FIFO 返回 `DEFER`，FIFO 返回 `BLOCK`。
    - 当前 Consumer label 等于消息 label：允许消费。
    - 当前 Consumer 是标准环境，快照新鲜，且 `onlineTrafficLabels` 不包含消息 label：允许标准回退消费。
    - 当前 Consumer 是标准环境，但快照缺失、过期或不可判定：默认返回 `UNKNOWN`，随后非 FIFO `DEFER`、FIFO `BLOCK`。
@@ -411,34 +842,63 @@ FIFO 的核心取舍是保证顺序优先于吞吐：标准环境不能越过队
 - 新增：`broker/src/main/java/org/apache/rocketmq/broker/routing/TrafficLabelDeferredIndex.java`
 - 新增：基于 commitlog-backed 内部主题的 deferred record 源数据实现，RocksDB 仅作为查询索引/cache。
 
+**组件职责：**
+- `TrafficLabelDeferredRecord`：纯数据对象，负责记录原消息定位、路由 label、来源类型、defer 阶段和 ACTIVE/TOMBSTONE 状态。
+- `TrafficLabelDeferredStore`：Broker 生命周期内的服务，负责写内部主题事件、查询并 claim record、写 tombstone、启动时恢复 index。
+- `TrafficLabelDeferredIndex`：RocksDB 封装，维护 `recordByKey`、`byLabel`、`byQueue`、`labelStats` 前缀索引；不要把业务路由判断放进 index。
+- `activeLabelCache`：内存结构，由 `labelStats` 重建，由 ACTIVE/TOMBSTONE 写路径更新，用于标准 Consumer 快速找到有积压的 label。
+- v1 不增加单独接口层，先保持一个 concrete store，等出现第二种存储实现时再抽接口。
+
 **记录字段：**
 - `recordKey`
 - `group`
-- `topic`
+- `logicalTopic`
+- `storageTopic`
+- `sourceType`
+- `deferStage`
 - `brokerName`
 - `queueId`
 - `queueOffset`
 - `commitLogOffset`
 - `messageSize`
 - `messageTrafficLabel`
+- `reconsumeTimes`
 - `storeTimestamp`
 - `state`
 
 **步骤：**
-1. 以 `brokerName/group/topic/queueId/queueOffset` 作为记录 key。
+1. 以 `brokerName/group/storageTopic/queueId/queueOffset` 作为记录 key。
+   - `logicalTopic` 是业务 Topic，用于路由和返回给 Consumer。
+   - `storageTopic` 是真实存储 Topic，可能是业务 Topic，也可能是 POP retry topic。
+   - `sourceType=NORMAL|RETRY` 表示 deferred record 来自正常 queue 还是 retry queue。
+   - `deferStage=FIRST_DEFER|RETRY_DEFER` 表示第一次被路由跳过，还是未 ack 进入 retry topic 后再次被路由跳过。
+   - `reconsumeTimes` 复制消息当前重试次数，用于指标、限流和排查，不单独改变 RocketMQ 现有 retry/DLQ 规则。
 2. 创建 Broker 内部主题，例如 `RMQ_SYS_TRAFFIC_LABEL_DEFERRED_TOPIC`，用于保存 deferred record 源数据。
-3. 在普通 POP cursor 越过不合格消息前，先把 deferred record 幂等写入内部主题；写成功后再更新本地 index/cache。
-4. 本地 index 维护：
-   - `byLabel: brokerName/group/topic/messageTrafficLabel/queueId/queueOffset -> recordKey`
-   - `byQueue: brokerName/group/topic/queueId/queueOffset -> recordKey`
-5. 正常扫描 consume queue 前，先查询当前 Consumer 可消费的 deferred record：
+3. 同一个 `recordKey` 的 ACTIVE/TOMBSTONE 事件写入同一个内部主题 queue，保证重放时同 key 有序。
+4. 在普通 POP cursor 越过不合格消息前，先检查 `recordByKey`；如果已存在 ACTIVE，直接幂等返回，不重复写 ACTIVE。
+5. 不存在 ACTIVE 时，先把 ACTIVE event 写入内部主题；写成功后用一个 RocksDB WriteBatch 更新本地 index/cache。
+6. ACTIVE event 写失败时，不允许推进 POP cursor 越过该消息。
+7. 本地 index 更新失败时，写 TOMBSTONE 回滚该 ACTIVE event；回滚失败时当前 queue 的 traffic-label POP fail closed，等待恢复任务修复。
+8. 本地 index 维护：
+   - `recordByKey: recordKey -> TrafficLabelDeferredRecord`
+   - `byLabel: brokerName/group/logicalTopic/messageTrafficLabel/storageTopic/queueId/queueOffset -> recordKey`
+   - `byQueue: brokerName/group/logicalTopic/storageTopic/queueId/queueOffset -> recordKey`
+   - `labelStats: brokerName/group/logicalTopic/storageTopic/queueId/messageTrafficLabel -> {activeCount, lastUpdateTimestamp}`
+9. 每次 ACTIVE/TOMBSTONE 都同步更新 `activeLabelCache`；Broker 重启时从 `labelStats` 重建 `activeLabelCache`。
+10. 正常扫描 consume queue 前，先查询当前 Consumer 可消费的 deferred record：
    - 隔离 Consumer 走 `byLabel` 前缀，只获取相同 label 的 deferred record。
-   - 标准 Consumer 走 `byQueue` 前缀，只返回当前快照新鲜且 `messageTrafficLabel` 不在 `onlineTrafficLabels` 的 deferred record。
-6. 标准 Consumer 查询最多扫描 `trafficLabelDeferredMaxScanPerPop` 条 deferred record，不为多个隔离 label 做全量扫描。
-7. deferred 消息进入现有 POP in-flight/checkpoint 流程后，才能写删除 tombstone 或删除记录；删除后由 POP invisible/revive/retry 机制负责失败恢复。
-8. Broker 重启或主从切换后，从内部主题重建 deferred index，再对外提供 POP 服务。
-9. 每次查询 deferred record 时都使用本次 POP 请求的最新在线 Consumer label 快照，不缓存旧的 owner 判断。
-10. 增加测试覆盖幂等 upsert、重启恢复、主从切换恢复、删除、隔离 Consumer 上下线后的 fallback eligibility 变化、多 label 查询性能边界。
+   - 标准 Consumer 先用 `activeLabelCache - onlineTrafficLabels` 找离线 label，再走 `byLabel` 前缀，只获取 BLANK 和离线 label 的 deferred record。
+11. 标准 Consumer 每次最多扫描 `trafficLabelDeferredMaxLabelsPerPop` 个 label、`trafficLabelDeferredMaxScanPerPop` 条 record。
+12. 每个 `group/topic/queueId` 维护 label round-robin cursor，多个离线 label 都有积压时公平轮转。
+13. 查询返回前用内存 `claimedKeys` claim `recordKey`，避免同一 Broker 进程内并发 POP 重复投递同一 deferred record。
+14. checkpoint 写入成功后才能写 TOMBSTONE event；TOMBSTONE 成功且 RocksDB index 删除完成后释放 claim。
+15. checkpoint 写失败时释放 claim，保留 ACTIVE record。
+16. TOMBSTONE 写失败时不返回这条 deferred 消息，保留 claim 并重试；Broker 崩溃恢复后允许 at-least-once 重复投递，但不允许丢消息。
+17. Broker 重启或主从切换后，从内部主题重建 deferred index，再对外提供 POP 服务。
+18. 每次查询 deferred record 时都使用本次 POP 请求的最新在线 Consumer label 快照，不缓存旧的 owner 判断。
+19. 增加 deferred backlog 年龄指标；v1 只保存原消息 locator，不复制完整消息体，因此 deferred 最大持有时间必须小于原消息 commitlog 可读时间。
+20. 达到 `trafficLabelDeferredMaxRecordsPerQueue` 或 `trafficLabelDeferredMaxBytesPerBroker` 时停止写新 deferred record，不推进当前 queue cursor，输出限频告警和指标。
+21. 增加测试覆盖幂等 upsert、同 key 事件有序重放、ACTIVE 成功但 index 失败后的 TOMBSTONE 回滚、重启恢复、主从切换恢复、删除、checkpoint 成功但 tombstone 失败后的重复投递、隔离 Consumer 上下线后的 fallback eligibility 变化、多 label 查询性能边界、ledger 达到上限时不继续膨胀。
 
 ### Task 5：集成 POP 路由
 
@@ -616,13 +1076,21 @@ FIFO 的核心取舍是保证顺序优先于吞吐：标准环境不能越过队
 9. invisible time 到期后，如果 `gray1` 隔离 Consumer 已离线，标准 Consumer 可以 fallback 消费该重试消息。
 10. invisible time 到期前或重试投递前 `gray1` 隔离 Consumer 重新上线时，该消息继续优先投递给 `gray1` 隔离 Consumer。
 11. retry/revive 消息保留 `__RMQ_TRAFFIC_LABEL`，每次重新投递都重新执行路由判定。
-12. 延迟消息到期恢复真实 Topic 后保留 `__RMQ_TRAFFIC_LABEL`，并按普通消息路由。
-13. FIFO 延迟消息到期恢复真实 Topic 后保留 `__RMQ_TRAFFIC_LABEL`，并按 FIFO 队头规则路由。
-14. 事务半消息 commit 后最终业务消息保留 `__RMQ_TRAFFIC_LABEL`，并按普通或 FIFO 规则路由。
-15. 事务 rollback 不产生业务可消费消息，也不产生 deferred record。
-16. 标准 Consumer 请求缺少 `onlineTrafficLabels` 或 snapshot 过期时，非 FIFO 有标消息进入 deferred，不允许 fallback。
-17. 标准 Consumer 请求缺少 `onlineTrafficLabels` 或 snapshot 过期时，FIFO 有标队头返回空结果，不允许 fallback。
-18. deferred record 源数据从 commitlog-backed 内部主题重建后，Broker 重启仍能重新投递被跳过消息。
+12. `gray1` 消息先 fallback 给标准 Consumer，标准 Consumer 未 ack 后进入 retry topic；随后 `gray1` Consumer 上线，应优先从 retry topic 消费该消息。
+13. 上一条场景中，`gray1` Consumer 看到原始业务 topic 和递增后的 `reconsumeTimes`，且看不到 previous consumer label。
+14. 延迟消息到期恢复真实 Topic 后保留 `__RMQ_TRAFFIC_LABEL`，并按普通消息路由。
+15. FIFO 延迟消息到期恢复真实 Topic 后保留 `__RMQ_TRAFFIC_LABEL`，并按 FIFO 队头规则路由。
+16. 事务半消息 commit 后最终业务消息保留 `__RMQ_TRAFFIC_LABEL`，并按普通或 FIFO 规则路由。
+17. 事务 rollback 不产生业务可消费消息，也不产生 deferred record。
+18. 标准 Consumer 请求缺少 `onlineTrafficLabels` 或 snapshot 过期时，非 FIFO 有标消息进入 deferred，不允许 fallback。
+19. 标准 Consumer 请求缺少 `onlineTrafficLabels` 或 snapshot 过期时，FIFO 有标队头返回空结果，不允许 fallback。
+20. `gray1` 和 `gray2` deferred record 同时存在时，`gray1` Consumer 只能消费 `gray1`，`gray2` Consumer 只能消费 `gray2`。
+21. `gray1` 在线、`gray2` 离线时，标准 Consumer 只能 fallback 消费 `gray2` deferred record，不能消费 `gray1`。
+22. deferred record 源数据从 commitlog-backed 内部主题重建后，Broker 重启仍能重新投递被跳过消息。
+23. deferred 消息写入 POP checkpoint 成功但 TOMBSTONE 写入失败时，不丢消息；恢复后允许重复投递。
+24. deferred backlog 年龄超过 `trafficLabelDeferredMaxHoldMs` 时输出指标和限频告警，不静默改变 owner 路由。
+25. 同一 `topic + group` 下存在 10 个以上在线隔离 label 时，标准 Consumer 只扫描 BLANK 和离线 label，不扫描在线 label backlog。
+26. deferred ledger 达到 records/bytes 上限时，Broker 不再写入新 ACTIVE，不推进对应 queue cursor，ledger active 规模不继续增长。
 
 ### Task 15：Proxy + Java Client 集成测试
 
@@ -659,6 +1127,10 @@ FIFO 的核心取舍是保证顺序优先于吞吐：标准环境不能越过队
 - 多 Broker master 下，每个 master 都基于同一份 Proxy 集群在线 label 快照做本地 queue 路由，不因 Broker 本地看不到某个 Consumer 就提前 fallback。
 - 在线 label 快照缺失、过期或不可判定时默认 fail closed：非 FIFO deferred，FIFO block，不允许标准 Consumer fallback。
 - deferred record 的源数据位于 commitlog-backed 内部主题或等价 HA 持久化域；Broker 重启或 master 切换后能重建 deferred index。
+- v1 deferred record 只保存原消息 locator，不复制完整消息体；因此必须有 backlog 年龄指标，且最大持有时间不能超过原消息 commitlog 可读时间。
+- ledger 和 POP checkpoint 之间不做跨组件事务；极窄失败窗口允许重复投递，但不能丢消息。
+- 标准 Consumer 查询 deferred 时不能按全部隔离 label 或全部 backlog 扫描；超过 10 个隔离环境时，仍只扫描 BLANK 和当前离线 label。
+- deferred ledger 达到容量上限时必须 backpressure 到原 consume queue，不能继续膨胀。
 - 现有 POP ack、change invisible、retry、DLQ 测试继续通过。
 - Java 5.x API 清晰区分 Producer 消息流量标和 Consumer 环境流量标。
 
