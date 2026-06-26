@@ -11,53 +11,142 @@ RocketMQ 没有统一的插件注册中心。扩展点主要分为四类：
 
 ## 扩展点总览
 
-| 模块 | 扩展点 | 接入方式 | 主要入口 |
+| 模块 | 扩展点 | 作用/职责 | 接入方式 | 主要入口 |
+| --- | --- | --- | --- | --- |
+| Store | `MessageStore` 插件链 | 包装核心存储，拦截或增强消息读写、恢复和生命周期。 | `messageStorePlugIn` 配置类名 | `MessageStoreFactory` |
+| Broker | `TransactionalMessageService` | 管理事务半消息写入、提交、回滚、删除和定时回查。 | `META-INF/service/...TransactionalMessageService` | `BrokerController.initialTransaction` |
+| Broker | `AbstractTransactionalMessageCheckListener` | 处理事务半消息回查请求和超限丢弃。 | `META-INF/service/...AbstractTransactionalMessageCheckListener` | `BrokerController.initialTransaction` |
+| Remoting/Broker | `RPCHook` | 拦截 remoting 请求前后，注入鉴权、命名空间、路由、审计等字段。 | `META-INF/service/...RPCHook` 或代码注册 | `BrokerController.initialRpcHooks`、`RemotingService.registerRPCHook` |
+| Common/NameServer | `TopAddressing` / `NameServerUpdateCallback` | 自定义 NameServer 地址发现，并把地址变化通知到客户端。 | JDK `ServiceLoader` 或代码注册回调 | `DefaultTopAddressing` |
+| Store | `HAService` | 替换或扩展 Store 主从复制、确认位点和 HA 生命周期。 | `META-INF/service/...HAService` | `DefaultMessageStore.initializeHAService` |
+| Store | `MappedFile` | 替换 commitlog/consume queue 使用的 mapped file 底层实现。 | JDK `ServiceLoader` | `AllocateMappedFileService` |
+| Auth | 认证/授权 provider、metadata provider、strategy | 自定义认证授权执行逻辑、元数据存储和策略编排。 | `AuthConfig` 类名配置 | `AuthenticationFactory`、`AuthorizationFactory` |
+| TieredStore | `MetadataStore` | 持久化分层存储的 topic、queue 和 file segment 元数据。 | `tieredMetadataServiceProvider` 类名配置 | `TieredMessageStore` |
+| TieredStore | `FileSegment` / `FileSegmentProvider` | 对接分层存储后端，实现文件段提交、读取和销毁。 | `tieredBackendServiceProvider` 类名配置 | `FileSegmentFactory` |
+| Broker | `SendMessageHook` / `ConsumeMessageHook` | 在 Broker 发送、消费、send-back 链路记录指标、审计或消息轨迹。 | 代码注册 | `BrokerController.registerSendMessageHook`、`registerConsumeMessageHook` |
+| Broker | `BrokerAttachedPlugin` | 承载 Broker 附加插件生命周期、状态变更、元数据同步和运行时信息输出。 | 代码注入插件列表 | `BrokerController.getBrokerAttachedPlugins` |
+| Broker | `PullMessageResultHandler` | 接管 pull 结果响应构造、长轮询挂起和异常响应。 | `PullMessageProcessor.setPullMessageResultHandler` | `PullMessageProcessor` |
+| Store | `PutMessageHook`、`SendMessageBackHook`、`MessageArrivingListener` | 拦截消息写入、send-back 写入和新消息到达通知。 | 代码注册或构造注入 | `DefaultMessageStore`、`BrokerController.registerMessageStoreHook` |
+| Store HA | `HAReadHook`、`HAWriteHook` | 观察 HA 网络读写字节数，用于复制统计或流控。 | 代码注册 | HA reader/writer |
+| Store | mapped file 预处理和 timer escape bridge | 在 mapped file 分配前预处理，并为 timer 消息提供逃逸写入桥。 | 代码注册 | `AllocateMappedFileService`、`TimerMessageStore` |
+| Remoting | `NettyRequestProcessor` | 按 request code 承接 Broker、NameServer、Controller、Proxy 的业务请求。 | `RemotingServer.registerProcessor` | Broker/NameServer/Controller/Proxy processor 注册 |
+| Remoting | `ChannelEventListener` | 监听连接建立、关闭、异常、空闲和 active 事件。 | Netty server/client 配置注入 | housekeeping service |
+| Remoting | `RequestPipeline` | 请求进入业务处理前的链式拦截，常用于认证授权。 | pipeline 链式组合 | Broker auth pipeline |
+| Remoting | `RpcClientHook` | 拦截 RPC client 出站请求；接口也定义响应钩子，但当前主流程未调用响应钩子。 | `RpcClientImpl.registerHook` | RPC client 出站钩子 |
+| Remoting | TLS 私钥解密策略 | 解密 TLS 私钥文件，支持自定义密钥保护方案。 | `TlsHelper.registerDecryptionStrategy` | `TlsHelper` |
+| Filter | `FilterSpi` | 编译过滤表达式并生成运行时表达式对象。 | `FilterFactory.register` | `ConsumerFilterManager` |
+| Filter | `MessageFilter` | 在 consume queue、commitlog、pull、pop、query 链路判断消息是否命中。 | 拉取、pop、store 查询路径注入 | `PullMessageProcessor`、store 查询 |
+| Controller | `BrokerLifecycleListener` | 监听 Broker 心跳失效并触发下线处理。 | `registerBrokerLifecycleListener` | `Controller`、`BrokerHeartbeatManager` |
+| Controller | `ElectPolicy` | 自定义副本选主策略和候选排序依据。 | 构造或 setter 注入 | `DLedgerController.setElectPolicy` |
+| NameServer | 内嵌 Controller | 在 NameServer 进程内启用 Controller 管理面。 | `enableControllerInNamesrv=true` | `NamesrvStartup.controllerManagerMain` |
+| Proxy | `ServiceManagerFactory` / `ServiceManager` | 按 Local/Cluster 模式装配 Proxy 服务层依赖。 | Local/Cluster 模式构造 | `DefaultMessagingProcessor` |
+| Proxy | gRPC 服务和拦截器 | 扩展 gRPC 服务定义和 server interceptor。 | `GrpcServerBuilder.addService`、`appendInterceptor` | `ProxyStartup` |
+| Proxy | 多协议处理器 | 在同一端口上识别并配置 remoting、HTTP2 proxy 等协议。 | `ProtocolNegotiationHandler.addProtocolHandler` | `MultiProtocolRemotingServer` |
+| Proxy | 请求 pipeline | 在 Proxy remoting/gRPC 请求进入业务前执行认证授权等拦截。 | Remoting/gRPC pipeline 链式组合 | `RemotingProtocolServer`、`GrpcMessagingApplication` |
+| Proxy | TLS reload listener | TLS 证书或私钥热加载后通知 gRPC/remoting server 刷新上下文。 | `TlsCertificateManager.registerReloadListener` | `GrpcServer`、`RemotingProtocolServer` |
+| Proxy | 队列选择、优先级和惩罚器 | 控制 Proxy send/pop 的队列选择、优先级分组和故障惩罚。 | `QueueSelector`、`TopicRouteService.setPriorityProvider`、`addPenalizer` | Proxy send/pop 路由 |
+| Proxy | pop 结果过滤 | 对 pop 出来的消息按投递次数、订阅表达式等规则过滤或转 DLQ。 | `PopMessageResultFilter` | `ConsumerProcessor.popMessage` |
+| Proxy | Topic 消息类型校验 | 校验普通、FIFO、延迟、事务等 topic 消息类型是否匹配请求语义。 | `TopicMessageTypeValidator` | send/recall activity |
+| Common | `StateEventListener` | 接收 receipt handle 续期、停止续期、清理等状态事件。 | 构造注入 | receipt handle 状态事件 |
+| Common | `FileWatchService.Listener` | 对 TLS 证书、私钥、配置文件变更做热加载响应。 | 构造注入 | TLS/证书/配置文件变更监听 |
+| Common | `Handler<T,R>` | 组成可递进的处理链，当前主要服务认证授权。 | `HandlerChain` 组合 | Auth 认证授权链 |
+| Common | `RetryPolicy` | 根据重试次数计算下一次重试或续期延迟。 | subscription group retry policy | Broker/Proxy 重试和续期计算 |
+| Common | `ThreadPoolStatusMonitor` | 采样线程池状态并决定是否打印 jstack。 | `ThreadPoolMonitor.createAndMonitor` 参数注入 | 线程池状态采样与 jstack 触发 |
+| Client | client hook | 在客户端发送、消费、过滤、禁发检查和事务结束链路插入追踪或校验逻辑。 | `register*Hook` 或内置 trace 注册 | producer/consumer impl |
+| Client | 消费监听与分配策略 | 承载用户消费逻辑、队列分配和队列变化通知。 | consumer API 设置 | `MessageListener*`、`AllocateMessageQueueStrategy` |
+| Client | 生产回调与事务回调 | 承接异步发送响应、request-reply 响应和本地事务检查。 | producer API 参数或 setter | `SendCallback`、`TransactionListener` |
+| Client | pull/pop/ack 回调 | 承接异步 pull、pop、ack 结果或异常。 | async consumer API 参数 | `PullCallback`、`PopCallback`、`AckCallback` |
+| Client | 消息轨迹 dispatcher | 收集、缓冲并发送 producer/consumer 轨迹数据。 | `enableMsgTrace` 内置装配 | `TraceDispatcher` |
+| Tools | `SubCommand` / `MonitorListener` | 扩展 mqadmin 命令和监控巡检事件输出。 | 命令注册或 monitor 注入 | `MQAdminStartup`、`MonitorService` |
+
+## 方法调用位置与时机速查
+
+类名为当前源码中的真实调用点；未写固定行号，避免后续小改动导致文档失效。
+
+| 扩展点 | 方法 | 调用位置 | 调用时机 |
 | --- | --- | --- | --- |
-| Store | `MessageStore` 插件链 | `messageStorePlugIn` 配置类名 | `MessageStoreFactory` |
-| Broker | `TransactionalMessageService` | `META-INF/service/...TransactionalMessageService` | `BrokerController.initialTransaction` |
-| Broker | `AbstractTransactionalMessageCheckListener` | `META-INF/service/...AbstractTransactionalMessageCheckListener` | `BrokerController.initialTransaction` |
-| Remoting/Broker | `RPCHook` | `META-INF/service/...RPCHook` 或代码注册 | `BrokerController.initialRpcHooks`、`RemotingService.registerRPCHook` |
-| Common/NameServer | `TopAddressing` / `NameServerUpdateCallback` | JDK `ServiceLoader` 或代码注册回调 | `DefaultTopAddressing` |
-| Store | `HAService` | `META-INF/service/...HAService` | `DefaultMessageStore.initializeHAService` |
-| Store | `MappedFile` | JDK `ServiceLoader` | `AllocateMappedFileService` |
-| Auth | 认证/授权 provider、metadata provider、strategy | `AuthConfig` 类名配置 | `AuthenticationFactory`、`AuthorizationFactory` |
-| TieredStore | `MetadataStore` | `tieredMetadataServiceProvider` 类名配置 | `TieredMessageStore` |
-| TieredStore | `FileSegment` / `FileSegmentProvider` | `tieredBackendServiceProvider` 类名配置 | `FileSegmentFactory` |
-| Broker | `SendMessageHook` / `ConsumeMessageHook` | 代码注册 | `BrokerController.registerSendMessageHook`、`registerConsumeMessageHook` |
-| Broker | `BrokerAttachedPlugin` | 代码注入插件列表 | `BrokerController.getBrokerAttachedPlugins` |
-| Broker | `PullMessageResultHandler` | `PullMessageProcessor.setPullMessageResultHandler` | `PullMessageProcessor` |
-| Store | `PutMessageHook`、`SendMessageBackHook`、`MessageArrivingListener` | 代码注册或构造注入 | `DefaultMessageStore`、`BrokerController.registerMessageStoreHook` |
-| Store HA | `HAReadHook`、`HAWriteHook` | 代码注册 | HA reader/writer |
-| Store | mapped file 预处理和 timer escape bridge | 代码注册 | `AllocateMappedFileService`、`TimerMessageStore` |
-| Remoting | `NettyRequestProcessor` | `RemotingServer.registerProcessor` | Broker/NameServer/Controller/Proxy processor 注册 |
-| Remoting | `ChannelEventListener` | Netty server/client 配置注入 | housekeeping service |
-| Remoting | `RequestPipeline` | pipeline 链式组合 | Broker auth pipeline |
-| Remoting | `RpcClientHook` | `RpcClientImpl.registerHook` | RPC client 出站钩子 |
-| Remoting | TLS 私钥解密策略 | `TlsHelper.registerDecryptionStrategy` | `TlsHelper` |
-| Filter | `FilterSpi` | `FilterFactory.register` | `ConsumerFilterManager` |
-| Filter | `MessageFilter` | 拉取、pop、store 查询路径注入 | `PullMessageProcessor`、store 查询 |
-| Controller | `BrokerLifecycleListener` | `registerBrokerLifecycleListener` | `Controller`、`BrokerHeartbeatManager` |
-| Controller | `ElectPolicy` | 构造或 setter 注入 | `DLedgerController.setElectPolicy` |
-| NameServer | 内嵌 Controller | `enableControllerInNamesrv=true` | `NamesrvStartup.controllerManagerMain` |
-| Proxy | `ServiceManagerFactory` / `ServiceManager` | Local/Cluster 模式构造 | `DefaultMessagingProcessor` |
-| Proxy | gRPC 服务和拦截器 | `GrpcServerBuilder.addService`、`appendInterceptor` | `ProxyStartup` |
-| Proxy | 多协议处理器 | `ProtocolNegotiationHandler.addProtocolHandler` | `MultiProtocolRemotingServer` |
-| Proxy | 请求 pipeline | Remoting/gRPC pipeline 链式组合 | `RemotingProtocolServer`、`GrpcMessagingApplication` |
-| Proxy | TLS reload listener | `TlsCertificateManager.registerReloadListener` | `GrpcServer`、`RemotingProtocolServer` |
-| Proxy | 队列选择、优先级和惩罚器 | `QueueSelector`、`TopicRouteService.setPriorityProvider`、`addPenalizer` | Proxy send/pop 路由 |
-| Proxy | pop 结果过滤 | `PopMessageResultFilter` | `ConsumerProcessor.popMessage` |
-| Proxy | Topic 消息类型校验 | `TopicMessageTypeValidator` | send/recall activity |
-| Common | `StateEventListener` | 构造注入 | receipt handle 状态事件 |
-| Common | `FileWatchService.Listener` | 构造注入 | TLS/证书/配置文件变更监听 |
-| Common | `Handler<T,R>` | `HandlerChain` 组合 | Auth 认证授权链 |
-| Common | `RetryPolicy` | subscription group retry policy | Broker/Proxy 重试和续期计算 |
-| Common | `ThreadPoolStatusMonitor` | `ThreadPoolMonitor.createAndMonitor` 参数注入 | 线程池状态采样与 jstack 触发 |
-| Client | client hook | `register*Hook` 或内置 trace 注册 | producer/consumer impl |
-| Client | 消费监听与分配策略 | consumer API 设置 | `MessageListener*`、`AllocateMessageQueueStrategy` |
-| Client | 生产回调与事务回调 | producer API 参数或 setter | `SendCallback`、`TransactionListener` |
-| Client | pull/pop/ack 回调 | async consumer API 参数 | `PullCallback`、`PopCallback`、`AckCallback` |
-| Client | 消息轨迹 dispatcher | `enableMsgTrace` 内置装配 | `TraceDispatcher` |
-| Tools | `SubCommand` / `MonitorListener` | 命令注册或 monitor 注入 | `MQAdminStartup`、`MonitorService` |
+| `MessageStore` 插件链 | `MessageStore` 覆写方法 | `MessageStoreFactory#build` 构造外层插件链，Broker 后续通过 `BrokerController#messageStore` 调用 | Broker 初始化消息存储后，所有命中 `MessageStore` 的读写、恢复、生命周期调用都会先经过最外层插件 |
+| `PutMessageHook` | `executeBeforePutMessage(MessageExtBrokerInner)`、`executeBeforePutMessage(MessageExtBatch)` | `DefaultMessageStore#putMessage`、`DefaultMessageStore#putMessages` | 单条或批量消息写入 commitlog 前 |
+| `SendMessageBackHook` | `executeSendMessageBack(MessageExtBrokerInner)` | `BrokerController#registerMessageStoreHook` 注册的 send-back hook | 消费失败 send-back、重试或死信消息需要回写存储时 |
+| `MessageArrivingListener` | `arriving(...)` | `DefaultMessageStore` dispatch/reput 后触发，监听方包括 long polling、pop、notification | 新消息到达 consume queue，可能唤醒挂起的 pull/pop/notification 请求时 |
+| Store `MessageFilter` | `isMatchedByConsumeQueue(...)`、`isMatchedByCommitLog(...)` | `DefaultMessageStore#getMessage`、`PullRequestHoldService`、`PopLongPollingService`、`NotificationProcessor` | 按订阅表达式、tagCode 或属性扫描 consume queue/commitlog、决定是否返回消息时 |
+| `HAService` | `init`、`start`、`shutdown`、`updateMasterAddress`、`putRequest`、`getRuntimeInfo` 等 | `DefaultMessageStore#initializeHAService`、store 生命周期、HA 同步刷盘和管理查询路径 | Store 初始化/启动/关闭、主从地址或确认位点变化、同步复制请求入队、运行时信息查询时 |
+| `HAReadHook` / `HAWriteHook` | `afterRead(int)`、`afterWrite(int)` | `AbstractHAReader`、`HAWriter` | HA socket 完成一次读或写之后 |
+| `MappedFile` | `init(...)` 及 mapped file 实例方法 | `AllocateMappedFileService#mmapOperation` | 需要创建 commitlog、consume queue、index 等 mapped file 时，通过 `ServiceLoader` 选择自定义实现 |
+| `PreprocessHandler` | `preprocess(String, String, int)` | `AllocateMappedFileService#mmapOperation` | 分配 mapped file 前，对文件名、路径或容量做预处理 |
+| Timer escape bridge | `Function<MessageExtBrokerInner, PutMessageResult>#apply` | `TimerMessageStore`、`TimerMessageRocksDBStore` | Timer 消息需要逃逸到普通存储写入路径时 |
+| `TransactionalMessageService` | `prepareMessage`、`asyncPrepareMessage` | `SendMessageProcessor` | 发送事务消息，写入 half message 前 |
+| `TransactionalMessageService` | `commitMessage`、`rollbackMessage`、`deletePrepareMessage` | `EndTransactionProcessor` | 生产者提交或回滚事务消息后，查找 half message 并删除 prepare 记录时 |
+| `TransactionalMessageService` | `check` | `TransactionalMessageCheckService` | Broker 定时扫描待回查 half message 时 |
+| `AbstractTransactionalMessageCheckListener` | `resolveDiscardMsg`、`resolveHalfMsg`、`sendCheckMessage` | `TransactionalMessageServiceImpl`、`AbstractTransactionalMessageCheckListener` | half message 回查次数超限需要丢弃，或需要向生产者发送事务状态检查请求时 |
+| Broker `SendMessageHook` | `sendMessageBefore`、`sendMessageAfter` | `AbstractSendMessageProcessor` | Broker 处理 send/reply/send-back 请求前后 |
+| Broker `ConsumeMessageHook` | `consumeMessageBefore`、`consumeMessageAfter` | `PullMessageProcessor`、`AbstractSendMessageProcessor` | Broker 构造 pull 消费上下文前，或处理 consumer send-back 结果后 |
+| `BrokerAttachedPlugin` | `load`、`start`、`shutdown` | `BrokerController#initialize`、`BrokerController#start`、`BrokerController#shutdown` | Broker 插件装载、启动和关闭阶段 |
+| `BrokerAttachedPlugin` | `statusChanged`、`syncMetadataReverse`、`buildRuntimeInfo` | `BrokerController`、`BrokerPreOnlineService`、`AdminBrokerProcessor` | Broker 可服务状态变化、预上线反向同步元数据、查询 runtime info 时 |
+| `BrokerAttachedPlugin` | `syncMetadata` | 主源码未发现直接调用路径 | 接口预留给插件主动或外部集成触发 master metadata 同步 |
+| `PullMessageResultHandler` | `handle(...)` | `PullMessageProcessor#processRequest` | `MessageStore#getMessage` 返回后，生成 pull 响应、挂起长轮询或返回异常前 |
+| `ConsumerIdsChangeListener` | `handle`、`shutdown` | `ConsumerManager#callConsumerIdsChangeListener`、Broker shutdown | 消费者注册、注销、订阅或成员集合变化时；Broker 关闭时释放资源 |
+| `ProducerChangeListener` | `handle` | `ProducerManager#callProducerChangeListener` | 生产者组客户端注册、注销或组移除时 |
+| `ShutdownHook` | `beforeShutdown` | `BrokerController#shutdown` | Broker 关闭流程真正停止组件前 |
+| `LiteCtlListener` | `onRegister`、`onUnregister`、`onRemoveAll` | `LiteSubscriptionRegistryImpl` | LMQ/Lite 订阅绑定新增、移除或按客户端清空时 |
+| `ColdCtrStrategy` | `collect`、`promote`、`decelerate`、`decisionFactor` | `ColdDataCgCtrService`、策略实现类 | 冷数据读流控周期采样、提升或降低 consumer group 阈值时 |
+| `AuthenticationProvider` | `newContext`、`authenticate` | Broker/Proxy authentication pipeline、`AbstractAuthenticationStrategy` | 请求进入业务处理前，构造认证上下文并执行认证时 |
+| `AuthenticationMetadataProvider` | `createUser`、`updateUser`、`deleteUser`、`getUser`、`listUser` | `AuthenticationMetadataManagerImpl`、`AdminBrokerProcessor`、Proxy metadata provider | mqadmin/API 管理用户元数据，或认证时读取用户信息时 |
+| `AuthenticationStrategy` | `evaluate` | Broker/Proxy authentication pipeline | `RequestPipeline` 判定请求需要认证后 |
+| `AuthorizationProvider` | `newContext(s)`、`authorize` | Broker/Proxy authorization pipeline、`AbstractAuthorizationStrategy` | 认证后按请求资源和 action 执行授权时 |
+| `AuthorizationMetadataProvider` | `createAcl`、`updateAcl`、`deleteAcl`、`getAcl`、`listAcl` | `AuthorizationMetadataManagerImpl`、`AdminBrokerProcessor`、Proxy metadata provider | mqadmin/API 管理 ACL 元数据，或授权时读取 ACL 时 |
+| `AuthorizationStrategy` | `evaluate` | Broker/Proxy authorization pipeline | `RequestPipeline` 完成上下文构造后，需要判定请求权限时 |
+| TieredStore `MetadataStore` | `add`、`update`、`get`、`delete`、`iterate` 系列方法 | `TieredMessageStore`、`FlatMessageFile`、`FlatAppendFile` | 分层存储启动、恢复、追加、刷盘、清理 topic/queue/file segment 元数据时 |
+| `FileSegment` / `FileSegmentProvider` | `commit0`、`read0`、`destroyFile`、`getFileSegmentType` | `FileSegmentFactory`、`FileSegment` | 分层存储创建后端文件段、提交缓存数据、读取远端数据或销毁文件段时 |
+| TieredStore `MessageStoreFilter` | `filterTopic` | `MessageStoreDispatcherImpl` | Store 消息派发到 tiered store 或清理分层文件前判断 topic 是否需要处理时 |
+| `FilterSpi` | `ofType`、`compile` | `FilterFactory#register`、`ConsumerFilterManager`、`ClientManageProcessor` | 注册过滤类型，以及消费者订阅/恢复时编译 SQL/tag 表达式 |
+| Common `MessageFilter` | `isMatchedByConsumeQueue`、`isMatchedByCommitLog` | Broker pull/pop/query、store 查询路径 | 按 consume queue 轻量匹配；必要时再读取 commitlog 做精确匹配 |
+| `FilterCheckHook` | `isFilterMatched` | 主源码未发现注册和调用路径 | 当前更接近预留接口，使用前需要先接入调用链 |
+| `RPCHook` | `doBeforeRequest`、`doAfterResponse` | `NettyRemotingAbstract#processRequestCommand` | remoting request processor 执行前，以及 response 返回后 |
+| `NettyRequestProcessor` | `rejectRequest`、`processRequest` | `NettyRemotingAbstract` | 请求按 request code 分派后，先判断是否拒绝，再提交到业务 executor 执行 |
+| `ChannelEventListener` | `onChannelConnect`、`onChannelClose`、`onChannelException`、`onChannelIdle`、`onChannelActive` | `NettyRemotingAbstract#NettyEventExecutor` | Netty 连接事件进入事件队列后，由 housekeeping service 处理 |
+| Broker `RequestPipeline` | `execute` | `NettyRemotingAbstract#processRequestCommand` | Broker remoting 请求进入 request processor 前，执行认证授权链 |
+| `RpcClientHook` | `beforeRequest` | `RpcClientImpl#invoke` | RPC client 发出请求前；如果 hook 直接返回 `RpcResponse`，会短路后续远程调用 |
+| `RpcClientHook` | `afterResponse` | 主源码未发现直接调用路径 | 接口方法存在，但当前 `RpcClientImpl` 没有在响应返回后执行该方法 |
+| TLS `DecryptionStrategy` | `decryptPrivateKey` | `TlsHelper#buildSslContext`、`MultiProtocolTlsHelper` | 构建 client/server TLS context，需要读取加密私钥文件时 |
+| `BrokerLifecycleListener` | `onBrokerInactive` | `DefaultBrokerHeartbeatManager`、`RaftBrokerHeartBeatManager`、`DLedgerController` | 心跳扫描发现 Broker 过期或失联时 |
+| `ElectPolicy` | `elect`、`BrokerLiveInfoGetter#get`、`BrokerValidPredicate#check` | `ReplicasInfoManager`、`DefaultElectPolicy` | Controller 注册副本、变更 sync-state set 或触发选主时 |
+| `TopAddressing` / `NameServerUpdateCallback` | `fetchNSAddr`、`registerChangeCallBack`、`onNameServerAddressChange` | `DefaultTopAddressing`、`MQClientAPIImpl` | 客户端刷新 NameServer 地址；自定义地址源发现地址变化时回调客户端 |
+| `ServiceManagerFactory` / `ObjectCreator` | `createForLocalMode`、`createForClusterMode`、`create` | `DefaultMessagingProcessor#createForLocalMode`、`#createForClusterMode` | Proxy 启动时按部署模式装配 message、route、metadata 等服务 |
+| `ServiceManager` | `start`、`shutdown`、`get*Service` | `DefaultMessagingProcessor`、Proxy processors/activities | Proxy 启停服务层，或处理请求时取路由、消息、事务、元数据服务 |
+| Proxy `RequestPipeline` | `execute` | `AbstractRemotingActivity`、`GrpcMessagingApplication` | Proxy remoting/gRPC 请求进入业务 activity 前 |
+| `GrpcServerBuilder` | `addService`、`appendInterceptor`、`build` | `ProxyStartup` | Proxy gRPC server 启动前装配服务、反射服务、Channelz 和拦截器时 |
+| `ProtocolHandler` | `match`、`config` | `ProtocolNegotiationHandler` | 新连接首包进入多协议端口时，匹配协议并重写 pipeline |
+| `TlsContextReloadListener` | `onTlsContextReload` | `TlsCertificateManager` | 监听到证书或私钥文件变更，并成功重建 TLS context 后 |
+| Proxy `QueueSelector` | `select` | `ProducerProcessor#sendMessage`、`ConsumerProcessor#popMessage`、gRPC send/receive activities | Proxy 为发送或 pop 选择目标 broker queue 时 |
+| `MessageQueuePriorityProvider` | `priorityOf` | `MessageQueuePriorityProvider#buildPriorityGroups`、`MessageQueueSelector` | 构建读写队列优先级分组时 |
+| `MessageQueuePenalizer` | `penaltyOf` | `MessageQueuePenalizer#evaluatePenalty`、`MessageQueueSelector` | 按故障延迟、隔离等规则评估候选队列惩罚值时 |
+| `PopMessageResultFilter` | `filterMessage` | `ConsumerProcessor#popMessage` | Proxy pop 到消息后，返回给客户端或转入后续处理前 |
+| `TopicMessageTypeValidator` | `validate` | `ProducerProcessor`、`SendMessageActivity`、`RecallMessageActivity` | Proxy 处理发送、延迟发送、撤回请求前校验 topic 类型时 |
+| Proxy 服务层接口 | 各 service 方法 | `ProducerProcessor`、`ConsumerProcessor`、`ClientManagerProcessor`、remoting/gRPC activities | 对应 Proxy API 请求进入业务处理后，按消息、路由、事务、元数据、channel 管理职责调用 |
+| `FileWatchService.Listener` | `onChanged` | `FileWatchService`、`NamesrvController`、`BrokerController`、`TlsCertificateManager` | 轮询检测到被监听文件内容 hash 变化时 |
+| `StateEventListener` | `fireEvent` | `DefaultReceiptHandleManager` | receipt handle 续期、停止续期、清理 group 等状态变化时 |
+| `Handler<T,R>` | `handle(T, HandlerChain<T,R>)` | `HandlerChain#handle`、Auth default provider | 认证授权链执行到当前 handler，需要处理或继续调用下一个 handler 时 |
+| `RetryPolicy` | `nextDelayDuration` | Broker subscription group retry、`DefaultReceiptHandleManager`、`RenewStrategyPolicy` | 计算消息重试延迟或 invisible time 续期间隔时 |
+| `Start` / `Shutdown` / `StartAndShutdown` | `start`、`shutdown` | Broker、Proxy、client、store 组件生命周期管理代码 | 组件启动或关闭阶段 |
+| `ThreadPoolStatusMonitor` | `describe`、`value`、`needPrintJstack` | `ThreadPoolMonitor` | 定时采样线程池队列、活跃线程等指标，并判断是否触发 jstack 时 |
+| Client `SendMessageHook` | `sendMessageBefore`、`sendMessageAfter` | `DefaultMQProducerImpl` | 客户端发送消息前后，含 trace/open tracing hook |
+| `CheckForbiddenHook` | `checkForbidden` | `DefaultMQProducerImpl#executeCheckForbiddenHook` | 客户端发送消息前做本地禁发校验时 |
+| `EndTransactionHook` | `endTransaction` | `DefaultMQProducerImpl#executeEndTransactionHook` | 事务消息本地事务执行后，向 Broker 结束事务前后记录上下文时 |
+| Client `ConsumeMessageHook` | `consumeMessageBefore`、`consumeMessageAfter` | `DefaultMQPushConsumerImpl`、`DefaultMQPullConsumerImpl`、`DefaultLitePullConsumerImpl` | 客户端消费逻辑执行前后，含 trace/open tracing hook |
+| `FilterMessageHook` | `filterMessage` | `PullAPIWrapper`、`DefaultMQPushConsumerImpl` | 拉取结果按订阅过滤后，返回用户或提交消费服务前 |
+| `MessageListenerConcurrently` / `MessageListenerOrderly` | `consumeMessage` | `ConsumeMessageConcurrentlyService`、`ConsumeMessageOrderlyService`、pop consume services | Push/pop consumer worker 线程把消息批次交给用户消费时 |
+| `AllocateMessageQueueStrategy` / `MachineRoomResolver` | `allocate`、`brokerDeployIn`、`consumerDeployIn` | `RebalanceImpl`、`AllocateMachineRoomNearby` | 消费者 rebalance 计算当前 client 应分配的 message queue 时 |
+| `MessageQueueListener` / `TopicMessageQueueChangeListener` | `messageQueueChanged`、`onChanged` | `RebalancePushImpl`、`RebalancePullImpl`、`DefaultLitePullConsumerImpl` | rebalance 分配结果变化，或 topic 路由队列集合变化时 |
+| `MessageQueueSelector` | `select` | `DefaultMQProducerImpl#sendSelectImpl` | 用户按 key、hash、机房等规则选择发送队列时 |
+| `SendCallback` / `RequestCallback` | `onSuccess`、`onException` | `MQClientAPIImpl`、`DefaultMQProducerImpl`、`RequestResponseFuture`、`ClientRemotingProcessor` | 异步 send 或 request-reply 收到响应、超时或异常时 |
+| `TransactionListener` / `TransactionCheckListener` | `executeLocalTransaction`、`checkLocalTransaction`、`checkLocalTransactionState` | `DefaultMQProducerImpl`、`ClientRemotingProcessor` | 事务消息发送成功后执行本地事务，或 Broker 发起事务状态回查时 |
+| `PullCallback` / `PopCallback` / `AckCallback` | `onSuccess`、`onException` | `MQClientAPIImpl`、`MQClientAPIExt`、consumer impl | 异步 pull、pop、ack 请求完成或失败时 |
+| `PullTaskCallback` | `doPullTask` | `MQPullConsumerScheduleService` | 定时 pull task 被调度到指定 message queue 时 |
+| `TraceDispatcher` | `start`、`append`、`flush`、`shutdown` | producer/consumer trace hooks、`AsyncTraceDispatcher` | 开启消息轨迹后，客户端启动、追加轨迹上下文、刷新或关闭时 |
+| `HashFunction` | `hash` | 一致性哈希队列分配策略 | `AllocateMessageQueueConsistentHash` 计算节点 hash 时 |
+| `SubCommand` | `commandName`、`commandDesc`、`commandAlias`、`buildCommandlineOptions`、`execute` | `MQAdminStartup` | mqadmin 查找命令、打印帮助、解析参数并执行命令时 |
+| `MonitorListener` | `beginRound`、`reportUndoneMsgs`、`reportFailedMsgs`、`reportDeleteMsgsEvent`、`endRound` | `MonitorService` | 每轮监控开始/结束、发现堆积、失败消息或 delete message 事件时 |
 
 ## 1. 装载与注册约定
 
