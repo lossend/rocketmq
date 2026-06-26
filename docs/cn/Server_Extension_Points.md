@@ -1,8 +1,8 @@
-# RocketMQ 服务端插件与扩展点
+# RocketMQ 插件、Hook 与扩展点
 
-本文档列出当前源码中的 RocketMQ 服务端扩展点，覆盖 Broker、NameServer、Controller、Proxy、Store、TieredStore、Auth、Remoting、Filter 和通用服务工具模块。
+本文档列出当前源码中的 RocketMQ 扩展点，覆盖 Client、Broker、NameServer、Controller、Proxy、Store、TieredStore、Auth、Remoting、Filter、Tools 和通用服务工具模块。
 
-RocketMQ 服务端没有统一的插件注册中心。扩展点主要分为四类：
+RocketMQ 没有统一的插件注册中心。扩展点主要分为四类：
 
 - 配置类名装载：通过配置项填写实现类全限定名，再由 `Class.forName` 创建。
 - RocketMQ `ServiceProvider` 装载：读取 `META-INF/service/<接口全限定名>`，注意目录名是 `service`，不是 JDK 标准 `services`。
@@ -17,6 +17,7 @@ RocketMQ 服务端没有统一的插件注册中心。扩展点主要分为四�
 | Broker | `TransactionalMessageService` | `META-INF/service/...TransactionalMessageService` | `BrokerController.initialTransaction` |
 | Broker | `AbstractTransactionalMessageCheckListener` | `META-INF/service/...AbstractTransactionalMessageCheckListener` | `BrokerController.initialTransaction` |
 | Remoting/Broker | `RPCHook` | `META-INF/service/...RPCHook` 或代码注册 | `BrokerController.initialRpcHooks`、`RemotingService.registerRPCHook` |
+| Common/NameServer | `TopAddressing` / `NameServerUpdateCallback` | JDK `ServiceLoader` 或代码注册回调 | `DefaultTopAddressing` |
 | Store | `HAService` | `META-INF/service/...HAService` | `DefaultMessageStore.initializeHAService` |
 | Store | `MappedFile` | JDK `ServiceLoader` | `AllocateMappedFileService` |
 | Auth | 认证/授权 provider、metadata provider、strategy | `AuthConfig` 类名配置 | `AuthenticationFactory`、`AuthorizationFactory` |
@@ -50,6 +51,13 @@ RocketMQ 服务端没有统一的插件注册中心。扩展点主要分为四�
 | Common | `FileWatchService.Listener` | 构造注入 | TLS/证书/配置文件变更监听 |
 | Common | `Handler<T,R>` | `HandlerChain` 组合 | Auth 认证授权链 |
 | Common | `RetryPolicy` | subscription group retry policy | Broker/Proxy 重试和续期计算 |
+| Common | `ThreadPoolStatusMonitor` | `ThreadPoolMonitor.createAndMonitor` 参数注入 | 线程池状态采样与 jstack 触发 |
+| Client | client hook | `register*Hook` 或内置 trace 注册 | producer/consumer impl |
+| Client | 消费监听与分配策略 | consumer API 设置 | `MessageListener*`、`AllocateMessageQueueStrategy` |
+| Client | 生产回调与事务回调 | producer API 参数或 setter | `SendCallback`、`TransactionListener` |
+| Client | pull/pop/ack 回调 | async consumer API 参数 | `PullCallback`、`PopCallback`、`AckCallback` |
+| Client | 消息轨迹 dispatcher | `enableMsgTrace` 内置装配 | `TraceDispatcher` |
+| Tools | `SubCommand` / `MonitorListener` | 命令注册或 monitor 注入 | `MQAdminStartup`、`MonitorService` |
 
 ## 1. 装载与注册约定
 
@@ -1458,6 +1466,48 @@ public interface ElectPolicy {
 enableControllerInNamesrv=true
 ```
 
+### 8.4 TopAddressing 与 NameServerUpdateCallback
+
+定义：NameServer 地址发现 SPI。`DefaultTopAddressing` 会通过 JDK `ServiceLoader<TopAddressing>` 加载自定义实现；实现可返回自定义 NameServer 地址，并在地址变化时回调客户端。
+
+```java
+/**
+ * SPI for discovering NameServer addresses.
+ */
+public interface TopAddressing {
+
+    /**
+     * Fetches the current NameServer address list.
+     *
+     * @return semicolon-separated NameServer addresses, or null when unavailable
+     */
+    String fetchNSAddr();
+
+    /**
+     * Registers a callback invoked when the NameServer address changes.
+     *
+     * @param changeCallBack callback that receives the changed address string
+     */
+    void registerChangeCallBack(NameServerUpdateCallback changeCallBack);
+}
+```
+
+```java
+/**
+ * Callback invoked after a NameServer address change is detected.
+ */
+public interface NameServerUpdateCallback {
+
+    /**
+     * Handles the changed NameServer address.
+     *
+     * @param namesrvAddress new NameServer address string
+     * @return address string accepted by the callback implementation
+     */
+    String onNameServerAddressChange(String namesrvAddress);
+}
+```
+
 ## 9. Proxy 扩展点
 
 ### 9.1 ServiceManagerFactory 与 ObjectCreator
@@ -2108,7 +2158,662 @@ public interface StartAndShutdown extends Start, Shutdown {
 }
 ```
 
-## 11. 当前未完整外部化的接口
+### 10.6 ThreadPoolStatusMonitor
+
+定义：线程池状态采样接口，`ThreadPoolMonitor` 定期调用该接口输出状态，并可按阈值触发 jstack。
+
+```java
+/**
+ * Monitor used by ThreadPoolMonitor to sample and describe a thread pool.
+ */
+public interface ThreadPoolStatusMonitor {
+
+    /**
+     * Describes the metric sampled by this monitor.
+     *
+     * @return display name for the sampled metric
+     */
+    String describe();
+
+    /**
+     * Samples one numeric value from the target executor.
+     *
+     * @param executor executor to inspect
+     * @return sampled metric value
+     */
+    double value(ThreadPoolExecutor executor);
+
+    /**
+     * Returns whether the current value should trigger jstack printing.
+     *
+     * @param executor executor being inspected
+     * @param value sampled metric value
+     * @return true when jstack should be printed
+     */
+    boolean needPrintJstack(ThreadPoolExecutor executor, double value);
+}
+```
+
+## 11. Client 扩展点
+
+### 11.1 Client SendMessageHook
+
+定义：生产者发送消息前后的客户端 Hook。内置消息轨迹和 OpenTracing 实现基于该接口。
+
+```java
+/**
+ * Hook invoked around client-side send-message execution.
+ */
+public interface SendMessageHook {
+
+    /**
+     * Returns the hook name used for logging and diagnostics.
+     *
+     * @return hook name
+     */
+    String hookName();
+
+    /**
+     * Runs before the client sends a message.
+     *
+     * @param context send-message context
+     */
+    void sendMessageBefore(SendMessageContext context);
+
+    /**
+     * Runs after the client receives the send result or exception.
+     *
+     * @param context send-message context
+     */
+    void sendMessageAfter(SendMessageContext context);
+}
+```
+
+### 11.2 Client ConsumeMessageHook
+
+定义：消费者消费消息前后的客户端 Hook。push、lite-pull 以及 trace 逻辑会使用该接口。
+
+```java
+/**
+ * Hook invoked around client-side message consumption.
+ */
+public interface ConsumeMessageHook {
+
+    /**
+     * Returns the hook name used for logging and diagnostics.
+     *
+     * @return hook name
+     */
+    String hookName();
+
+    /**
+     * Runs before user consumption callback is invoked.
+     *
+     * @param context consume-message context
+     */
+    void consumeMessageBefore(ConsumeMessageContext context);
+
+    /**
+     * Runs after user consumption callback returns.
+     *
+     * @param context consume-message context
+     */
+    void consumeMessageAfter(ConsumeMessageContext context);
+}
+```
+
+### 11.3 CheckForbiddenHook
+
+定义：生产者发送前的禁止发送校验 Hook，可抛出 `MQClientException` 中断发送。
+
+```java
+/**
+ * Hook used to reject a client-side send before the request is sent.
+ */
+public interface CheckForbiddenHook {
+
+    /**
+     * Returns the hook name used for logging and diagnostics.
+     *
+     * @return hook name
+     */
+    String hookName();
+
+    /**
+     * Checks whether the send should be forbidden.
+     *
+     * @param context forbidden-check context
+     * @throws MQClientException when the send must be rejected
+     */
+    void checkForbidden(CheckForbiddenContext context) throws MQClientException;
+}
+```
+
+### 11.4 EndTransactionHook
+
+定义：事务消息结束事务时的客户端 Hook，内置 trace 会在提交或回滚事务后记录轨迹。
+
+```java
+/**
+ * Hook invoked when a transactional message ends its local transaction.
+ */
+public interface EndTransactionHook {
+
+    /**
+     * Returns the hook name used for logging and diagnostics.
+     *
+     * @return hook name
+     */
+    String hookName();
+
+    /**
+     * Handles transaction-end context.
+     *
+     * @param context end-transaction context
+     */
+    void endTransaction(EndTransactionContext context);
+}
+```
+
+### 11.5 FilterMessageHook
+
+定义：客户端拉取消息后、交给消费逻辑前的过滤后置 Hook，可观察或调整过滤后的消息列表。
+
+```java
+/**
+ * Hook invoked after client-side message filtering.
+ */
+public interface FilterMessageHook {
+
+    /**
+     * Returns the hook name used for logging and diagnostics.
+     *
+     * @return hook name
+     */
+    String hookName();
+
+    /**
+     * Handles the filtered message context.
+     *
+     * @param context filtered-message context
+     */
+    void filterMessage(FilterMessageContext context);
+}
+```
+
+### 11.6 MessageListener、MessageListenerConcurrently、MessageListenerOrderly
+
+定义：PushConsumer 的业务消费回调。`MessageListener` 是标记接口，并由并发消费和顺序消费两个接口承载真实方法。
+
+```java
+/**
+ * Marker interface for asynchronously delivered message listeners.
+ */
+public interface MessageListener {
+}
+```
+
+```java
+/**
+ * Listener for concurrent message consumption.
+ */
+public interface MessageListenerConcurrently extends MessageListener {
+
+    /**
+     * Consumes one batch of messages concurrently.
+     *
+     * @param msgs message batch, size is at least 1
+     * @param context concurrent-consume context
+     * @return concurrent consume status
+     */
+    ConsumeConcurrentlyStatus consumeMessage(List<MessageExt> msgs, ConsumeConcurrentlyContext context);
+}
+```
+
+```java
+/**
+ * Listener for ordered message consumption.
+ */
+public interface MessageListenerOrderly extends MessageListener {
+
+    /**
+     * Consumes one batch of messages in queue order.
+     *
+     * @param msgs message batch, size is at least 1
+     * @param context orderly-consume context
+     * @return orderly consume status
+     */
+    ConsumeOrderlyStatus consumeMessage(List<MessageExt> msgs, ConsumeOrderlyContext context);
+}
+```
+
+### 11.7 AllocateMessageQueueStrategy 与 MachineRoomResolver
+
+定义：消费者负载均衡分配策略。内置 `AllocateMachineRoomNearby` 还提供机房解析器，用于按机房就近分配队列。
+
+```java
+/**
+ * Strategy used by consumers to allocate message queues among clients in the same group.
+ */
+public interface AllocateMessageQueueStrategy {
+
+    /**
+     * Allocates queues for the current consumer id.
+     *
+     * @param consumerGroup consumer group
+     * @param currentCID current client id
+     * @param mqAll all message queues
+     * @param cidAll all client ids in the group
+     * @return message queues assigned to currentCID
+     */
+    List<MessageQueue> allocate(String consumerGroup, String currentCID,
+        List<MessageQueue> mqAll, List<String> cidAll);
+
+    /**
+     * Returns the strategy name.
+     *
+     * @return strategy name
+     */
+    String getName();
+}
+```
+
+```java
+/**
+ * Resolver used by AllocateMachineRoomNearby to map brokers and consumers to machine rooms.
+ */
+public interface MachineRoomResolver {
+
+    /**
+     * Resolves the machine room where a broker queue is deployed.
+     *
+     * @param messageQueue broker message queue
+     * @return non-null machine room name
+     */
+    String brokerDeployIn(MessageQueue messageQueue);
+
+    /**
+     * Resolves the machine room where a consumer client is deployed.
+     *
+     * @param clientID consumer client id
+     * @return non-null machine room name
+     */
+    String consumerDeployIn(String clientID);
+}
+```
+
+### 11.8 MessageQueueListener 与 TopicMessageQueueChangeListener
+
+定义：消费者本地队列分配或 topic 队列集合变化监听器。
+
+```java
+/**
+ * Listener notified when a consumer's queue assignment changes.
+ */
+public interface MessageQueueListener {
+
+    /**
+     * Handles queue assignment changes for one topic.
+     *
+     * @param topic topic name
+     * @param mqAll all queues for the topic
+     * @param mqAssigned queues assigned to the current consumer
+     */
+    void messageQueueChanged(String topic, Set<MessageQueue> mqAll, Set<MessageQueue> mqAssigned);
+}
+```
+
+```java
+/**
+ * Listener notified when the queue set of a topic changes.
+ */
+public interface TopicMessageQueueChangeListener {
+
+    /**
+     * Handles topic queue-set changes.
+     *
+     * @param topic topic name
+     * @param messageQueues latest message queues
+     */
+    void onChanged(String topic, Set<MessageQueue> messageQueues);
+}
+```
+
+### 11.9 MessageQueueSelector
+
+定义：生产者发送时的队列选择策略，常用于顺序消息按业务 key 选择固定队列。
+
+```java
+/**
+ * Strategy used by producers to select a target message queue.
+ */
+public interface MessageQueueSelector {
+
+    /**
+     * Selects one queue from available queues.
+     *
+     * @param mqs candidate message queues
+     * @param msg message being sent
+     * @param arg user-supplied selector argument
+     * @return selected message queue
+     */
+    MessageQueue select(List<MessageQueue> mqs, Message msg, Object arg);
+}
+```
+
+### 11.10 SendCallback 与 RequestCallback
+
+定义：生产者异步发送和 request-reply 请求的回调接口。
+
+```java
+/**
+ * Callback for asynchronous send operations.
+ */
+public interface SendCallback {
+
+    /**
+     * Handles successful send completion.
+     *
+     * @param sendResult send result
+     */
+    void onSuccess(SendResult sendResult);
+
+    /**
+     * Handles send failure.
+     *
+     * @param e failure cause
+     */
+    void onException(Throwable e);
+}
+```
+
+```java
+/**
+ * Callback for asynchronous request-reply operations.
+ */
+public interface RequestCallback {
+
+    /**
+     * Handles successful reply message.
+     *
+     * @param message reply message
+     */
+    void onSuccess(Message message);
+
+    /**
+     * Handles request failure.
+     *
+     * @param e failure cause
+     */
+    void onException(Throwable e);
+}
+```
+
+### 11.11 TransactionListener 与 TransactionCheckListener
+
+定义：事务消息本地事务执行与 broker 回查回调。`TransactionCheckListener` 已标记废弃，应优先使用 `TransactionListener`。
+
+```java
+/**
+ * Listener for transactional message local execution and transaction checks.
+ */
+public interface TransactionListener {
+
+    /**
+     * Executes the local transaction after the half message is sent.
+     *
+     * @param msg half message
+     * @param arg user-supplied argument
+     * @return local transaction state
+     */
+    LocalTransactionState executeLocalTransaction(Message msg, Object arg);
+
+    /**
+     * Checks local transaction state when the broker sends a transaction check.
+     *
+     * @param msg check message
+     * @return local transaction state
+     */
+    LocalTransactionState checkLocalTransaction(MessageExt msg);
+}
+```
+
+```java
+/**
+ * Deprecated transaction-check callback kept for compatibility.
+ *
+ * @deprecated use TransactionListener instead
+ */
+@Deprecated
+public interface TransactionCheckListener {
+
+    /**
+     * Checks local transaction state for a broker transaction check.
+     *
+     * @param msg check message
+     * @return local transaction state
+     */
+    LocalTransactionState checkLocalTransactionState(MessageExt msg);
+}
+```
+
+### 11.12 PullCallback、PopCallback、AckCallback 与 PullTaskCallback
+
+定义：consumer 异步 pull、pop、ack 以及 pull task 的回调接口。
+
+```java
+/**
+ * Callback for asynchronous pull operations.
+ */
+public interface PullCallback {
+
+    /** Handles successful pull completion. */
+    void onSuccess(PullResult pullResult);
+
+    /** Handles pull failure. */
+    void onException(Throwable e);
+}
+```
+
+```java
+/**
+ * Callback for asynchronous pop operations.
+ */
+public interface PopCallback {
+
+    /** Handles successful pop completion. */
+    void onSuccess(PopResult popResult);
+
+    /** Handles pop failure. */
+    void onException(Throwable e);
+}
+```
+
+```java
+/**
+ * Callback for asynchronous ack operations.
+ */
+public interface AckCallback {
+
+    /** Handles successful ack completion. */
+    void onSuccess(AckResult ackResult);
+
+    /** Handles ack failure. */
+    void onException(Throwable e);
+}
+```
+
+```java
+/**
+ * Callback executed by pull-consumer scheduled pull tasks.
+ */
+public interface PullTaskCallback {
+
+    /**
+     * Performs one pull task for a message queue.
+     *
+     * @param mq target message queue
+     * @param context pull task context
+     */
+    void doPullTask(MessageQueue mq, PullTaskContext context);
+}
+```
+
+### 11.13 TraceDispatcher
+
+定义：客户端消息轨迹异步分发接口。当前主要由内置 `AsyncTraceDispatcher` 使用，生产者和消费者通过 `enableMsgTrace` 自动装配。
+
+```java
+/**
+ * Dispatcher for asynchronous message trace data.
+ */
+public interface TraceDispatcher {
+
+    /**
+     * Trace dispatcher type.
+     */
+    enum Type {
+        PRODUCE,
+        CONSUME
+    }
+
+    /**
+     * Starts the trace dispatcher.
+     *
+     * @param nameSrvAddr NameServer address
+     * @param accessChannel access channel
+     * @throws MQClientException when startup fails
+     */
+    void start(String nameSrvAddr, AccessChannel accessChannel) throws MQClientException;
+
+    /**
+     * Appends one trace context.
+     *
+     * @param ctx trace context
+     * @return true when the context was accepted
+     */
+    boolean append(Object ctx);
+
+    /**
+     * Flushes pending trace data.
+     *
+     * @throws IOException when flushing fails
+     */
+    void flush() throws IOException;
+
+    /**
+     * Shuts down the dispatcher.
+     */
+    void shutdown();
+}
+```
+
+### 11.14 HashFunction
+
+定义：一致性哈希分配策略的自定义哈希函数，可通过 `AllocateMessageQueueConsistentHash(int, HashFunction)` 注入。
+
+```java
+/**
+ * Hash function used by consistent-hash queue allocation.
+ */
+public interface HashFunction {
+
+    /**
+     * Hashes a string key to a long value.
+     *
+     * @param key source key
+     * @return hash value
+     */
+    long hash(String key);
+}
+```
+
+## 12. Tools 扩展点
+
+### 12.1 SubCommand
+
+定义：`mqadmin` 命令接口。新增命令需要实现该接口并注册到 `MQAdminStartup` 的命令集合。
+
+```java
+/**
+ * Command contract for mqadmin subcommands.
+ */
+public interface SubCommand {
+
+    /**
+     * Returns the command name.
+     *
+     * @return command name
+     */
+    String commandName();
+
+    /**
+     * Returns the optional command alias.
+     *
+     * @return alias, or null when no alias is defined
+     */
+    default String commandAlias() {
+        return null;
+    }
+
+    /**
+     * Returns the command description.
+     *
+     * @return command description
+     */
+    String commandDesc();
+
+    /**
+     * Builds command-line options for this command.
+     *
+     * @param options mutable options object
+     * @return options object with this command's options
+     */
+    Options buildCommandlineOptions(Options options);
+
+    /**
+     * Executes this command.
+     *
+     * @param commandLine parsed command line
+     * @param options command options
+     * @param rpcHook optional RPC hook for admin requests
+     * @throws SubCommandException when command execution fails
+     */
+    void execute(CommandLine commandLine, Options options, RPCHook rpcHook) throws SubCommandException;
+}
+```
+
+### 12.2 MonitorListener
+
+定义：monitor 工具的巡检回调接口，用于每轮巡检开始、上报异常消息、上报 consumer 运行信息和结束。
+
+```java
+/**
+ * Listener used by MonitorService to report monitoring events.
+ */
+public interface MonitorListener {
+
+    /** Invoked before one monitor round starts. */
+    void beginRound();
+
+    /** Reports messages that were not consumed in time. */
+    void reportUndoneMsgs(UndoneMsgs undoneMsgs);
+
+    /** Reports failed messages. */
+    void reportFailedMsgs(FailedMsgs failedMsgs);
+
+    /** Reports delete-message events. */
+    void reportDeleteMsgsEvent(DeleteMsgsEvent deleteMsgsEvent);
+
+    /** Reports consumer running information keyed by client id. */
+    void reportConsumerRunningInfo(TreeMap<String, ConsumerRunningInfo> criTable);
+
+    /** Invoked after one monitor round ends. */
+    void endRound();
+}
+```
+
+## 13. 当前未完整外部化的接口
 
 以下接口或策略在源码中存在，但当前不是完整的外部插件机制：
 
@@ -2119,7 +2824,7 @@ public interface StartAndShutdown extends Start, Shutdown {
 - `QueryAssignmentProcessor` 中的 `AllocateMessageQueueStrategy`：来自 client rebalance 策略，Broker 内部维护私有映射，没有公开注册方法。
 - `CompressorFactory`：只维护固定内置压缩器映射，没有注册方法或配置项。
 
-## 12. 源码定位索引
+## 14. 源码定位索引
 
 | 扩展点 | 源码文件 |
 | --- | --- |
@@ -2141,9 +2846,19 @@ public interface StartAndShutdown extends Start, Shutdown {
 | Auth 扩展接口 | `auth/src/main/java/org/apache/rocketmq/auth/` |
 | TieredStore 扩展接口 | `tieredstore/src/main/java/org/apache/rocketmq/tieredstore/` |
 | `FilterSpi` | `filter/src/main/java/org/apache/rocketmq/filter/FilterSpi.java` |
+| `TopAddressing` / `NameServerUpdateCallback` | `common/src/main/java/org/apache/rocketmq/common/namesrv/` |
 | `RPCHook` / `ChannelEventListener` | `remoting/src/main/java/org/apache/rocketmq/remoting/` |
 | Broker `RequestPipeline` | `remoting/src/main/java/org/apache/rocketmq/remoting/pipeline/RequestPipeline.java` |
 | Proxy remoting/gRPC pipeline | `proxy/src/main/java/org/apache/rocketmq/proxy/remoting/pipeline/RequestPipeline.java`, `proxy/src/main/java/org/apache/rocketmq/proxy/grpc/pipeline/RequestPipeline.java` |
 | Proxy routing扩展 | `proxy/src/main/java/org/apache/rocketmq/proxy/service/route/` |
 | Controller 扩展接口 | `controller/src/main/java/org/apache/rocketmq/controller/` |
 | `FileWatchService.Listener` | `srvutil/src/main/java/org/apache/rocketmq/srvutil/FileWatchService.java` |
+| `ThreadPoolStatusMonitor` | `common/src/main/java/org/apache/rocketmq/common/thread/ThreadPoolStatusMonitor.java` |
+| Client hook | `client/src/main/java/org/apache/rocketmq/client/hook/` |
+| Client 消费监听接口 | `client/src/main/java/org/apache/rocketmq/client/consumer/listener/` |
+| Client 消费回调与分配策略 | `client/src/main/java/org/apache/rocketmq/client/consumer/` |
+| Client 生产回调与事务接口 | `client/src/main/java/org/apache/rocketmq/client/producer/` |
+| `TraceDispatcher` | `client/src/main/java/org/apache/rocketmq/client/trace/TraceDispatcher.java` |
+| `HashFunction` | `common/src/main/java/org/apache/rocketmq/common/consistenthash/HashFunction.java` |
+| `SubCommand` | `tools/src/main/java/org/apache/rocketmq/tools/command/SubCommand.java` |
+| `MonitorListener` | `tools/src/main/java/org/apache/rocketmq/tools/monitor/MonitorListener.java` |
