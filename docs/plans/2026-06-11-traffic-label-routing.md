@@ -4,7 +4,7 @@
 
 **目标：** 基于消息流量标实现动态消费路由：隔离环境 Producer 发送带标消息；如果同一消费组内存在相同隔离标的在线隔离消费者，则由该隔离环境消费；否则回退到标准环境消费。
 
-**架构：** Topic 和 consumer group 维持同一套逻辑资源，不为每个隔离环境拆 Topic 或拆组。Java 5.x Client 负责把 Producer 消息流量标和 Consumer 环境流量标传到 Proxy；多 Proxy 下由 Proxy 集群维护 `group/topic/trafficLabel` 在线视图，并在 POP 请求中携带快照；Broker 负责最终路由判断，因为 offset、POP 不可见时间、重试、DLQ、FIFO 顺序都在 Broker 侧闭环。非 FIFO POP 通过持久化 deferred ledger 跳过暂时不属于当前消费者的消息，避免阻塞后续标准消息；FIFO 保持全局队列顺序，队头消息不属于当前消费者时只能阻塞。
+**架构：** Topic 和 consumer group 维持同一套逻辑资源，不为每个隔离环境拆 Topic 或拆组。Java 5.x Client 负责把 Producer 消息流量标和 Consumer 环境流量标传到 Proxy；多 Proxy 下复用 Cluster Proxy 已有的 Consumer 集群视图，在其上维护 `group/topic/trafficLabel` 在线视图，并在 POP 请求中携带快照；Broker 负责最终路由判断，因为 offset、POP 不可见时间、重试、DLQ、FIFO 顺序都在 Broker 侧闭环。非 FIFO POP 只在 owner-aware 规则允许时通过持久化 deferred ledger 跳过暂时不属于当前消费者的消息，避免隔离 Consumer 把大量标准流量写入 deferred ledger；FIFO 保持全局队列顺序，队头消息不属于当前消费者时只能阻塞。
 
 **技术栈：** RocketMQ Java 5.x Client、RocketMQ Proxy gRPC v2、Broker POP 消费链路、remoting header、Proxy heartbeat syncer、Broker commitlog-backed 内部主题或等价 HA 持久化存储。
 
@@ -13,6 +13,7 @@
 ## 已确认语义
 
 - 标准环境的 `trafficLabel` 为空字符串。
+- Broker 和 Proxy 内部把空字符串归一化为 `STANDARD` 哨兵值；协议字段仍可保持空字符串，避免旧客户端兼容问题扩散到业务逻辑。
 - 隔离环境的 `trafficLabel` 为非空字符串，例如 `gray1`。
 - 隔离 Producer 发送消息时写入消息属性：`__RMQ_TRAFFIC_LABEL=<label>`。
 - 隔离 Consumer 通过客户端配置声明自身环境：`trafficLabel=<label>`。
@@ -21,6 +22,7 @@
 - 如果消费时没有相同流量标的在线隔离 Consumer，有流量标消息回退给标准环境 Consumer。
 - v1 范围覆盖 Java 5.x + Proxy。未携带 consumer label 的旧 remoting 客户端按标准环境处理。
 - 非 FIFO 消费允许标准消息越过当前被隔离环境占用的有标消息。
+- 非 FIFO 的 deferred ledger 不是任意 non-owner 都能写入。标准 Consumer 可以为在线隔离 label 创建 deferred record；隔离 Consumer 遇到在线标准环境消息时只返回空结果、不推进 cursor、不写 deferred，等待标准 Consumer 消费。
 - FIFO 消费必须保持全局队列顺序。如果队头消息属于另一个在线隔离标，非 owner Consumer 返回空结果并等待 owner 消费或 owner 下线。
 
 ## 核心路由、跳过与重试语义
@@ -43,10 +45,37 @@ else if consumerTrafficLabel == messageTrafficLabel:
 else if consumerTrafficLabel is blank and no online consumer has messageTrafficLabel:
     standard consumer is eligible by fallback
 else:
-    current consumer is not eligible
+    current consumer is not eligible; route action decides DEFER or YIELD
 ```
 
 这里的“没有在线隔离 Consumer”必须以新鲜的集群在线 label 视图为准。隔离 Consumer 进程突然退出时，系统需要等 channel close、unregister 或 heartbeat/lease 过期后才认为它离线；在这之前仍按隔离 Consumer 在线处理。
+
+是否写 deferred ledger 由 route action 决定：
+
+```text
+routeAction(messageLabel, consumerLabel, labelState):
+    messageLabel = normalizeBlankAsStandard(messageLabel)
+    consumerLabel = normalizeBlankAsStandard(consumerLabel)
+
+    if messageLabel == consumerLabel:
+        return DELIVER
+
+    if consumerLabel == STANDARD:
+        if labelState(messageLabel) == OFFLINE:
+            return DELIVER_FALLBACK
+        if nonFifo:
+            return DEFER
+        return BLOCK
+
+    if labelState(messageLabel) == ONLINE or labelState(messageLabel) == UNKNOWN:
+        return YIELD_WITHOUT_DEFER
+
+    if nonFifo:
+        return DEFER
+    return BLOCK
+```
+
+`YIELD_WITHOUT_DEFER` 的含义是本次 POP 返回空结果或已有结果，不推进当前 queue cursor，也不写 deferred record。这个非对称规则用于保护标准环境：10 个隔离 Consumer 和 1 个标准 Consumer 同组时，标准消息不会因为被隔离 Consumer 频繁扫到而大量进入 deferred ledger。
 
 ### Broker 如何判断某个 label 在线
 
@@ -54,8 +83,8 @@ Broker 不主动扫描全量 Consumer，也不假设自己能看到所有 Consum
 
 Java 5.x + Proxy 路径的判断来源：
 
-1. Consumer 连接到某个 Proxy 时，Proxy 从 `x-mq-traffic-label` 得到 Consumer 环境 label。
-2. Proxy 通过 `TrafficLabelPresenceManager` 维护本地和远端 Proxy 同步来的 Consumer lease。
+1. Consumer 连接到某个 Proxy 时，Proxy 从 `x-mq-traffic-label` 得到 Consumer 环境 label，并把空值归一化为 `STANDARD`。
+2. Proxy 通过 `TrafficLabelPresenceManager` 维护本地和远端 Proxy 同步来的 Consumer lease。实现上复用 Cluster Proxy 已有的 `ClusterConsumerManager`、`HeartbeatSyncer`、`RemoteChannel` 机制，不另建第二套 Consumer registry。
 3. Proxy 发起 POP 请求 Broker 前，按 `consumerGroup/topic` 查询 presence manager，生成在线 label 快照：
    - `onlineTrafficLabels`
    - `trafficLabelSnapshotTimestamp`
@@ -64,20 +93,19 @@ Java 5.x + Proxy 路径的判断来源：
    - `onlineTrafficLabels` 字段存在。
    - `trafficLabelSnapshotTimestamp` 未超过 `trafficLabelRoutingMaxSnapshotAgeMs`。
    - snapshot version 可用于日志和排查。
-5. 快照可用时，Broker 用 `onlineTrafficLabels.contains(messageTrafficLabel)` 判断该 label 是否在线。
+5. 快照可用时，Broker 用归一化后的 label 集合判断 owner 是否在线。标准环境也必须出现在快照中，例如内部哨兵值 `STANDARD`；否则 Broker 无法判断隔离 Consumer 扫到标准消息时是否应该 `YIELD_WITHOUT_DEFER`。
 6. 快照缺失或过期时，状态为 `UNKNOWN`，标准 Consumer 不允许 fallback；非 FIFO 走 `DEFER`，FIFO 走 `BLOCK`。
 
 伪代码：
 
 ```text
 labelState(messageTrafficLabel, routeContext):
-    if messageTrafficLabel is blank:
-        return OFFLINE
+    messageTrafficLabel = normalizeBlankAsStandard(messageTrafficLabel)
 
     if routeContext.source == PROXY_SNAPSHOT:
         if routeContext.snapshotMissingOrExpired():
             return UNKNOWN
-        if routeContext.onlineTrafficLabels contains messageTrafficLabel:
+        if routeContext.normalizedOnlineTrafficLabels contains messageTrafficLabel:
             return ONLINE
         return OFFLINE
 
@@ -91,9 +119,43 @@ labelState(messageTrafficLabel, routeContext):
 
 直连 remoting 路径没有 Proxy 集群快照，只能使用 Broker 本地 `ConsumerManager#hasConsumerWithTrafficLabel(group, topic, label)`。这条路径无法天然覆盖“Consumer 连到其他 Proxy”的情况，所以 Java 5.x + Proxy v1 必须走 `PROXY_SNAPSHOT`。
 
+### Proxy 现有集群 Consumer 视图如何复用
+
+Cluster Proxy 现在已经维护“本地 Consumer + 远端 Proxy 同步 Consumer”的视图：
+
+- `ClusterServiceManager` 创建 `ClusterConsumerManager`，而不是直接使用 Broker 的 `ConsumerManager`。
+- `ClusterConsumerManager` 继承 Broker 的 `ConsumerManager`，本地 `registerConsumer/unregisterConsumer` 时先调用 `HeartbeatSyncer` 广播，再写入本地 consumer table。
+- `HeartbeatSyncer` 通过系统 topic 广播 Consumer 注册/注销，其他 Proxy 收到后把远端连接 decode 成 `RemoteChannel`，再调用 `consumerManager.registerConsumer(..., false)` 回灌到本地视图。
+- `ChannelHelper.isRemote(channel)` 用于识别远端同步来的 `RemoteChannel`，避免回灌后再次广播。
+
+`TrafficLabelPresenceManager` 应该挂在这条链路上，而不是替代它：
+
+```text
+ClusterConsumerManager.registerConsumer
+  -> TrafficLabelPresenceManager.upsertLocalLease(group, topics, trafficLabel, clientChannelInfo)
+  -> HeartbeatSyncer/PresenceSyncer publish label-aware lease
+  -> super.registerConsumer(...)
+
+PresenceSyncer.consumeMessage(remote lease)
+  -> ignore if proxyId == localProxyId
+  -> RemoteChannel.decode(channelData)
+  -> TrafficLabelPresenceManager.upsertRemoteLease(group, topics, trafficLabel, remoteChannel)
+  -> consumerManager.registerConsumer(..., false)
+```
+
+Presence 索引必须按 label 建模：
+
+```text
+group/topic/trafficLabel -> leases
+group/topic -> normalizedOnlineTrafficLabels
+leaseKey = trafficLabel + group + topic + proxyId + channelId
+```
+
+旧 `HeartbeatSyncer` 的 `remoteChannelMap` 只按 `group@channelId` 建 key，不能直接承载多 label 场景；需要把 `trafficLabel` 和订阅 topic 维度纳入 presence key，否则同一个 consumer group 下不同环境会互相覆盖或被误判为同一批 Consumer。
+
 ### 两类 Consumer 消费流程图
 
-以下流程图都以 POP 为入口，在流程内部区分标准消息和隔离消息。非 FIFO 的“跳过”表示先写 deferred ledger 再继续扫描；FIFO 不跳过队头。标准消息被隔离 Consumer 跳过时，deferred record 的 `messageTrafficLabel` 为空，只能被标准 Consumer 重新取出。
+以下流程图都以 POP 为入口，在流程内部区分标准消息和隔离消息。非 FIFO 的“跳过”只有 route action 为 `DEFER` 时才写 deferred ledger；route action 为 `YIELD_WITHOUT_DEFER` 时返回空结果或已有结果，不推进 cursor。FIFO 不跳过队头。
 
 #### 标准 Consumer 读取消息
 
@@ -135,22 +197,23 @@ flowchart TD
     D --> F["重新执行 subscription filter"]
     E --> G{"消息 label 是 gray1?"}
     G -->|是| F
-    G -->|否，label 为空| H{"是否 FIFO?"}
-    G -->|否，其他隔离 label| H
-    H -->|FIFO| I["BLOCK<br/>返回空结果<br/>不推进 offset"]
-    H -->|非 FIFO| J["DEFER<br/>按原消息 label 写 deferred record"]
-    J --> E
-    F --> K{"filter 通过?"}
-    K -->|否| E
-    K -->|是| L["DELIVER<br/>匹配隔离消息给 gray1 Consumer"]
-    L --> M["写入 POP in-flight/checkpoint"]
-    M --> N["返回给 gray1 Consumer"]
-    N --> O{"Consumer ack?"}
-    O -->|是| P["ACK 写入 revive topic<br/>消费完成"]
-    O -->|否| Q["invisible time 到期"]
-    Q --> R["PopReviveService 写入 POP retry topic"]
-    R --> S["下一次 POP 重新按最新在线 label 快照判路由"]
-    S --> A
+    G -->|否| H{"消息 owner label<br/>在线或未知?"}
+    H -->|是| I["YIELD<br/>返回空结果或已有结果<br/>不推进 cursor<br/>不写 deferred"]
+    H -->|否| J{"是否 FIFO?"}
+    J -->|FIFO| I
+    J -->|非 FIFO| K["DEFER<br/>按原消息 label 写 deferred record"]
+    K --> E
+    F --> L{"filter 通过?"}
+    L -->|否| E
+    L -->|是| M["DELIVER<br/>匹配隔离消息给 gray1 Consumer"]
+    M --> N["写入 POP in-flight/checkpoint"]
+    N --> O["返回给 gray1 Consumer"]
+    O --> P{"Consumer ack?"}
+    P -->|是| Q["ACK 写入 revive topic<br/>消费完成"]
+    P -->|否| R["invisible time 到期"]
+    R --> S["PopReviveService 写入 POP retry topic"]
+    S --> T["下一次 POP 重新按最新在线 label 快照判路由"]
+    T --> A
 ```
 
 #### 单条消息在 Queue、Retry Queue 和 Deferred Ledger 间流转
@@ -169,6 +232,7 @@ flowchart LR
     Scan --> Route{"路由判定"}
     Route -->|DELIVER| Inflight
     Route -->|DEFER<br/>非 FIFO| DL
+    Route -->|YIELD_WITHOUT_DEFER<br/>非 FIFO| Yield["返回空结果或已有结果<br/>不推进 cursor"]
     Route -->|BLOCK<br/>FIFO| Stay["留在队头<br/>不推进 offset"]
 
     Inflight --> Ack{"ack?"}
@@ -186,7 +250,7 @@ flowchart LR
 
 - `Deferred Ledger` 是非 FIFO 跳过缓冲，不是 retry queue，也不代表消费失败。
 - `POP retry topic` 是 POP in-flight 后未 ack 的失败恢复路径。
-- 从正常 queue 或 retry queue 读到的消息都必须走同一套路由判定；不 eligible 且非 FIFO 时都可以进入 deferred ledger。
+- 从正常 queue 或 retry queue 读到的消息都必须走同一套路由判定；只有 route action 为 `DEFER` 时才可以进入 deferred ledger。`YIELD_WITHOUT_DEFER` 不推进 cursor，也不创建 ACTIVE record。
 - deferred record 必须记录 `sourceType=NORMAL|RETRY`、`deferStage=FIRST_DEFER|RETRY_DEFER` 以及真实存储位置，避免 retry 消息被 deferred 后回读错队列，也方便区分首次路由跳过和消费失败后的再次路由跳过。
 
 ### 标准 Consumer 遇到有标消息时怎么处理
@@ -197,6 +261,108 @@ flowchart LR
 - FIFO POP：标准 Consumer 不能跳过队头消息，也不创建 deferred record；如果队头是 `gray1` 且 `gray1` 隔离 Consumer 在线，当前 queue 返回空结果，等待匹配隔离 Consumer 消费或等待该 label 离线后标准 Consumer 再消费。
 
 因此，非 FIFO 下“跳过”是“持久化挂起并继续扫描”，不是 commit 成功，也不是删除消息；FIFO 下“不跳过”，而是阻塞队列头。
+
+### 防止大量标准流量进入 deferred ledger
+
+风险场景：
+
+```text
+同一个 consumerGroup:
+  STANDARD Consumer = 1 个
+  gray1..gray10 Consumer = 10 个
+  标准环境消息占绝大多数
+```
+
+如果所有非 FIFO route miss 都写 deferred，那么 10 个隔离 Consumer 频繁扫到标准消息时，会把大量标准消息写成 `messageTrafficLabel=STANDARD` 的 deferred record。标准流量越大，deferred ledger 写入量越大，系统会把“正常标准消费”变成“先写 ledger 再回读”的放大路径。
+
+v1 用 owner-aware deferred gate 解决：
+
+- 标准消息的 owner 是 `STANDARD` Consumer。
+- 有标消息的 owner 是相同 label 的隔离 Consumer；如果该 label 离线，标准 Consumer 才是 fallback owner。
+- 当前 Consumer 不是 owner 时，只有 route action 明确为 `DEFER` 才能写 ledger。
+- 隔离 Consumer 扫到标准消息，且 `STANDARD` 在线或状态未知时，返回 `YIELD_WITHOUT_DEFER`，不推进 cursor，不写 ACTIVE record。
+- 标准 Consumer 扫到在线隔离 label 的消息时，允许 `DEFER`，因为这能让标准流量越过隔离消息，并让对应隔离 Consumer 后续从 `byLabel(label)` 拿到 deferred record。
+- 任意 Consumer 扫到 owner 已确认离线的消息时，非 FIFO 可 `DEFER`，但受 `trafficLabelDeferredMaxRecordsPerQueue` 和 `trafficLabelDeferredMaxBytesPerBroker` 限制；达到上限后不推进 cursor。
+
+这个规则把标准高流量场景的写入量限制为“标准 Consumer 碰到的在线隔离消息数量”，而不是“隔离 Consumer 碰到的标准消息数量”。因此 10 个隔离 Consumer 不会把标准主流量成倍放大到 deferred ledger。
+
+隔离 Consumer 扫到标准消息时的处理：
+
+```text
+t0: gray1 Consumer 发起 POP。
+t1: Broker 在正常 queue 上扫到无流量标消息，归一化为 messageLabel=STANDARD。
+t2: Broker 判断当前 Consumer=gray1，不是 owner。
+t3: 如果 STANDARD 在线或在线状态未知，route action = YIELD_WITHOUT_DEFER。
+t4: Broker 不返回这条消息给 gray1 Consumer，不写 deferred ledger，不写 POP checkpoint。
+t5: Broker 不推进该 queue 的 POP cursor；这条标准消息仍留在原 consume queue 位置。
+t6: STANDARD Consumer 后续 POP 到该 queue 时，直接按正常路径消费这条消息。
+```
+
+如果本次 POP 已经从其他 queue 或其他位置拿到可返回消息，可以返回已有结果；如果没有，则返回空结果。
+
+#### YIELD_WITHOUT_DEFER 防忙轮询
+
+`YIELD_WITHOUT_DEFER` 不推进 cursor，因此同一个隔离 Consumer 可能在下一次 POP 又扫到同一条标准消息。v1 在 Broker 本地增加轻量级 `YieldBackoffManager`，只抑制“同一个 Consumer label 对同一个 queue 的快速重试”，不影响 owner Consumer 消费。
+
+Backoff key：
+
+```text
+brokerName/group/topic/queueId/consumerTrafficLabel
+```
+
+状态：
+
+```text
+{
+    lastYieldOffset,
+    consecutiveYieldCount,
+    nextAllowedScanTimestamp
+}
+```
+
+处理流程：
+
+```text
+beforeScanQueue(ctx):
+    key = brokerName/group/topic/queueId/consumerTrafficLabel
+    if yieldBackoffManager.isBackoff(key, now):
+        skip this queue for current POP
+        try other queues or return existing result
+
+onYieldWithoutDefer(ctx, queueOffset):
+    key = brokerName/group/topic/queueId/consumerTrafficLabel
+    if state.lastYieldOffset == queueOffset:
+        state.consecutiveYieldCount += 1
+    else:
+        state.lastYieldOffset = queueOffset
+        state.consecutiveYieldCount = 1
+
+    backoffMs = min(
+        trafficLabelYieldBackoffInitialMs * pow(2, state.consecutiveYieldCount - 1),
+        trafficLabelYieldBackoffMaxMs
+    )
+    state.nextAllowedScanTimestamp = now + backoffMs
+
+    return STOP_CURRENT_QUEUE_WITHOUT_ADVANCING_CURSOR
+
+onNonYieldProgress(ctx):
+    clear key
+```
+
+默认配置：
+
+```text
+trafficLabelYieldBackoffInitialMs = 50
+trafficLabelYieldBackoffMaxMs = 1000
+```
+
+清理规则：
+
+- 如果后续同一个 key 成功投递、成功 DEFER、或扫描到不同 offset，清理或重置 backoff。
+- 如果超过 `trafficLabelYieldBackoffMaxMs`，允许再次扫描，避免状态残留导致长期跳过。
+- Backoff 只影响当前 consumer label 对该 queue 的扫描；`STANDARD` Consumer 不受影响，仍可立即消费标准消息。
+
+只有在 `STANDARD` owner 已确认离线时，非 FIFO 才允许把标准消息写成 `messageTrafficLabel=STANDARD` 的 deferred record，让隔离 Consumer 可以越过该标准消息继续找自己的隔离消息；但这条 deferred 仍只能由 `STANDARD` Consumer 后续重新消费，隔离 Consumer 不能消费标准消息。
 
 ### deferred 消息如何重新被消费
 
@@ -230,15 +396,16 @@ ledger 组件不实现第二套消费队列，只做三件事：记录被路由�
 会写 deferred topic 的情况：
 
 - 标准 Consumer 扫到 `gray1` 消息，且 `gray1` Consumer 在线或在线状态未知，非 FIFO 下写 ACTIVE 后继续扫描。
-- `gray1` Consumer 扫到无 label 标准消息或其他 label 消息，非 FIFO 下写 ACTIVE 后继续扫描。
-- 从 POP retry topic 读到的消息重新判路由后仍不可被当前 Consumer 消费，非 FIFO 下写 ACTIVE。
+- 隔离 Consumer 扫到无 label 标准消息或其他 label 消息，且该消息 owner label 在本次快照中确认离线，非 FIFO 下可以写 ACTIVE 后继续扫描；如果 owner 在线或在线状态未知，只 `YIELD_WITHOUT_DEFER`。
+- 从 POP retry topic 读到的消息重新判路由后 route action 为 `DEFER`，非 FIFO 下写 ACTIVE。
 
 不会写 deferred topic 的情况：
 
 - 当前 Consumer eligible，消息直接进入 POP checkpoint。
 - FIFO 队头不属于当前 Consumer，只 BLOCK，不创建 deferred record。
+- 非 owner Consumer 扫到 owner label 在线或在线状态未知的消息，只返回空结果或已有结果，不推进 cursor，不创建 deferred record。典型场景是 `gray1` Consumer 扫到标准消息且 `STANDARD` Consumer 在线。
 - Producer 普通发送、延迟消息未到期、事务半消息未 commit，这些路径不做消费路由。
-- POP in-flight 后未 ack 的失败恢复，走现有 revive/retry，不写 deferred，除非 retry 消息下次被 POP 扫描时再次路由不匹配。
+- POP in-flight 后未 ack 的失败恢复，走现有 revive/retry，不写 deferred，除非 retry 消息下次被 POP 扫描时 route action 为 `DEFER`。
 
 组件划分：
 
@@ -306,7 +473,7 @@ else:
 写入 deferred 的顺序：
 
 ```text
-1. POP 扫描到当前 Consumer 不可消费、但非 FIFO 可跳过的消息。
+1. POP 扫描到当前 Consumer 不可消费、且 route action 为 `DEFER` 的非 FIFO 消息。
 2. 构造 recordKey = brokerName/group/storageTopic/queueId/queueOffset。
 3. 向内部主题写 ACTIVE event。
 4. ACTIVE 写入成功后，更新 RocksDB byLabel/byQueue 索引。
@@ -451,11 +618,11 @@ pollDeferredForStandard(group, logicalTopic, queueId, onlineTrafficLabels, maxNu
 
 不会在正常队列和 deferred ledger 之间反复搬运：
 
-- 消息第一次从正常 consume queue 或 POP retry topic 被判定不可由当前 Consumer 消费时，才写一条 ACTIVE deferred record。
+- 消息第一次从正常 consume queue 或 POP retry topic 被判定 route action 为 `DEFER` 时，才写一条 ACTIVE deferred record。
 - 一旦 ACTIVE 写成功，当前 consumer group 的 POP cursor 才能越过原队列位置；后续不会再从正常 consume queue 重新扫描同一个位置。
 - 后续 POP 如果发现该 deferred record 仍不可消费，只保留在 ledger 中，不再写新的 ACTIVE。
 - deferred record 被投递并写入 POP checkpoint 后写 TOMBSTONE；如果 Consumer 未 ack，后续走 POP retry topic。
-- retry 消息如果再次因为路由不匹配进入 deferred，会生成 `sourceType=RETRY` 的新 record；它受 RocketMQ 现有 retry 次数和 DLQ 规则约束，不会无限增长。
+- retry 消息如果再次因为 route action 为 `DEFER` 进入 deferred，会生成 `sourceType=RETRY` 的新 record；它受 RocketMQ 现有 retry 次数和 DLQ 规则约束，不会无限增长。
 - 同一 `recordKey` 的重复 defer 是 no-op，不会产生多条 ACTIVE。
 
 容量上限：
@@ -477,6 +644,8 @@ trafficLabelDeferredMaxLabelsPerPop = 16
 trafficLabelDeferredMaxRecordsPerQueue = 100000
 trafficLabelDeferredMaxBytesPerBroker = broker disk budget based value
 trafficLabelDeferredMaxHoldMs < messageStoreConfig.fileReservedTime
+trafficLabelYieldBackoffInitialMs = 50
+trafficLabelYieldBackoffMaxMs = 1000
 ```
 
 需要监控的指标：
@@ -488,6 +657,10 @@ trafficLabelDeferredMaxHoldMs < messageStoreConfig.fileReservedTime
 - `traffic_label_deferred_poll_scan_total{consumerLabel}`
 - `traffic_label_deferred_over_limit_total{limitType}`
 - `traffic_label_deferred_cache_label_count{topic,group,queueId}`
+- `traffic_label_route_yield_without_defer_total{topic,group,consumerLabel,messageLabel}`
+- `traffic_label_route_yield_backoff_total{topic,group,queueId,consumerLabel}`
+- `traffic_label_route_yield_backoff_ms{topic,group,queueId,consumerLabel}`
+- `traffic_label_presence_consumer_count{topic,group,label}`
 
 ### Deferred Ledger 伪代码与流程图
 
@@ -879,13 +1052,13 @@ Java 5.x Consumer 连接的是 Proxy，不是 Broker。多 Proxy 部署时，Bro
 
 因此 v1 的严格语义必须让 Proxy 集群维护全局在线 label 视图：
 
-1. 在 Proxy 增加 `TrafficLabelPresenceManager`，按 `consumerGroup/topic/trafficLabel/proxyId/clientId/channelId` 维护在线 lease。
+1. 在 Proxy 增加 `TrafficLabelPresenceManager`，按 `consumerGroup/topic/trafficLabel/proxyId/clientId/channelId` 维护在线 lease；blank label 在 manager 内部归一化为 `STANDARD`。
 2. 扩展 `HeartbeatSyncerData`，在 register/unregister 广播中携带 `trafficLabel` 和订阅 topic 集合。
 3. 每个 Proxy 接收其他 Proxy 的 heartbeat sync 消息后，把远端 Consumer 注册到本地 presence manager。
 4. 每个 lease 有过期时间，例如 `trafficLabelPresenceTtlMs`。未收到 unregister 时，通过 TTL 清理，避免进程崩溃后永久认为隔离环境在线。
 5. Proxy 在每次 Receive/POP 请求 Broker 时携带：
    - 当前 Consumer 的 `trafficLabel`。
-   - 当前 `consumerGroup/topic` 下 Proxy 集群认为在线的非空 `onlineTrafficLabels`。
+   - 当前 `consumerGroup/topic` 下 Proxy 集群认为在线的归一化 `onlineTrafficLabels`，包含标准环境哨兵值和非空隔离 label。
    - presence snapshot timestamp 或 version，用于 Broker 判断状态是否过期。
 6. Broker 的路由判断优先使用请求携带的 `onlineTrafficLabels`。只有直连 remoting 客户端或没有 Proxy snapshot 时，才退回 Broker 本地 `ConsumerManager`。
 
@@ -928,7 +1101,8 @@ Java 5.x Consumer 连接的是 Proxy，不是 Broker。多 Proxy 部署时，Bro
 3. 订阅过滤通过后、构造 POP response 前调用 `TrafficLabelRouteManager`。
 4. 路由结果为 `DELIVER` 时，消息进入现有 POP response、checkpoint 和 invisible time 流程。
 5. 路由结果为 `DEFER` 时，先写 deferred ledger，再继续扫描后续消息。
-6. 路由结果为 `BLOCK` 时，当前 queue 本轮不返回消息。
+6. 路由结果为 `YIELD_WITHOUT_DEFER` 时，当前 queue 本轮不推进 cursor，不写 deferred record，返回空结果或已有结果。
+7. 路由结果为 `BLOCK` 时，当前 queue 本轮不返回消息。
 
 普通消息的非 FIFO 队列允许通过 deferred ledger 让标准消息越过被隔离环境占用的有标消息。deferred record 不是消费成功记录，不能代替 ack，也不能提前删除原消息的失败恢复能力。
 
@@ -992,7 +1166,7 @@ FIFO 的核心取舍是保证顺序优先于吞吐：标准环境不能越过队
   - `HeartbeatSyncerData`：用于多 Proxy 同步 Consumer 环境 label。
   - `PopMessageRequestHeader`、`PopLiteMessageRequestHeader`：用于每次 POP 请求携带当前 Consumer 环境。
 - 在 POP request header 增加 Proxy 集群在线 label 快照字段：
-  - `onlineTrafficLabels`：当前 `consumerGroup/topic` 下在线的非空隔离 label 列表，建议逗号分隔并限制 label 字符集为 `[A-Za-z0-9._-]`。
+  - `onlineTrafficLabels`：当前 `consumerGroup/topic` 下在线的归一化 label 列表，包含标准环境哨兵值和非空隔离 label；建议逗号分隔并限制用户 label 字符集为 `[A-Za-z0-9._-]`，保留内部哨兵 token 不允许用户使用。
   - `trafficLabelSnapshotTimestamp`：Proxy 生成该快照的时间。
   - `trafficLabelSnapshotVersion`：Proxy presence manager 的单调递增版本，便于日志和排查。
 - Broker 路由判断使用 `trafficLabel` + `onlineTrafficLabels`。标准 Consumer 只有在快照新鲜且不包含消息 label 时才 fallback。
@@ -1026,7 +1200,7 @@ FIFO 的核心取舍是保证顺序优先于吞吐：标准环境不能越过队
 3. 为 `ClientChannelInfo` 增加构造函数重载，避免一次性破坏现有调用方。
 4. 在 `ConsumerGroupInfo` 中保存每个 channel 对应的 `trafficLabel`。
 5. 在 `ConsumerManager` 增加 `hasConsumerWithTrafficLabel(group, topic, trafficLabel)`，用于直连 remoting 和测试场景：
-   - blank label 直接返回 `false`。
+   - blank label 先归一化为 `STANDARD`，用于判断标准环境 Consumer 是否在线。
    - 只统计活跃 channel。
    - 只统计订阅了对应 topic 的 Consumer。
 6. unregister 和 channel close 时清理 label 状态。
@@ -1050,6 +1224,8 @@ FIFO 的核心取舍是保证顺序优先于吞吐：标准环境不能越过队
    - `trafficLabelDeferredMaxRecordsPerQueue`
    - `trafficLabelDeferredMaxBytesPerBroker`
    - `trafficLabelDeferredMaxHoldMs`：deferred record 最大建议持有时间，必须小于原消息 commitlog 可读时间；超过后只告警和限流，不自动改变路由语义。
+   - `trafficLabelYieldBackoffInitialMs=50`
+   - `trafficLabelYieldBackoffMaxMs=1000`
    - `trafficLabelRoutingMaxSnapshotAgeMs=30000`
    - `trafficLabelRoutingFallbackOnStateUnknown=false`
 2. 在 `BrokerController` 初始化 `TrafficLabelRouteManager`。
@@ -1062,15 +1238,17 @@ FIFO 的核心取舍是保证顺序优先于吞吐：标准环境不能越过队
 4. 实现路由判断，并返回明确动作：
    - `DELIVER`：当前 Consumer 可以消费。
    - `DEFER`：非 FIFO 下当前 Consumer 不可消费，但可以持久化 deferred record 后继续扫描。
+   - `YIELD_WITHOUT_DEFER`：非 FIFO 下当前 Consumer 不可消费，且消息 owner 在线或状态未知；不推进 cursor，不写 deferred record，避免非 owner 把 owner 流量搬进 ledger。
    - `BLOCK`：FIFO 下当前 Consumer 不可消费，当前 queue 返回空结果。
    - `UNKNOWN`：在线 label 状态缺失或过期，且当前 Consumer 是标准环境、消息有 label。
 5. 具体判断：
    - 消息 label 为空且当前 Consumer 是标准环境：允许消费。
-   - 消息 label 为空且当前 Consumer 是隔离环境：非 FIFO 返回 `DEFER`，FIFO 返回 `BLOCK`。
+   - 消息 label 为空且当前 Consumer 是隔离环境：如果 `STANDARD` 在线或状态未知，非 FIFO 返回 `YIELD_WITHOUT_DEFER`，FIFO 返回 `BLOCK`；只有 `STANDARD` 确认离线时，非 FIFO 才允许 `DEFER`。
    - 当前 Consumer label 等于消息 label：允许消费。
    - 当前 Consumer 是标准环境，快照新鲜，且 `onlineTrafficLabels` 不包含消息 label：允许标准回退消费。
    - 当前 Consumer 是标准环境，但快照缺失、过期或不可判定：默认返回 `UNKNOWN`，随后非 FIFO `DEFER`、FIFO `BLOCK`。
    - 非 FIFO 下标准 Consumer 遇到仍有在线 owner 的有标消息：返回 `DEFER`。
+   - 非 FIFO 下隔离 Consumer 遇到其他在线 owner 的消息：返回 `YIELD_WITHOUT_DEFER`，不创建 deferred record。
    - FIFO 下任意 Consumer 遇到不属于自己的队头消息：返回 `BLOCK`。
    - 其他情况：当前 Consumer 不允许消费。
 6. 功能默认关闭。`enableTrafficLabelRouting=false` 时保持现有行为完全不变。
@@ -1154,9 +1332,11 @@ FIFO 的核心取舍是保证顺序优先于吞吐：标准环境不能越过队
 1. 在 POP request header 增加 `trafficLabel`、`onlineTrafficLabels`、`trafficLabelSnapshotTimestamp`、`trafficLabelSnapshotVersion`。
 2. 非 FIFO POP：
    - 优先投递当前 Consumer 可消费的 deferred record。
+   - 正常扫描 consume queue 前，先检查 `YieldBackoffManager`；命中时跳过该 queue，本轮尝试其他 queue 或返回已有结果。
    - 正常扫描 consume queue 时，在 subscription filter 通过后执行流量标路由判断。
    - 可消费消息继续走现有 POP result 流程。
-   - 不可消费消息先持久化为 deferred record，然后继续扫描，最多扫描 `trafficLabelRoutingMaxScanPerPop` 条。
+   - route action 为 `DEFER` 的消息先持久化为 deferred record，然后继续扫描，最多扫描 `trafficLabelRoutingMaxScanPerPop` 条。
+   - route action 为 `YIELD_WITHOUT_DEFER` 的消息不写 deferred、不推进 cursor，记录 yield backoff 后当前 queue 本轮停止扫描。
    - 如果当前是标准 Consumer 且在线 label 快照缺失或过期，遇到有标消息时按不可消费处理并 deferred，不允许 fallback。
 3. FIFO POP：
    - 不跳过队头消息。
@@ -1198,10 +1378,14 @@ FIFO 的核心取舍是保证顺序优先于吞吐：标准环境不能越过队
    - 路由到匹配隔离环境。
    - 路由到标准环境回退。
    - 因其他 label 在线而 deferred。
+   - 因 owner 在线或状态未知而 `YIELD_WITHOUT_DEFER`。
+   - 因 yield backoff 命中而跳过 queue。
    - FIFO 因其他 label 阻塞。
+   - Proxy presence 中每个 `topic/group/label` 的在线 Consumer lease 数。
 2. 如果现有 metrics 风格允许，指标 label 包含 `topic`、`group` 和清洗后的 `trafficLabel`。
 3. deferred store 写入失败和扫描达到上限时输出限频日志。
 4. 标准 Consumer 因 snapshot 缺失/过期而不能 fallback 时输出限频日志，包含 `group`、`topic`、`messageTrafficLabel`、`snapshotAgeMs`、`snapshotVersion`。
+5. 连续 `YIELD_WITHOUT_DEFER` 时输出限频日志，包含 `group`、`topic`、`queueId`、`consumerTrafficLabel`、`messageTrafficLabel`、`lastYieldOffset`、`backoffMs`。
 
 ## Proxy 实现
 
@@ -1214,7 +1398,7 @@ FIFO 的核心取舍是保证顺序优先于吞吐：标准环境不能越过队
 **步骤：**
 1. 在 `ProxyContext` 增加 `trafficLabel`。
 2. 在 `ContextInitPipeline` 从 metadata 读取 `GrpcConstants.TRAFFIC_LABEL`。
-3. blank label 归一化为空字符串。
+3. 协议层 blank label 保持为空字符串；Proxy 内部 presence 和路由快照统一归一化为 `STANDARD`。
 4. 增加 Proxy 单测覆盖 metadata 解析。
 
 ### Task 9：通过 Proxy 注册 Consumer label
@@ -1243,7 +1427,7 @@ FIFO 的核心取舍是保证顺序优先于吞吐：标准环境不能越过队
 1. 增加 `TrafficLabelPresenceManager`：
    - key：`group/topic/trafficLabel/proxyId/clientId/channelId`
    - value：`lastUpdateTimestamp`、`subscriptionDataSet`、`sourceProxyId`
-   - 查询：`getOnlineLabels(group, topic)` 返回非空 label set、snapshot timestamp、snapshot version。
+   - 查询：`getOnlineLabels(group, topic)` 返回归一化 label set、snapshot timestamp、snapshot version；如果标准 Consumer 在线，set 中必须包含 `STANDARD`。
 2. 在 `HeartbeatSyncerData` 增加 `trafficLabel` 字段。
 3. `HeartbeatSyncer#onConsumerRegister` 发送 REGISTER 系统消息时携带 `trafficLabel` 和订阅数据。
 4. `HeartbeatSyncer#onConsumerUnRegister` 发送 UNREGISTER 系统消息时携带 `trafficLabel` 或足够的 channel identity，用于远端清理 lease。
@@ -1333,6 +1517,8 @@ FIFO 的核心取舍是保证顺序优先于吞吐：标准环境不能越过队
 24. deferred backlog 年龄超过 `trafficLabelDeferredMaxHoldMs` 时输出指标和限频告警，不静默改变 owner 路由。
 25. 同一 `topic + group` 下存在 10 个以上在线隔离 label 时，标准 Consumer 只扫描 BLANK 和离线 label，不扫描在线 label backlog。
 26. deferred ledger 达到 records/bytes 上限时，Broker 不再写入新 ACTIVE，不推进对应 queue cursor，ledger active 规模不继续增长。
+27. 1 个 `STANDARD` Consumer 和 10 个隔离 Consumer 同组且标准消息占大头时，隔离 Consumer 扫到标准消息返回 `YIELD_WITHOUT_DEFER`，`messageTrafficLabel=STANDARD` 的 deferred ACTIVE 写入量不随隔离 Consumer 数量增长。
+28. 同一隔离 Consumer 对同一 queue 连续触发 `YIELD_WITHOUT_DEFER` 时，`YieldBackoffManager` 生效：backoff 窗口内不重复扫描该 queue、不写 deferred、不推进 cursor；窗口后可再次扫描。
 
 ### Task 15：Proxy + Java Client 集成测试
 
@@ -1372,6 +1558,8 @@ FIFO 的核心取舍是保证顺序优先于吞吐：标准环境不能越过队
 - v1 deferred record 只保存原消息 locator，不复制完整消息体；因此必须有 backlog 年龄指标，且最大持有时间不能超过原消息 commitlog 可读时间。
 - ledger 和 POP checkpoint 之间不做跨组件事务；极窄失败窗口允许重复投递，但不能丢消息。
 - 标准 Consumer 查询 deferred 时不能按全部隔离 label 或全部 backlog 扫描；超过 10 个隔离环境时，仍只扫描 BLANK 和当前离线 label。
+- 1 个标准 Consumer 与 10 个隔离 Consumer 同组时，标准消息不会被隔离 Consumer 成批写入 deferred ledger；相关指标应体现 `YIELD_WITHOUT_DEFER` 增加，而不是 `traffic_label_deferred_active_records{label=STANDARD}` 增加。
+- 连续 `YIELD_WITHOUT_DEFER` 必须触发短退避，避免隔离 Consumer 对同一 queue 忙轮询；退避不能影响 `STANDARD` Consumer 消费该 queue。
 - deferred ledger 达到容量上限时必须 backpressure 到原 consume queue，不能继续膨胀。
 - 现有 POP ack、change invisible、retry、DLQ 测试继续通过。
 - Java 5.x API 清晰区分 Producer 消息流量标和 Consumer 环境流量标。
