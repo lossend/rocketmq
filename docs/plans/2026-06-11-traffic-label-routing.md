@@ -489,6 +489,248 @@ trafficLabelDeferredMaxHoldMs < messageStoreConfig.fileReservedTime
 - `traffic_label_deferred_over_limit_total{limitType}`
 - `traffic_label_deferred_cache_label_count{topic,group,queueId}`
 
+### Deferred Ledger 伪代码与流程图
+
+写入 ACTIVE：
+
+```text
+appendActive(record):
+    record.messageTrafficLabel = normalizeBlankLabel(record.messageTrafficLabel)
+    record.recordKey = brokerName/group/storageTopic/queueId/queueOffset
+
+    existing = index.getRecord(record.recordKey)
+    if existing != null and existing.state == ACTIVE:
+        return OK_ALREADY_ACTIVE
+
+    if overQueueLimit(record) or overBrokerBytesLimit(record):
+        metrics.overLimit++
+        return OVER_LIMIT
+
+    if !appendInternalEvent(record.withState(ACTIVE)):
+        return STORE_FAILED
+
+    try:
+        batch = new RocksDBWriteBatch()
+        batch.put(recordByKey(record.recordKey), record)
+        batch.put(byLabelKey(record), record.recordKey)
+        batch.put(byQueueKey(record), record.recordKey)
+        batch.increase(labelStatsKey(record), activeCount = 1)
+        rocksdb.write(batch)
+
+        activeLabelCache.add(scope(record), record.messageTrafficLabel)
+        capacityCounter.add(record)
+        return OK
+    catch:
+        appendInternalEvent(record.withState(TOMBSTONE))
+        return INDEX_FAILED
+```
+
+POP 扫描正常 queue 或 retry queue 时：
+
+```text
+handleRouteMiss(candidateMessage, routeResult):
+    if routeResult != DEFER:
+        return routeResult
+
+    record = buildDeferredRecord(candidateMessage)
+    result = appendActive(record)
+
+    if result == OK or result == OK_ALREADY_ACTIVE:
+        advancePopCursor(candidateMessage.queueOffset)
+        return CONTINUE_SCAN
+
+    if result == OVER_LIMIT:
+        metrics.overLimit++
+        return STOP_QUEUE_SCAN_WITHOUT_ADVANCING_CURSOR
+
+    return STOP_QUEUE_SCAN_WITHOUT_ADVANCING_CURSOR
+```
+
+标准 Consumer 查询 deferred：
+
+```text
+pollDeferredForStandard(ctx, maxNum):
+    scope = brokerName/ctx.group/ctx.topic/ctx.queueId
+    onlineLabels = parseAsHashSet(ctx.onlineTrafficLabels)
+
+    labelsWithBacklog = activeLabelCache.labels(scope)
+    eligibleLabels = {BLANK}
+
+    if ctx.snapshotFresh:
+        for label in labelsWithBacklog:
+            if label != BLANK and !onlineLabels.contains(label):
+                eligibleLabels.add(label)
+
+    selectedLabels = rrCursor.pick(scope, eligibleLabels,
+                                  trafficLabelDeferredMaxLabelsPerPop)
+
+    return pollByLabelPrefixes(ctx, selectedLabels, maxNum)
+```
+
+隔离 Consumer 查询 deferred：
+
+```text
+pollDeferredForIsolation(ctx, maxNum):
+    if isBlank(ctx.consumerTrafficLabel):
+        return []
+
+    return pollByLabelPrefixes(ctx, {ctx.consumerTrafficLabel}, maxNum)
+```
+
+按 label 前缀查询和 claim：
+
+```text
+pollByLabelPrefixes(ctx, labels, maxNum):
+    result = []
+    scanned = 0
+
+    for storageTopic in [retryStorageTopic(ctx.topic, ctx.group), ctx.topic]:
+        for label in labels:
+            prefix = byLabelPrefix(ctx.group, ctx.topic, label,
+                                   storageTopic, ctx.queueId)
+            iterator = rocksdb.prefixIterator(prefix)
+
+            while iterator.valid()
+                  and result.size < maxNum
+                  and scanned < trafficLabelDeferredMaxScanPerPop:
+                recordKey = iterator.value()
+                scanned++
+
+                if claimedKeys.contains(recordKey):
+                    iterator.next()
+                    continue
+
+                record = index.getRecord(recordKey)
+                if record == null or record.state != ACTIVE:
+                    iterator.next()
+                    continue
+
+                if !routeManager.isEligible(record.messageTrafficLabel, ctx):
+                    iterator.next()
+                    continue
+
+                if claimedKeys.add(recordKey):
+                    result.add(record)
+
+                iterator.next()
+
+    metrics.pollScan += scanned
+    return result
+```
+
+deferred record 进入 POP checkpoint 后删除：
+
+```text
+deliverClaimedDeferred(record, ctx):
+    msg = readMessage(record.storageTopic, record.queueId,
+                      record.commitLogOffset, record.messageSize)
+
+    if msg == null:
+        releaseClaim(record.recordKey)
+        return READ_FAILED
+
+    if !subscriptionFilter.match(msg, ctx.subscription):
+        tombstone(record)
+        releaseClaim(record.recordKey)
+        return FILTERED
+
+    if !appendPopCheckpoint(msg, ctx):
+        releaseClaim(record.recordKey)
+        return CHECKPOINT_FAILED
+
+    if !tombstone(record):
+        keepClaimAndRetryTombstone(record)
+        return RETRY_LATER_WITHOUT_RESPONSE
+
+    releaseClaim(record.recordKey)
+    return DELIVER(msg)
+```
+
+TOMBSTONE：
+
+```text
+tombstone(record):
+    if !appendInternalEvent(record.withState(TOMBSTONE)):
+        return false
+
+    try:
+        batch = new RocksDBWriteBatch()
+        batch.delete(recordByKey(record.recordKey))
+        batch.delete(byLabelKey(record))
+        batch.delete(byQueueKey(record))
+        batch.decrease(labelStatsKey(record), activeCount = 1)
+        rocksdb.write(batch)
+
+        if labelStats.activeCount(scope(record), record.messageTrafficLabel) == 0:
+            activeLabelCache.remove(scope(record), record.messageTrafficLabel)
+
+        capacityCounter.remove(record)
+        return true
+    catch:
+        scheduleIndexCleanup(record)
+        return false
+```
+
+#### 写入与重新投递流程
+
+```mermaid
+flowchart TD
+    A["POP 扫描正常 queue / retry queue"] --> B{"当前 Consumer eligible?"}
+    B -->|是| C["写 POP checkpoint<br/>返回给 Consumer"]
+    B -->|否且非 FIFO| D["构造 DeferredRecord"]
+    B -->|否且 FIFO| E["BLOCK<br/>不推进 cursor"]
+
+    D --> F{"recordByKey 已有 ACTIVE?"}
+    F -->|是| G["幂等命中<br/>不重复写 ACTIVE"]
+    F -->|否| H{"容量是否超限?"}
+    H -->|超限| I["停止本 queue 扫描<br/>不推进 cursor"]
+    H -->|未超限| J["写内部 topic ACTIVE"]
+    J --> K{"ACTIVE 写成功?"}
+    K -->|否| I
+    K -->|是| L["RocksDB WriteBatch<br/>recordByKey/byLabel/byQueue/labelStats"]
+    L --> M{"index 更新成功?"}
+    M -->|否| N["写 TOMBSTONE 回滚<br/>fail closed"]
+    M -->|是| O["更新 activeLabelCache<br/>更新容量计数"]
+    G --> P["推进 POP cursor<br/>继续扫描"]
+    O --> P
+
+    Q["后续 POP 先查 deferred"] --> R["按 label 选 byLabel 前缀"]
+    R --> S["claim recordKey"]
+    S --> T["读原消息并写 POP checkpoint"]
+    T --> U{"checkpoint 成功?"}
+    U -->|否| V["释放 claim<br/>保留 ACTIVE"]
+    U -->|是| W["写 TOMBSTONE<br/>删除 index/cache"]
+    W --> X{"TOMBSTONE 成功?"}
+    X -->|否| Y["保留 claim<br/>后台重试"]
+    X -->|是| C
+```
+
+#### 超过 10 个隔离环境的标准 Consumer 查询
+
+```mermaid
+flowchart TD
+    A["标准 Consumer POP<br/>topic + group + queueId"] --> B["读取 activeLabelCache"]
+    B --> C["labelsWithBacklog<br/>例如 BLANK, gray1..gray12"]
+    A --> D["读取 Proxy onlineTrafficLabels"]
+    D --> E{"snapshot 是否新鲜?"}
+    E -->|否| F["eligibleLabels = BLANK<br/>fail closed"]
+    E -->|是| G["eligibleLabels = labelsWithBacklog - onlineTrafficLabels + BLANK"]
+    C --> G
+    G --> H["round-robin 选择最多<br/>trafficLabelDeferredMaxLabelsPerPop 个 label"]
+    F --> H
+    H --> I["只扫描 selected labels 的 byLabel 前缀"]
+    I --> J{"达到 scan 上限?"}
+    J -->|是| K["停止查 deferred<br/>继续本轮 POP 后续逻辑"]
+    J -->|否| L{"record eligible?"}
+    L -->|否| M["保留在 ledger<br/>不重写 ACTIVE"]
+    M --> I
+    L -->|是| N["claim + POP checkpoint + TOMBSTONE"]
+
+    O["正常 queue 新消息需要 DEFER"] --> P{"records/bytes 是否超限?"}
+    P -->|否| Q["appendActive<br/>允许 cursor 越过"]
+    P -->|是| R["不写新 ACTIVE<br/>不推进 cursor<br/>ledger 不继续膨胀"]
+```
+
 ### 多隔离 label 的 Ledger 共享与隔离
 
 `gray1`、`gray2` 等隔离环境共享同一个 deferred ledger 存储组件和同一个内部主题，不为每个 label 创建独立 ledger。隔离靠 record key 和查询前缀完成：
