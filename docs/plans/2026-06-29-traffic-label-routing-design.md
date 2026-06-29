@@ -55,6 +55,10 @@ POP 模型下,一个 `(consumerGroup, topic, queueId)` 共享 **一个 offset �
 
 结论:纯扩展点最多实现 **弱化版**(隔离精确匹配 + 标准盲回退),无法满足"在线才隔离、离线才回退"的动态语义。
 
+> 📌 **精确化(2026-06-29 补充)**:对 plan-b 做了 5 能力 × 扩展点逐条核对,发现存在一个 **零 broker 侵入的静态隔离变体 Plan-B-Lite**(预创建真实组 `G%label` + SQL92 属性过滤 + `enablePropertyFilter`),但它 **缺动态回退**。完整对照表与补回退两条路径见 [[2026-06-29-traffic-label-routing-plan-b-subcursor-harvest]] §8-§9。要点:
+> - Proxy `PopMessageResultFilter` 的 `NO_MATCH` 会 **ACK 丢消息**,是回退陷阱,不可用(`ConsumerProcessor.java:181-190`)。
+> - 动态回退所需的 ①label 在线快照 + ⑤收割扇入,**无任何扩展点对应**,必须改核心或引入外部 operator。
+
 ### 3.2 必须改 Proxy + Broker
 
 动态回退依赖 **流量标在线快照**(哪些 label 存在、是否在线),这是有状态的集群视图,必须:
@@ -63,6 +67,17 @@ POP 模型下,一个 `(consumerGroup, topic, queueId)` 共享 **一个 offset �
 - **Broker 侧**:在 `PopMessageProcessor` 收敛单粒度路由决策。
 
 两方案都建立在这个 Proxy+Broker 改造基线上,差异只在 Broker 如何处理"被跳过的隔离消息"。
+
+### 3.3 源码验证结论(影响选型的硬事实)
+
+落地前对照源码确认,以下事实已固定:
+
+| 事实 | 锚点 | 影响 |
+|---|---|---|
+| offset 记账 key = `topic@group` | `ConsumerOffsetManager.java:201,241` | 方案 B 子游标用 **虚拟订阅组 `G%label`** 落地,复用现成记账,无需新 offset 表 |
+| **POP 路径不支持 LMQ**(`PopMessageProcessor` 零 `isLmq`,LMQ 仅接 PULL) | `PopMessageProcessor.java`、`LmqPullRequestHoldService` | **LMQ 候选已推翻**,详见 [[2026-06-29-traffic-label-routing-plan-b-subcursor-harvest]] §0 |
+| 逐条投递/跳过落在 `messageFilter`,游标照常前进 | `PopMessageProcessor.java:774-776` | 两方案的"按 label 决策"都挂 filter,不动游标推进 |
+| 虚拟组在 `findSubscriptionGroupConfig` 会被拒 | `PopMessageProcessor.java:308` | 方案 B 必改点:虚拟组继承父组配置 |
 
 ## 4. 两方案对比
 
@@ -76,19 +91,33 @@ POP 模型下,一个 `(consumerGroup, topic, queueId)` 共享 **一个 offset �
 | 回退实时性 | 高(旁路独立投递) | 中(依赖标准收割轮次) |
 | 主要风险 | 复制写放大、旁路存储一致性、revive 特判复杂 | 子游标元数据膨胀、收割并发竞争、label 极多时退化 |
 | 复杂度 | 高 | 中 |
-| 现成轮子候选 | route topic(旧方案思路) | **LMQ(Light Message Queue)** 内建独立 offset,待评估 |
+| 子游标载体 | route topic(旧方案思路) | **虚拟订阅组 `G%label`**(复用 `topic@group` 记账;~~LMQ 已推翻~~) |
 
 ## 5. 共性问题(两方案都要处理)
 
 - **抖动窗口跨环境泄漏**:隔离标在线/离线判定有快照延迟,窗口内可能误投。
 - **at-least-once 重复投递**:收割 / 旁路切换的残余窗口需消费端幂等(RocketMQ 本就要求)。
 - **流量标在线快照** 的准确性与同步延迟,是两方案共同的可用性关键。
+- **retry topic + revive 异步孤儿**:隔离环境失败消息进虚拟组专属 retry topic(`%RETRY%G%gray1`),revive 异步重投。回收虚拟组前必须确认 retry topic 已读尽且 revive 无残留,否则孤儿(方案 B 专属,详见 plan-b §4c)。
+- **broker 主从切换 / 重启**:收割队列、宽限期计时器是内存派生态。对齐 RocketMQ 现成范式(`PopBufferMergeService` 切 slave 即 clear、reviveOffset 持久同步),零持久化、挂 `changeSpecialServiceStatus`、冷启动重建,不丢消息(方案 B 专属,详见 plan-b §4d)。
+- **同名重建竞态(临时环境高频)**:gray 销毁后同名重建,回收删 offset 与新实例首次 POP 初始化交错,会触发**静默丢失**(`getInitOffset` 默认 `max-1` 跳过历史,`PopMessageProcessor.java:941`)或误删新进度。解法:虚拟组带 **epoch**(`G%label%epoch`),把同名两代隔离成不同虚拟组,根除竞态(方案 B 专属,详见 plan-b §4e)。
 
-## 6. 选型未决项
+## 6. 选型(2026-06-29 已定)
 
-隔离环境的 **生命周期** 直接决定选型:
+**确定前提(用户拍板)**:隔离环境 **临时**(PR预览/压测,频繁创建销毁),且 **要求 gray 离线后消息回退标准**。
 
-- **常驻、偶尔抖动**(常驻灰度):语义可退化为"纯子游标、不收割"(方案 B 的简化版),最简单。
-- **临时、频繁销毁**(PR 预览 / 压测):死环境的消息会永久卡死,**必须** 有方案 A 的旁路或方案 B 的收割机制。
+由此:
 
-> ⏳ 待用户确认隔离环境生命周期后,再给出最终推荐与 2-3 方案收敛。
+- **Plan-B-Lite 静态版出局** —— 销毁的 gray 不会回来,纯虚拟组不收割会导致积压永久无人消费。
+- **完整 plan-b 收割版选定** —— 见 [[2026-06-29-traffic-label-routing-plan-b-subcursor-harvest]] §4/§4a/§4b。
+- 临时环境逼出两个常驻环境没有的硬点:
+  1. **宽限期 `gracePeriodMs`**:区分"抖动离线"与"永久销毁",避免误收割致重复(§4a)。
+  2. **虚拟组回收**:收割完成后回收 `G%grayX` 元数据,防止"创建-销毁"循环导致膨胀(§4b)。**回收判定必须是三条件**(origin/retry offset 双双读尽 ∧ revive 无 in-flight checkpoint),否则 revive 异步重投会制造 retry topic 孤儿(§4c)。
+- 收割驱动:**Broker 扇入 + 待收割轮转捎带**,正常路径零放大,收割时恒 1+1(§4 决策 A)。
+
+> 方案 A([[2026-06-29-traffic-label-routing-plan-a-strict-bypass]])保留为对照:仅当 label 数量极大致虚拟组膨胀时才回头考虑。
+
+### 下一步
+- [ ] 收敛 plan-b 为可实施设计(组件边界、数据流、错误处理、测试用例)
+- [ ] 按 planning 规则补 E2E / API 测试用例设计(回退、抖动、销毁回收三类核心流程)
+- [ ] design → 写 plan → 实施
