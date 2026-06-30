@@ -100,24 +100,26 @@ POP 模型下,一个 `(consumerGroup, topic, queueId)` 共享 **一个 offset �
 - **流量标在线快照** 的准确性与同步延迟,是两方案共同的可用性关键。
 - **retry topic + revive 异步孤儿**:隔离环境失败消息进虚拟组专属 retry topic(`%RETRY%G%gray1`),revive 异步重投。回收虚拟组前必须确认 retry topic 已读尽且 revive 无残留,否则孤儿(方案 B 专属,详见 plan-b §4c)。
 - **broker 主从切换 / 重启**:收割队列、宽限期计时器是内存派生态。对齐 RocketMQ 现成范式(`PopBufferMergeService` 切 slave 即 clear、reviveOffset 持久同步),零持久化、挂 `changeSpecialServiceStatus`、冷启动重建,不丢消息(方案 B 专属,详见 plan-b §4d)。
-- **同名重建竞态(临时环境高频)**:gray 销毁后同名重建,回收删 offset 与新实例首次 POP 初始化交错,会触发**静默丢失**(`getInitOffset` 默认 `max-1` 跳过历史,`PopMessageProcessor.java:941`)或误删新进度。解法:虚拟组带 **epoch**(`G%label%epoch`),把同名两代隔离成不同虚拟组,根除竞态(方案 B 专属,详见 plan-b §4e)。
+- **同名重建语义(临时环境高频,用户拍板:接管上一代积压)**:gray 销毁后同名重建需**接管自己上一代积压**。机制:游标 `G%label` **跨代持久共享、不带 epoch**,重建后从现存游标续上;宽限期作为"接管 vs 回退"统一旋钮(宽限期内回来→全量接管,超时→标准收割剩余)。误删进度由回收临界区核对在线快照防护(方案 B 专属,详见 plan-b §4e)。
+  - ⚠️ 张力:同一条消息不能既"等 gray 回来"又"立即给标准",故接管语义下**回退被延迟 = 宽限期长度**,这是该选择的固有代价。
 
 ## 6. 选型(2026-06-29 已定)
 
-**确定前提(用户拍板)**:隔离环境 **临时**(PR预览/压测,频繁创建销毁),且 **要求 gray 离线后消息回退标准**。
+**确定前提(用户拍板)**:隔离环境 **临时**(PR预览/压测,频繁创建销毁);gray 离线后消息**优先等同名 gray 重建接管,宽限期内未回来才回退标准**(§4e 接管语义)。
 
 由此:
 
 - **Plan-B-Lite 静态版出局** —— 销毁的 gray 不会回来,纯虚拟组不收割会导致积压永久无人消费。
 - **完整 plan-b 收割版选定** —— 见 [[2026-06-29-traffic-label-routing-plan-b-subcursor-harvest]] §4/§4a/§4b。
-- 临时环境逼出两个常驻环境没有的硬点:
-  1. **宽限期 `gracePeriodMs`**:区分"抖动离线"与"永久销毁",避免误收割致重复(§4a)。
-  2. **虚拟组回收**:收割完成后回收 `G%grayX` 元数据,防止"创建-销毁"循环导致膨胀(§4b)。**回收判定必须是三条件**(origin/retry offset 双双读尽 ∧ revive 无 in-flight checkpoint),否则 revive 异步重投会制造 retry topic 孤儿(§4c)。
+- 临时环境逼出的硬点:
+  1. **宽限期 `gracePeriodMs`**:接管 vs 回退的统一旋钮 —— 宽限期内 gray 回来则从持久游标全量接管,超时才启动标准收割(§4a、§4e)。
+  2. **持久共享游标(去 epoch)**:游标 `G%grayX` 跨代持久,重建的同名 gray 从现存游标续上积压(§4e)。
+  3. **虚拟组回收**:收割完成后回收 `G%grayX` 元数据,防止"创建-销毁"循环导致膨胀(§4b)。**回收判定必须是三条件**(origin/retry offset 双双读尽 ∧ revive 无 in-flight checkpoint),否则 revive 异步重投会制造 retry topic 孤儿(§4c);并在**回收临界区核对在线快照**防误删接管者进度(§4e)。
 - 收割驱动:**Broker 扇入 + 待收割轮转捎带**,正常路径零放大,收割时恒 1+1(§4 决策 A)。
 
 > 方案 A([[2026-06-29-traffic-label-routing-plan-a-strict-bypass]])保留为对照:仅当 label 数量极大致虚拟组膨胀时才回头考虑。
 
 ### 下一步
-- [ ] 收敛 plan-b 为可实施设计(组件边界、数据流、错误处理、测试用例)
-- [ ] 按 planning 规则补 E2E / API 测试用例设计(回退、抖动、销毁回收三类核心流程)
+- [x] 收敛 plan-b 为可实施设计(组件边界 §10.1、数据流 §10.2 已完成,见 [[2026-06-29-traffic-label-routing-plan-b-subcursor-harvest]] §10)
+- [x] 按 planning 规则补 E2E / API 测试用例设计(5 条 E2E + API 合约表,见 [[2026-06-29-traffic-label-routing-plan-b-subcursor-harvest]] §11)
 - [ ] design → 写 plan → 实施
