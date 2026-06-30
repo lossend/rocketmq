@@ -1,0 +1,136 @@
+@startuml auto-renew-stop
+title Proxy Auto-Renew: Client Disconnect / Stop Scenarios
+
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+skinparam participantPadding 20
+skinparam boxPadding 10
+skinparam noteFontSize 11
+
+actor "v5 Client" as Client
+box "Proxy" #LightBlue
+    participant "ReceiveMessage\nActivity" as RMA
+    participant "DefaultReceipt\nHandleManager" as DRHM
+    participant "ReceiptHandle\nProcessor\n(eventListener)" as RHP
+    participant "ScheduledThread\n(every 5s)" as Sched
+end box
+participant "ChangeInvisible\nTimeProcessor\n(Broker)" as CIT
+participant "PopRevive\nService\n(Broker)" as Revive
+
+== Setup: client receives message ==
+
+Client -> RMA : ReceiveMessage(autoRenew=true)
+RMA -> RMA : autoRenew = enableProxyAutoRenew && request.getAutoRenew()
+RMA -> DRHM : addReceiptHandle(channel, group, msgID, MessageReceiptHandle)\n[consumeTimestamp=popTime, renewTimes=0, renewRetryTimes=0]
+RMA --> Client : message + receiptHandle
+
+note over DRHM
+  ReceiptHandleGroup keyed by (channel, group)
+  Each handle tracks:
+    consumeTimestamp  = popTime  ← immutable
+    renewTimes        = 0
+    renewRetryTimes   = 0
+end note
+
+== Normal auto-renew loop ==
+
+loop every 5s until stopped
+    Sched -> DRHM : scheduleRenewTask()
+    DRHM -> DRHM : for each (key, group): clientIsOffline? → skip/clear\nfor each handle: nextVisibleTime - now <= 10s?
+    DRHM -> DRHM : renewalWorkerService.submit(renewMessage)
+    DRHM -> RHP : fireEvent(RENEW, renewTime=RenewStrategyPolicy[renewTimes])\n[0→1m, 1→3m, 2→5m, 3→10m, 4→30m, 5+→1h]
+    RHP -> CIT : changeInvisibleTime(handle, invisibleTime=renewTime)
+    CIT -> CIT : write new CK (reviveTime=now+renewTime)\nACK old CK
+    CIT --> RHP : AckResult.OK
+    RHP --> DRHM : updateReceiptHandle(newHandle)\nresetRenewRetryTimes()\nrenewTimes++
+end
+
+== Scenario B1: Client channel closes ==
+
+Client ->x RMA : [TCP disconnect / gRPC stream closed]
+note right of Client
+  Netty fires channelInactive
+  → ConsumerManager removes channel
+  → ConsumerGroupEvent.CLIENT_UNREGISTER
+end note
+
+RMA -> DRHM : CLIENT_UNREGISTER event\n(ConsumerIdsChangeListener)
+DRHM -> DRHM : clearGroup(ReceiptHandleGroupKey(channel, group))\n→ receiptHandleGroupMap.remove(key)\n→ returnHandleGroupWorkerService.submit(returnHandleGroup)
+
+loop for each handle in group
+    DRHM -> RHP : fireEvent(CLEAR_GROUP, renewTime=1000ms)
+    RHP -> CIT : changeInvisibleTime(handle, invisibleTime=1s)
+    CIT -> CIT : write new CK (reviveTime=now+1s)\nACK old CK
+    CIT --> RHP : AckResult.OK
+    RHP --> DRHM : handleData.needRemove=true → evicted
+end
+
+note over DRHM
+  Fallback: if handle was locked during clearGroup,
+  group put back into map.
+  Next scheduleRenewTask (≤5s) detects clientIsOffline()
+  → clearGroup() again → same 1s CLEAR_GROUP path
+end note
+
+CIT -> Revive : [~1s later] CK.reviveTime expires
+Revive -> Revive : mergeAndRevive() → reviveRetry()\n→ put to %RETRY%group (reconsumeTimes+1)
+
+== Scenario B2: renewMaxTimeMillis exceeded (3h) ==
+
+note over Sched
+  Client still alive, but
+  now - consumeTimestamp >= 3h
+  (default renewMaxTimeMillis)
+end note
+
+Sched -> DRHM : scheduleRenewTask() → renewMessage()
+DRHM -> DRHM : startRenewMessage():\n  current - consumeTimestamp >= 3h → STOP_RENEW
+
+DRHM -> DRHM : retryPolicy = subscriptionGroupConfig\n             .getGroupRetryPolicy().getRetryPolicy()\n  delay = retryPolicy.nextDelayDuration(reconsumeTimes)
+DRHM -> RHP : fireEvent(STOP_RENEW, renewTime=retryDelay)
+RHP -> CIT : changeInvisibleTime(handle, invisibleTime=retryDelay)
+CIT -> CIT : write new CK (reviveTime=now+retryDelay)\nACK old CK
+CIT --> RHP : AckResult.OK
+RHP --> DRHM : resFuture.complete(null) → handle evicted
+
+note right of DRHM
+  Proxy no longer tracks this message.
+  reconsumeTimes unchanged here —
+  broker increments it when reviveRetry fires.
+end note
+
+CIT -> Revive : [after retryDelay] CK expires
+Revive -> Revive : reviveRetry() → %RETRY%group\n(reconsumeTimes+1)
+
+== Scenario B3: Renew RPC repeatedly fails ==
+
+Sched -> DRHM : scheduleRenewTask() → renewMessage()
+DRHM -> RHP : fireEvent(RENEW, ...)
+RHP -> CIT : changeInvisibleTime(handle, ...)
+CIT --x RHP : [network error / broker unavailable]
+RHP --> DRHM : onFailure → renewRetryTimes++\nresFuture.complete(messageReceiptHandle) ← keep in map
+
+note over DRHM
+  Retried on next scheduleRenewTask tick (5s).
+  After renewRetryTimes >= maxRenewRetryTimes (3):
+    return completedFuture(null) → handle evicted
+    NO changeInvisibleTime sent
+end note
+
+DRHM -> DRHM : renewRetryTimes >= 3:\n  return null → handle evicted\n  (no NACK sent to broker)
+
+CIT -> Revive : [original CK reviveTime expires naturally]
+Revive -> Revive : reviveRetry() → %RETRY%group\n(reconsumeTimes+1)
+
+== Outcome comparison ==
+
+note over Client, Revive
+  | Scenario                  | renewTime sent    | Handle evicted | Re-appears after       |
+  |---------------------------|-------------------|----------------|------------------------|
+  | B1: Client disconnect     | 1000ms            | Immediately    | ~1s                    |
+  | B1: Detected via scheduler| 1000ms            | ≤5s+1s         | ≤7s                    |
+  | B2: renewMaxTimeMillis 3h | retryPolicy delay | Immediately    | retry delay seconds    |
+  | B3: Max renew retries (3) | (nothing sent)    | Immediately    | original CK expiry     |
+end note
+
+@enduml
