@@ -38,6 +38,10 @@ import org.apache.rocketmq.proxy.ProxyMode;
 import org.apache.rocketmq.proxy.common.ProxyException;
 import org.apache.rocketmq.proxy.common.ProxyExceptionCode;
 
+/**
+ * Central configuration for the RocketMQ Proxy, covering gRPC, remoting, TLS,
+ * transaction, metrics, and feature-toggle settings.
+ */
 public class ProxyConfig implements ConfigFile {
     private final static Logger log = LoggerFactory.getLogger(LoggerName.PROXY_LOGGER_NAME);
     public final static String DEFAULT_CONFIG_FILE_NAME = "rmq-proxy.json";
@@ -290,6 +294,12 @@ public class ProxyConfig implements ConfigFile {
     private long remotingWaitTimeMillsInDefaultQueue = 3 * 1000;
 
     private boolean enableBatchAck = false;
+
+    // Traffic-label routing toggles — all default off for production safety
+    private boolean enableTrafficLabelRouting = false;
+    private boolean enableTrafficLabelGroupCleanup = false;
+    private boolean enableTrafficLabelRoutingLog = false;
+    private long trafficLabelGroupCleanupIdleThresholdMs = 3600_000L;
 
     @Override
     public void initData() {
@@ -1551,6 +1561,38 @@ public class ProxyConfig implements ConfigFile {
 
     public void setEnableBatchAck(boolean enableBatchAck) {
         this.enableBatchAck = enableBatchAck;
+    }
+
+    public boolean isEnableTrafficLabelRouting() {
+        return enableTrafficLabelRouting;
+    }
+
+    public void setEnableTrafficLabelRouting(boolean enableTrafficLabelRouting) {
+        this.enableTrafficLabelRouting = enableTrafficLabelRouting;
+    }
+
+    public boolean isEnableTrafficLabelGroupCleanup() {
+        return enableTrafficLabelGroupCleanup;
+    }
+
+    public void setEnableTrafficLabelGroupCleanup(boolean enableTrafficLabelGroupCleanup) {
+        this.enableTrafficLabelGroupCleanup = enableTrafficLabelGroupCleanup;
+    }
+
+    public boolean isEnableTrafficLabelRoutingLog() {
+        return enableTrafficLabelRoutingLog;
+    }
+
+    public void setEnableTrafficLabelRoutingLog(boolean enableTrafficLabelRoutingLog) {
+        this.enableTrafficLabelRoutingLog = enableTrafficLabelRoutingLog;
+    }
+
+    public long getTrafficLabelGroupCleanupIdleThresholdMs() {
+        return trafficLabelGroupCleanupIdleThresholdMs;
+    }
+
+    public void setTrafficLabelGroupCleanupIdleThresholdMs(long trafficLabelGroupCleanupIdleThresholdMs) {
+        this.trafficLabelGroupCleanupIdleThresholdMs = trafficLabelGroupCleanupIdleThresholdMs;
     }
 
     public boolean isEnableMessageBodyEmptyCheck() {
