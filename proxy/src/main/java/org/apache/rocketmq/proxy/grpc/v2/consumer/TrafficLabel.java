@@ -20,8 +20,6 @@ package org.apache.rocketmq.proxy.grpc.v2.consumer;
  * Constants and utilities for traffic label routing.
  * A label of {@code null}, empty, or {@value #STANDARD} is treated as the standard (non-gray)
  * traffic lane; any other non-empty value identifies a gray lane.
- *
- * @author yangjie.sun
  */
 public final class TrafficLabel {
 
