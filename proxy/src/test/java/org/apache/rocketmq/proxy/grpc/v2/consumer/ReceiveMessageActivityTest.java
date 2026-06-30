@@ -48,6 +48,10 @@ import org.apache.rocketmq.common.message.MessageExt;
 import org.apache.rocketmq.proxy.common.ProxyContext;
 import org.apache.rocketmq.proxy.config.ConfigurationManager;
 import org.apache.rocketmq.proxy.grpc.v2.BaseActivityTest;
+import org.apache.rocketmq.proxy.grpc.v2.consumer.LabelGroupBootstrapper;
+import org.apache.rocketmq.proxy.grpc.v2.consumer.LabelRoutingResolver;
+import org.apache.rocketmq.proxy.grpc.v2.consumer.TrafficLabel;
+import org.apache.rocketmq.proxy.grpc.v2.consumer.TrafficLabelRouter;
 import org.apache.rocketmq.proxy.service.route.AddressableMessageQueue;
 import org.apache.rocketmq.proxy.service.route.MessageQueueView;
 import org.apache.rocketmq.remoting.protocol.route.BrokerData;
@@ -64,6 +68,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
@@ -366,6 +371,59 @@ public class ReceiveMessageActivityTest extends BaseActivityTest {
             }
         }
         return null;
+    }
+
+    @Test
+    public void receive_routes_gray_label_to_virtual_group() throws Throwable {
+        // Arrange: enable the master switch
+        ConfigurationManager.getProxyConfig().setEnableTrafficLabelRouting(true);
+        try {
+            // Wire a real TrafficLabelRouter with a stubbed bootstrapper (no broker calls needed)
+            LabelGroupBootstrapper stubBootstrapper = mock(LabelGroupBootstrapper.class);
+            TrafficLabelRouter router = new TrafficLabelRouter(new LabelRoutingResolver(), stubBootstrapper);
+            this.receiveMessageActivity.setTrafficLabelRouter(router);
+
+            StreamObserver<ReceiveMessageResponse> responseObserver = mock(ServerCallStreamObserver.class);
+            ArgumentCaptor<ReceiveMessageResponse> responseCaptor =
+                ArgumentCaptor.forClass(ReceiveMessageResponse.class);
+            doNothing().when(responseObserver).onNext(responseCaptor.capture());
+
+            when(this.grpcClientSettingsManager.getClientSettings(any()))
+                .thenReturn(Settings.newBuilder().getDefaultInstanceForType());
+
+            ArgumentCaptor<String> groupCaptor = ArgumentCaptor.forClass(String.class);
+            when(this.messagingProcessor.popMessage(
+                any(), any(), groupCaptor.capture(), anyString(), anyInt(), anyLong(), anyLong(),
+                anyInt(), any(), anyBoolean(), any(), isNull(), anyLong()))
+                .thenReturn(CompletableFuture.completedFuture(
+                    new PopResult(PopStatus.NO_NEW_MSG, Collections.emptyList())));
+
+            // Act: send request with a gray traffic label in context
+            ProxyContext grayCtx = createContext()
+                .withVal(TrafficLabel.PROPERTY_KEY, "gray1");
+
+            this.receiveMessageActivity.receiveMessage(
+                grayCtx,
+                ReceiveMessageRequest.newBuilder()
+                    .setGroup(Resource.newBuilder().setName(CONSUMER_GROUP).build())
+                    .setMessageQueue(MessageQueue.newBuilder()
+                        .setTopic(Resource.newBuilder().setName(TOPIC).build())
+                        .build())
+                    .setAutoRenew(true)
+                    .setFilterExpression(FilterExpression.newBuilder()
+                        .setType(FilterType.TAG)
+                        .setExpression("*")
+                        .build())
+                    .build(),
+                responseObserver
+            );
+
+            // Assert: popMessage was called with the virtual group name
+            assertEquals(CONSUMER_GROUP + TrafficLabel.GROUP_SEPARATOR + "gray1", groupCaptor.getValue());
+        } finally {
+            // restore default so other tests are unaffected
+            ConfigurationManager.getProxyConfig().setEnableTrafficLabelRouting(false);
+        }
     }
 
     @Test

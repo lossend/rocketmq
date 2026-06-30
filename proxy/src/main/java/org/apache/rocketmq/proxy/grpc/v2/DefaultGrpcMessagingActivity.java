@@ -53,7 +53,10 @@ import org.apache.rocketmq.proxy.grpc.v2.client.ClientActivity;
 import org.apache.rocketmq.proxy.grpc.v2.common.GrpcClientSettingsManager;
 import org.apache.rocketmq.proxy.grpc.v2.consumer.AckMessageActivity;
 import org.apache.rocketmq.proxy.grpc.v2.consumer.ChangeInvisibleDurationActivity;
+import org.apache.rocketmq.proxy.grpc.v2.consumer.LabelGroupBootstrapper;
+import org.apache.rocketmq.proxy.grpc.v2.consumer.LabelRoutingResolver;
 import org.apache.rocketmq.proxy.grpc.v2.consumer.ReceiveMessageActivity;
+import org.apache.rocketmq.proxy.grpc.v2.consumer.TrafficLabelRouter;
 import org.apache.rocketmq.proxy.grpc.v2.producer.ForwardMessageToDLQActivity;
 import org.apache.rocketmq.proxy.grpc.v2.producer.RecallMessageActivity;
 import org.apache.rocketmq.proxy.grpc.v2.producer.SendMessageActivity;
@@ -93,6 +96,14 @@ public class DefaultGrpcMessagingActivity extends AbstractStartAndShutdown imple
         this.endTransactionActivity = new EndTransactionActivity(messagingProcessor, grpcClientSettingsManager, grpcChannelManager);
         this.routeActivity = new RouteActivity(messagingProcessor, grpcClientSettingsManager, grpcChannelManager);
         this.clientActivity = new ClientActivity(messagingProcessor, grpcClientSettingsManager, grpcChannelManager);
+
+        // Build and inject traffic-label router (master switch defaults OFF — zero behavior change today)
+        LabelGroupBootstrapper bootstrapper = new LabelGroupBootstrapper(messagingProcessor.getAdminService());
+        TrafficLabelRouter trafficLabelRouter = new TrafficLabelRouter(new LabelRoutingResolver(), bootstrapper);
+        this.receiveMessageActivity.setTrafficLabelRouter(trafficLabelRouter);
+        this.ackMessageActivity.setTrafficLabelRouter(trafficLabelRouter);
+        this.changeInvisibleDurationActivity.setTrafficLabelRouter(trafficLabelRouter);
+        this.forwardMessageToDLQActivity.setTrafficLabelRouter(trafficLabelRouter);
 
         this.appendStartAndShutdown(this.grpcClientSettingsManager);
     }

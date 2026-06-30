@@ -43,6 +43,9 @@ public class ForwardMessageToDLQActivity extends AbstractMessagingActivity {
             validateTopicAndConsumerGroup(request.getTopic(), request.getGroup());
 
             String group = request.getGroup().getName();
+            if (trafficLabelRouter != null) {
+                group = trafficLabelRouter.rewriteGroup(ctx, request.getTopic().getName(), group);
+            }
             String handleString = request.getReceiptHandle();
             MessageReceiptHandle messageReceiptHandle = messagingProcessor.removeReceiptHandle(ctx, grpcChannelManager.getChannel(ctx.getClientID()), group, request.getMessageId(), request.getReceiptHandle());
             if (messageReceiptHandle != null) {
@@ -56,7 +59,7 @@ public class ForwardMessageToDLQActivity extends AbstractMessagingActivity {
                 ctx,
                 receiptHandle,
                 request.getMessageId(),
-                request.getGroup().getName(),
+                group,
                 request.getTopic().getName(),
                 liteTopic
             ).thenApply(result -> convertToForwardMessageToDeadLetterQueueResponse(ctx, result));

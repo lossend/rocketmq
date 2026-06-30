@@ -389,6 +389,11 @@ public class DefaultMessagingProcessor extends AbstractStartAndShutdown implemen
     }
 
     @Override
+    public org.apache.rocketmq.proxy.service.admin.AdminService getAdminService() {
+        return this.serviceManager.getAdminService();
+    }
+
+    @Override
     public void addReceiptHandle(ProxyContext ctx, Channel channel, String group, String msgID,
         MessageReceiptHandle messageReceiptHandle) {
         receiptHandleProcessor.addReceiptHandle(ctx, channel, group, msgID, messageReceiptHandle);

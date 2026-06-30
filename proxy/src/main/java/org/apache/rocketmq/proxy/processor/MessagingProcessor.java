@@ -427,6 +427,14 @@ public interface MessagingProcessor extends StartAndShutdown {
 
     MetadataService getMetadataService();
 
+    /**
+     * Returns the {@link org.apache.rocketmq.proxy.service.admin.AdminService} used to manage
+     * broker-side subscription groups, topics, and other administrative operations.
+     *
+     * @return the admin service
+     */
+    org.apache.rocketmq.proxy.service.admin.AdminService getAdminService();
+
     void addReceiptHandle(ProxyContext ctx, Channel channel, String group, String msgID,
         MessageReceiptHandle messageReceiptHandle);
 

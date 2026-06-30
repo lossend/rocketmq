@@ -55,6 +55,9 @@ public class AckMessageActivity extends AbstractMessagingActivity {
             validateTopicAndConsumerGroup(request.getTopic(), request.getGroup());
             String group = request.getGroup().getName();
             String topic = request.getTopic().getName();
+            if (trafficLabelRouter != null) {
+                group = trafficLabelRouter.rewriteGroup(ctx, topic, group);
+            }
             boolean isBatchAck = ConfigurationManager.getProxyConfig().isEnableBatchAck()
                 && !request.getEntries(0).hasLiteTopic();
             if (isBatchAck) {
