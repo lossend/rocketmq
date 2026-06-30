@@ -40,6 +40,11 @@ public class ContextInitPipeline implements RequestPipeline {
         if (ctx.getDeadline() != null) {
             context.setRemainingMs(ctx.getDeadline().timeRemaining(TimeUnit.MILLISECONDS));
         }
+        // Copy traffic-label header into context for label-based consumer routing.
+        String trafficLabel = headers.get(GrpcConstants.TRAFFIC_LABEL);
+        if (trafficLabel != null && !trafficLabel.trim().isEmpty()) {
+            context.withVal(org.apache.rocketmq.proxy.grpc.v2.consumer.TrafficLabel.PROPERTY_KEY, trafficLabel);
+        }
     }
 
     protected String getDefaultStringMetadataInfo(Metadata headers, Metadata.Key<String> key) {

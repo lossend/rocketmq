@@ -73,4 +73,11 @@ public class GrpcConstants {
 
     public static final Metadata.Key<String> CHANNEL_ID
         = Metadata.Key.of("x-mq-channel-id", Metadata.ASCII_STRING_MARSHALLER);
+
+    /**
+     * gRPC metadata header key used to carry the traffic label for consumer-side lane routing.
+     * Consumers set this header to opt into a specific traffic lane (e.g. a gray release).
+     */
+    public static final Metadata.Key<String> TRAFFIC_LABEL
+        = Metadata.Key.of("__rmq_traffic_label", Metadata.ASCII_STRING_MARSHALLER);
 }
