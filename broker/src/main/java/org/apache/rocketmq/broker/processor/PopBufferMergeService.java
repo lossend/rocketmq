@@ -903,8 +903,8 @@ public class PopBufferMergeService extends ServiceThread {
         /**
          * 存储磁盘
          */
-        private final boolean justOffset;
-        private volatile boolean ckStored = false;
+        private final boolean justOffset; // 目前看只有开启 popbuffer 的时候才会设置justOffset=false
+        private volatile boolean ckStored = false; // 表示 ck 是否发送到了 topic 下
 
         public PopCheckPointWrapper(int reviveQueueId, long reviveQueueOffset, PopCheckPoint point,
             long nextBeginOffset) {
