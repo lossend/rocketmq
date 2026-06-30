@@ -1,0 +1,18 @@
+# Exclude compiled output – the builder stage runs Maven inside the image.
+**/target/
+**/*.class
+**/*.jar
+
+# Dev tooling & IDE
+.git/
+.github/
+.idea/
+*.iml
+.DS_Store
+
+# Docs and examples that are not needed at build time
+docs/
+example/
+
+# Local test reports
+**/surefire-reports/

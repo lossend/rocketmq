@@ -1,0 +1,120 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Build the image from source (run from the repo root):
+#   docker build -f docker/Dockerfile -t rocketmq:5.5.0 .
+#
+# The Dockerfile uses a two-stage build:
+#   Stage 1 (builder) — compiles the full project with Maven and produces the
+#                        binary distribution tarball.
+#   Stage 2 (runtime) — copies only the assembled dist into a slim JRE image.
+#
+# All three services (nameserver, broker, proxy) share the same image; the role
+# is selected via the CMD override or the NODE_ROLE environment variable.
+#
+# Usage:
+#   docker compose up -d
+#   docker compose down -v          # stop and remove volumes
+#
+# Customisation:
+#   - Edit docker/conf/broker.conf   for broker settings
+#   - Edit docker/conf/rmq-proxy.json for proxy settings
+#   - Set NAMESRV_ADDR env var in the broker / proxy services if you rename the
+#     namesrv service or run it on a different host.
+
+version: '3.8'
+
+services:
+
+  # ── NameServer ─────────────────────────────────────────────────────────────
+  namesrv:
+    image: rocketmq:5.5.0
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: rmqnamesrv
+    ports:
+      - "9876:9876"
+    volumes:
+      - namesrv-logs:/home/rocketmq/logs
+    command: nameserver
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 9876 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  # ── Broker ─────────────────────────────────────────────────────────────────
+  broker:
+    image: rocketmq:5.5.0
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: rmqbroker
+    depends_on:
+      namesrv:
+        condition: service_healthy
+    ports:
+      - "10909:10909"
+      - "10911:10911"
+      - "10912:10912"
+    environment:
+      - NAMESRV_ADDR=namesrv:9876
+      # Reduce heap for local dev; tune for production.
+      - JAVA_OPT_EXT=-Xms512m -Xmx512m -Xmn256m
+    volumes:
+      - broker-logs:/home/rocketmq/logs
+      - broker-store:/home/rocketmq/store
+      - ./conf/broker.conf:/home/rocketmq/rocketmq-5.5.0/conf/broker.conf:ro
+    command: broker -c /home/rocketmq/rocketmq-5.5.0/conf/broker.conf
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 10911 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  # ── Proxy ──────────────────────────────────────────────────────────────────
+  proxy:
+    image: rocketmq:5.5.0
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: rmqproxy
+    depends_on:
+      namesrv:
+        condition: service_healthy
+      broker:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    environment:
+      - NAMESRV_ADDR=namesrv:9876
+      - JAVA_OPT_EXT=-Xms256m -Xmx256m
+    volumes:
+      - proxy-logs:/home/rocketmq/logs
+      - ./conf/rmq-proxy.json:/home/rocketmq/rocketmq-5.5.0/conf/rmq-proxy.json:ro
+    command: proxy -pc /home/rocketmq/rocketmq-5.5.0/conf/rmq-proxy.json
+    restart: unless-stopped
+
+volumes:
+  namesrv-logs:
+  broker-logs:
+  broker-store:
+  proxy-logs:
