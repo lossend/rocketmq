@@ -210,32 +210,98 @@ Each test method:
 
 ## Deliverable 4 — Perf Tests (`rocketmq-perf-test`)
 
-No agent. Native RocketMQ v5 Java client only. No Venus dependency.
+Real-world simulation: two separate Spring Boot apps deployed in K8s, driven by `hey` (HTTP load generator). No JUnit benchmarks.
 
-### Benchmarks
+### Architecture
 
-| Class | What it measures | Duration |
-|---|---|---|
-| `ThroughputBenchmarkTest` | Max msg/sec with 6 concurrent producers, 2 consumers | 60s |
-| `LatencyBenchmarkTest` | p50/p95/p99 end-to-end latency at 1000 msg/s steady load | 60s |
-| `TrafficLabelOverheadBenchmarkTest` | Repeat throughput + latency with `__RMQ_TRAFFIC_LABEL` set; report delta vs baseline | 2×60s |
+```
+[hey] ──HTTP──▶ [perf-producer-app pod]
+                       │ RocketMQ send
+                       ▼
+              [RocketMQ cluster (6 brokers)]
+                       │ RocketMQ consume
+                       ▼
+               [perf-consumer-app pod]
+                       │
+                 GET /metrics → JSON results
+```
 
-### Output format
+### perf-producer-app (Spring Boot)
 
-Each benchmark prints a JSON result block to stdout:
+- `POST /send` — publishes one RocketMQ message via Venus `IVenusProducerAPI`; records send timestamp in a `ConcurrentHashMap<msgId, sendTimeMillis>`
+- `GET /metrics` — returns JSON: total sent, send rate, error count
+- Driven by `hey -n 100000 -c 50 http://<nodeport>/send`
 
+### perf-consumer-app (Spring Boot)
+
+- `@VenusListener` consumer that receives messages, computes `receiveTime - sendTime` from a message user property (`x-send-time`), accumulates into a `HDRHistogram`
+- `GET /metrics` — returns JSON: total received, p50/p95/p99 latency ms, throughput msg/sec
+
+### Traffic label overhead test
+
+Run the full scenario twice:
+1. **Baseline** — pods started without `urbanic-sergo-client` agent
+2. **Isolated** — pods started with `-javaagent` and `-Dservice.tag=gray1` in pod spec
+
+Compare producer and consumer `/metrics` output between the two runs.
+
+### K8s manifests (`k8s/perf/`)
+
+```
+k8s/perf/
+  perf-producer-app/
+    deployment.yaml     # 1 replica, NodePort for hey access
+    service.yaml
+  perf-consumer-app/
+    deployment.yaml     # 1 replica
+    service.yaml        # ClusterIP, metrics scrape only
+  configmap-agent.yaml  # optional: javaagent env vars for isolated run
+```
+
+### Results collection
+
+```bash
+# after hey finishes:
+kubectl exec -n rocketmq-test deploy/perf-producer-app -- curl -s localhost:8080/metrics
+kubectl exec -n rocketmq-test deploy/perf-consumer-app -- curl -s localhost:8080/metrics
+```
+
+Output format:
 ```json
 {
-  "benchmark": "throughput",
-  "messagesPerSecond": 45230,
-  "producerCount": 6,
-  "durationSeconds": 60,
-  "trafficLabel": null
+  "role": "producer",
+  "totalSent": 100000,
+  "errorCount": 0,
+  "sendRatePerSec": 4821
+}
+{
+  "role": "consumer",
+  "totalReceived": 99998,
+  "p50LatencyMs": 12,
+  "p95LatencyMs": 34,
+  "p99LatencyMs": 67,
+  "throughputPerSec": 4819
 }
 ```
 
-### Proxy endpoint
-Same `ROCKETMQ_PROXY_ENDPOINT` env var as isolation tests.
+### Module layout (`rocketmq-perf-test/`)
+
+```
+rocketmq-perf-test/
+  perf-producer-app/
+    pom.xml
+    src/main/java/...
+      PerfProducerApplication.java
+      SendController.java
+      MetricsController.java
+  perf-consumer-app/
+    pom.xml
+    src/main/java/...
+      PerfConsumerApplication.java
+      PerfMessageListener.java
+      MetricsController.java
+  pom.xml   # parent for the two sub-apps
+```
 
 ---
 
@@ -254,20 +320,30 @@ Same `ROCKETMQ_PROXY_ENDPOINT` env var as isolation tests.
 ## Test Execution
 
 ```bash
-# 1. Deploy cluster
+# 1. Deploy RocketMQ cluster
 cd ../rocketmq-k8s-test
 make deploy
 
-# 2. Wait for proxy NodePort
+# 2. Run isolation tests (with sandbox agent)
 export ROCKETMQ_PROXY_ENDPOINT=localhost:30081
-
-# 3. Run isolation tests (with agent)
 mvn test -pl rocketmq-isolation-test \
   -DSERVICE_TAG=gray1 \
   -Dsandbox.home=$HOME
 
-# 4. Run perf tests (no agent)
-mvn test -pl rocketmq-perf-test
+# 3. Build and deploy perf apps (baseline, no agent)
+make deploy-perf
+
+# 4. Run hey against producer NodePort
+PRODUCER_NODEPORT=$(kubectl get svc -n rocketmq-test perf-producer-svc -o jsonpath='{.spec.ports[0].nodePort}')
+hey -n 100000 -c 50 http://localhost:${PRODUCER_NODEPORT}/send
+
+# 5. Collect metrics
+make perf-results
+
+# 6. Re-deploy perf apps with isolation agent, repeat steps 4-5
+make deploy-perf-isolated SERVICE_TAG=gray1
+hey -n 100000 -c 50 http://localhost:${PRODUCER_NODEPORT}/send
+make perf-results
 ```
 
 ---
