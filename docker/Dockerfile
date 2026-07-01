@@ -19,56 +19,20 @@
 # Build stage 1 `builder`:
 # Compile RocketMQ from source and produce the binary distribution tarball.
 #
-# Maven builds distribution/target/rocketmq-<version>.tar.gz via the
-# release-all profile.  Build tools stay in this stage and never reach the
-# runtime image.
-################################################################################
-FROM eclipse-temurin:17-jdk AS builder
+# Build with JDK 8 (not 17): the pom uses source/target 1.8 without --release,
+# so a JDK 17 compiler would link ByteBuffer.position(int) against its Java 9+
+# covariant override and produce bytecode the JDK 8 runtime cannot load
+# (NoSuchMethodError).  This mirrors the official dist-tar job
+# (snapshot-automation.yml): JDK 8 + Maven, same `mvn -Prelease-all ...` cmd.
+# `maven:3.9-eclipse-temurin-8` ships JDK 8 + Maven, so no apt-get is needed.
+FROM public.ecr.aws/docker/library/maven:3.9-eclipse-temurin-8 AS builder
 
 WORKDIR /src
 
-RUN set -eux; \
-    apt-get update; \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        maven \
-        git \
-    ; \
-    rm -rf /var/lib/apt/lists/*
-
-# Copy POM files before source so the dependency-download layer is cached
-# separately and only re-runs when POMs change.
-COPY pom.xml ./
-COPY auth/pom.xml               auth/
-COPY broker/pom.xml             broker/
-COPY client/pom.xml             client/
-COPY common/pom.xml             common/
-COPY container/pom.xml          container/
-COPY controller/pom.xml         controller/
-COPY distribution/pom.xml       distribution/
-COPY example/pom.xml            example/
-COPY filter/pom.xml             filter/
-COPY namesrv/pom.xml            namesrv/
-COPY openmessaging/pom.xml      openmessaging/
-COPY proxy/pom.xml              proxy/
-COPY remoting/pom.xml           remoting/
-COPY srvutil/pom.xml            srvutil/
-COPY store/pom.xml              store/
-COPY test/pom.xml               test/
-COPY tieredstore/pom.xml        tieredstore/
-COPY tools/pom.xml              tools/
-COPY style/                     style/
-
-RUN mvn dependency:go-offline -P release-all -q --no-transfer-progress 2>/dev/null || true
-
 COPY . .
 
-RUN mvn -Prelease-all -DskipTests clean package -q --no-transfer-progress
+RUN mvn -Prelease-all -DskipTests -Dspotbugs.skip=true clean install
 
-# Extract distribution.
-# distribution/pom.xml: finalName=rocketmq-${version}, appendAssemblyId=false
-#   → distribution/target/rocketmq-5.5.0.tar.gz
-# includeBaseDirectory=true means the tarball root is rocketmq-5.5.0/,
-# so --strip-components=1 lands the contents directly in /tmp/rocketmq-5.5.0/.
 ARG version=5.5.0
 RUN mkdir -p /tmp/rocketmq-${version} && \
     tar -xzf distribution/target/rocketmq-${version}.tar.gz \
@@ -80,7 +44,7 @@ RUN mkdir -p /tmp/rocketmq-${version} && \
 # Mirrors apache/rocketmq Dockerfile-ubuntu: same user, same script override
 # pattern, same WORKDIR and ENTRYPOINT conventions.
 ################################################################################
-FROM eclipse-temurin:17-jdk
+FROM public.ecr.aws/docker/library/eclipse-temurin:8-jdk
 
 ARG user=rocketmq
 ARG group=rocketmq
@@ -100,25 +64,21 @@ EXPOSE 9876
 # expose broker ports
 EXPOSE 10909 10911 10912
 
-# expose proxy ports
-EXPOSE 8080 8081
-
-# RocketMQ is run with user `rocketmq`, uid = 3000.
+# RocketMQ is run with user `rocketmq`, uid = 3000
 # If you bind mount a volume from the host or a data container,
-# ensure you use the same uid.
+# ensure you use the same uid
 RUN groupadd -g ${gid} ${group} \
     && useradd -l -u ${uid} -g ${gid} -m -s /bin/bash ${user} \
-    && apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    && apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         less \
         openssl \
         which \
-        numactl \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    \
+    && apt-get clean; \
+    rm -rf /var/lib/apt/lists/*
 
-# Copy docker-specific scripts (docker-entrypoint.sh, runbroker-customize.sh,
-# runserver-customize.sh) into bin/ — same approach as the official image.
+# Copy customized scripts
 COPY docker/scripts/ ${ROCKETMQ_HOME}/bin/
 
 # Copy RocketMQ artifact from builder stage.
