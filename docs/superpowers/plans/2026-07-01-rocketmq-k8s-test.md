@@ -6,7 +6,7 @@
 
 **Architecture:** The plugin intercepts RocketMQ v5 `ProducerImpl.send()` to inject `__RMQ_TRAFFIC_LABEL` and suffixes `clientId` with the isolation label, mirroring the existing `rabbitmq-plugin`. The test project deploys a full RocketMQ cluster to OrbStack and exercises it via JUnit 5 isolation tests (using the JVM Sandbox agent) and two Spring Boot perf apps driven by `hey`.
 
-**Tech Stack:** Java 8, Maven, JVM Sandbox (Arthas), RocketMQ v5 (`rocketmq-v5-client-spring-boot-starter:2.3.6`), Venus 2.0.0-SNAPSHOT, JUnit Jupiter 5.10.2, Awaitility 4.2.x, Spring Boot 2.7.x, Kubernetes (OrbStack), `hey`
+**Tech Stack:** Java 8, Maven, JVM Sandbox (Arthas), RocketMQ v5 (`rocketmq-v5-client-spring-boot-starter:2.3.6`), Venus 2.0.0-SNAPSHOT, `vanguard-spring-boot-starter:1.3.0` (Starlink infra bootstrap), JUnit Jupiter 5.10.2, Awaitility 4.2.x, Spring Boot 2.7.x, Kubernetes (OrbStack), Starlink (CD platform), `hey`
 
 ---
 
@@ -49,13 +49,15 @@
 | Create | `rocketmq-perf-test/perf-producer-app/src/main/java/com/mayfair/rocketmq/perf/producer/SendController.java` |
 | Create | `rocketmq-perf-test/perf-producer-app/src/main/java/com/mayfair/rocketmq/perf/producer/MetricsController.java` |
 | Create | `rocketmq-perf-test/perf-producer-app/src/main/java/com/mayfair/rocketmq/perf/producer/SendMetrics.java` |
-| Create | `rocketmq-perf-test/perf-producer-app/src/main/resources/application.yml` |
+| Create | `rocketmq-perf-test/perf-producer-app/src/main/resources/application.properties` |
+| Create | `rocketmq-perf-test/perf-producer-app/src/main/resources/application-dev.yaml` |
 | Create | `rocketmq-perf-test/perf-consumer-app/pom.xml` |
 | Create | `rocketmq-perf-test/perf-consumer-app/src/main/java/com/mayfair/rocketmq/perf/consumer/PerfConsumerApplication.java` |
 | Create | `rocketmq-perf-test/perf-consumer-app/src/main/java/com/mayfair/rocketmq/perf/consumer/PerfMessageListener.java` |
 | Create | `rocketmq-perf-test/perf-consumer-app/src/main/java/com/mayfair/rocketmq/perf/consumer/ConsumeMetrics.java` |
 | Create | `rocketmq-perf-test/perf-consumer-app/src/main/java/com/mayfair/rocketmq/perf/consumer/MetricsController.java` |
-| Create | `rocketmq-perf-test/perf-consumer-app/src/main/resources/application.yml` |
+| Create | `rocketmq-perf-test/perf-consumer-app/src/main/resources/application.properties` |
+| Create | `rocketmq-perf-test/perf-consumer-app/src/main/resources/application-dev.yaml` |
 | Create | `rocketmq-perf-test/perf-producer-app/starlink.yaml` — Starlink deployment descriptor for producer app |
 | Create | `rocketmq-perf-test/perf-consumer-app/starlink.yaml` — Starlink deployment descriptor for consumer app |
 
@@ -500,6 +502,7 @@ Create `pom.xml`:
         <spring-boot.version>2.7.18</spring-boot.version>
         <rocketmq-spring.version>2.3.6</rocketmq-spring.version>
         <venus.version>2.0.0-SNAPSHOT</venus.version>
+        <vanguard.version>1.3.0</vanguard.version>
         <junit-jupiter.version>5.10.2</junit-jupiter.version>
         <awaitility.version>4.2.1</awaitility.version>
     </properties>
@@ -524,6 +527,11 @@ Create `pom.xml`:
                 <version>${venus.version}</version>
             </dependency>
             <dependency>
+                <groupId>com.urbanic.uis</groupId>
+                <artifactId>vanguard-spring-boot-starter</artifactId>
+                <version>${vanguard.version}</version>
+            </dependency>
+            <dependency>
                 <groupId>org.junit.jupiter</groupId>
                 <artifactId>junit-jupiter</artifactId>
                 <version>${junit-jupiter.version}</version>
@@ -538,14 +546,17 @@ Create `pom.xml`:
 </project>
 ```
 
-- [ ] **Step 2: Install Venus SNAPSHOT to local Maven repo**
+- [ ] **Step 2: Install Venus SNAPSHOT and Vanguard to local Maven repo**
 
 ```bash
 cd /Users/lossend/pro/venus
 mvn install -DskipTests -q
+
+cd /Users/lossend/pro/vanguard
+mvn install -DskipTests -q
 ```
 
-Expected: `BUILD SUCCESS`
+Expected: both `BUILD SUCCESS`
 
 - [ ] **Step 3: Verify parent POM parses**
 
@@ -1343,6 +1354,14 @@ git commit -m "feat(isolation-test): add 4 traffic-label routing scenarios"
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
         <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.urbanic.uis</groupId>
+            <artifactId>vanguard-spring-boot-starter</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.apache.rocketmq</groupId>
             <artifactId>rocketmq-v5-client-spring-boot-starter</artifactId>
         </dependency>
@@ -1494,18 +1513,37 @@ public class PerfProducerApplication {
 }
 ```
 
-- [ ] **Step 7: Create application.yml**
+- [ ] **Step 7: Create application.properties**
 
-`src/main/resources/application.yml`:
-```yaml
-server:
-  port: 8080
+`src/main/resources/application.properties`:
+```properties
+spring.application.name=rocketmq-perf-producer
 
-rocketmq:
-  topic: perf-test-topic
+# RocketMQ topic for perf test
+rocketmq.topic=perf-test-topic
+
+# Vanguard environment (set by Starlink in non-dev; overridden in application-dev.yaml locally)
+# vanguard.ub-env and vanguard.ub-env-grade are injected by Starlink at deploy time
 ```
 
-- [ ] **Step 8: Build**
+- [ ] **Step 8: Create application-dev.yaml**
+
+`src/main/resources/application-dev.yaml`:
+```yaml
+# Local development overrides — not loaded in Starlink environments
+rocketmq:
+  proxy-endpoint: "localhost:30081"
+
+vanguard:
+  ub-env: local
+
+service.tag: local
+```
+
+> In Starlink, `ROCKETMQ_PROXY_ENDPOINT` is provided via Nacos config or env injection.
+> `service.tag: local` ensures the sandbox agent treats local dev as the standard lane (no label).
+
+- [ ] **Step 9: Build**
 
 ```bash
 cd /Users/lossend/pro/rocketmq-k8s-test
@@ -1514,11 +1552,11 @@ mvn package -pl rocketmq-perf-test/perf-producer-app -DskipTests -q
 
 Expected: `BUILD SUCCESS`, fat jar at `rocketmq-perf-test/perf-producer-app/target/perf-producer-app-1.0.0-SNAPSHOT.jar`
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
 git add rocketmq-perf-test/
-git commit -m "feat(perf): add perf-producer-app"
+git commit -m "feat(perf): add perf-producer-app with vanguard-spring-boot-starter"
 ```
 
 ---
@@ -1545,6 +1583,14 @@ git commit -m "feat(perf): add perf-producer-app"
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.urbanic.uis</groupId>
+            <artifactId>vanguard-spring-boot-starter</artifactId>
         </dependency>
         <dependency>
             <groupId>org.apache.rocketmq</groupId>
@@ -1733,19 +1779,32 @@ public class PerfConsumerApplication {
 }
 ```
 
-- [ ] **Step 6: Create application.yml**
+- [ ] **Step 6: Create application.properties**
 
-`src/main/resources/application.yml`:
-```yaml
-server:
-  port: 8080
+`src/main/resources/application.properties`:
+```properties
+spring.application.name=rocketmq-perf-consumer
 
-rocketmq:
-  topic: perf-test-topic
-  consumer-group: cid-perf-consumer
+# RocketMQ topic and consumer group
+rocketmq.topic=perf-test-topic
+rocketmq.consumer-group=cid-perf-consumer
 ```
 
-- [ ] **Step 7: Build**
+- [ ] **Step 7: Create application-dev.yaml**
+
+`src/main/resources/application-dev.yaml`:
+```yaml
+# Local development overrides — not loaded in Starlink environments
+rocketmq:
+  proxy-endpoint: "localhost:30081"
+
+vanguard:
+  ub-env: local
+
+service.tag: local
+```
+
+- [ ] **Step 8: Build**
 
 ```bash
 cd /Users/lossend/pro/rocketmq-k8s-test
@@ -1754,11 +1813,11 @@ mvn package -pl rocketmq-perf-test/perf-consumer-app -DskipTests -q
 
 Expected: `BUILD SUCCESS`
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add rocketmq-perf-test/perf-consumer-app/
-git commit -m "feat(perf): add perf-consumer-app with HDR histogram latency tracking"
+git commit -m "feat(perf): add perf-consumer-app with vanguard-spring-boot-starter"
 ```
 
 ---
