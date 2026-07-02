@@ -23,11 +23,15 @@ package org.apache.rocketmq.proxy.grpc.v2.consumer;
  */
 public final class TrafficLabel {
 
-    /** Message property key used to carry the traffic label. */
-    public static final String PROPERTY_KEY = "__RMQ_TRAFFIC_LABEL";
+    /**
+     * Message property key used to carry the traffic label.
+     * Matches the agent SDK's {@code Constants.SERVICE_TAG} so producers and consumers
+     * use the same key without translation.
+     */
+    public static final String PROPERTY_KEY = "__service.tag__";
 
     /** Sentinel value representing the standard (non-gray) traffic lane. */
-    public static final String STANDARD = "STANDARD";
+    public static final String STANDARD = "default";
 
     /** Separator inserted between the origin consumer group and a gray label. */
     public static final String GROUP_SEPARATOR = "%";

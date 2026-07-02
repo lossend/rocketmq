@@ -119,7 +119,7 @@ public class TrafficLabelRouterTest {
 
         LabelRoutingResolver.RoutingDecision d = router.resolveForReceive(ctx, "test-topic", "G", null);
         assertThat(d.getEffectiveGroup()).isEqualTo("G%gray1");
-        assertThat(d.getSql92()).isEqualTo("__RMQ_TRAFFIC_LABEL = 'gray1'");
+        assertThat(d.getSql92()).isEqualTo("__service.tag__ = 'gray1'");
     }
 
     @Test

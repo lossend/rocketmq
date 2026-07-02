@@ -20,7 +20,7 @@ import org.apache.rocketmq.proxy.common.ProxyContext;
 
 /**
  * Extracts the traffic label from a {@link ProxyContext}.
- * The label is stored under the key {@value TrafficLabel#PROPERTY_KEY}.
+ * The label is stored in {@link ProxyContext} under the key {@value TrafficLabel#PROPERTY_KEY}.
  */
 public final class TrafficLabelExtractor {
 

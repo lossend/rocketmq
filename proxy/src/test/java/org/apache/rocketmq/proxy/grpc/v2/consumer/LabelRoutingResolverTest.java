@@ -28,7 +28,7 @@ public class LabelRoutingResolverTest {
     public void gray_label_routes_to_virtual_group_with_label_filter() {
         LabelRoutingResolver.RoutingDecision d = resolver.resolve("G", "gray1", null);
         assertThat(d.getEffectiveGroup()).isEqualTo("G%gray1");
-        assertThat(d.getSql92()).isEqualTo("__RMQ_TRAFFIC_LABEL = 'gray1'");
+        assertThat(d.getSql92()).isEqualTo("__service.tag__ = 'gray1'");
     }
 
     @Test
@@ -36,21 +36,27 @@ public class LabelRoutingResolverTest {
         LabelRoutingResolver.RoutingDecision d = resolver.resolve("G", null, null);
         assertThat(d.getEffectiveGroup()).isEqualTo("G");
         assertThat(d.getSql92())
-            .isEqualTo("__RMQ_TRAFFIC_LABEL IS NULL OR __RMQ_TRAFFIC_LABEL = 'STANDARD'");
+            .isEqualTo("__service.tag__ IS NULL OR __service.tag__ = 'default'");
     }
 
     @Test
     public void gray_label_AND_merges_consumer_origin_expression() {
         LabelRoutingResolver.RoutingDecision d = resolver.resolve("G", "gray1", "a > 1");
         assertThat(d.getEffectiveGroup()).isEqualTo("G%gray1");
-        assertThat(d.getSql92()).isEqualTo("( a > 1 ) AND ( __RMQ_TRAFFIC_LABEL = 'gray1' )");
+        assertThat(d.getSql92()).isEqualTo("( a > 1 ) AND ( __service.tag__ = 'gray1' )");
     }
 
     @Test
     public void standard_AND_merges_consumer_origin_expression() {
-        LabelRoutingResolver.RoutingDecision d = resolver.resolve("G", "STANDARD", "a > 1");
+        LabelRoutingResolver.RoutingDecision d = resolver.resolve("G", "default", "a > 1");
         assertThat(d.getEffectiveGroup()).isEqualTo("G");
-        assertThat(d.getSql92()).isEqualTo(
-            "( a > 1 ) AND ( __RMQ_TRAFFIC_LABEL IS NULL OR __RMQ_TRAFFIC_LABEL = 'STANDARD' )");
+        assertThat(d.getSql92())
+            .isEqualTo("( a > 1 ) AND ( __service.tag__ IS NULL OR __service.tag__ = 'default' )");
+    }
+
+    @Test
+    public void gray_label_matches_message_with_only_service_tag_key() {
+        LabelRoutingResolver.RoutingDecision d = resolver.resolve("G", "gray1", null);
+        assertThat(d.getSql92()).contains("__service.tag__ = 'gray1'");
     }
 }

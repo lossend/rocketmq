@@ -36,13 +36,13 @@ public class TrafficLabelTest {
 
     @Test
     public void should_treat_standard_label_as_origin_group() {
-        assertThat(TrafficLabel.effectiveGroup("G", "STANDARD")).isEqualTo("G");
+        assertThat(TrafficLabel.effectiveGroup("G", "default")).isEqualTo("G");
     }
 
     @Test
     public void should_detect_gray_label() {
         assertThat(TrafficLabel.isGray("gray1")).isTrue();
-        assertThat(TrafficLabel.isGray("STANDARD")).isFalse();
+        assertThat(TrafficLabel.isGray("default")).isFalse();
         assertThat(TrafficLabel.isGray(null)).isFalse();
         assertThat(TrafficLabel.isGray("")).isFalse();
     }
