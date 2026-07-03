@@ -124,7 +124,9 @@ public class ReceiveMessageActivity extends AbstractMessagingActivity {
 
             if (trafficLabelRouter != null) {
                 LabelRoutingResolver.RoutingDecision decision =
-                    trafficLabelRouter.resolveForReceive(ctx, topic, group, filterExpression.getExpression());
+                    trafficLabelRouter.resolveForReceive(ctx, topic, group,
+                        filterExpression.getExpression(),
+                        GrpcConverter.getInstance().buildExpressionType(filterExpression.getType()));
                 if (decision != null) {
                     group = decision.getEffectiveGroup();
                     try {

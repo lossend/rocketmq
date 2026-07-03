@@ -93,19 +93,23 @@ public class TrafficLabelRouter {
      * <p>Returns {@code null} when the master switch is disabled so callers can fall
      * through to standard (non-label-aware) receive logic without branching.
      *
-     * @param ctx              proxy context holding the optional traffic label
-     * @param topic            topic being consumed (used for group bootstrap)
-     * @param originGroup      the original consumer group name supplied by the client
-     * @param originExpression the original SQL92 / tag filter expression from the client, may be {@code null}
+     * @param ctx                  proxy context holding the optional traffic label
+     * @param topic                topic being consumed (used for group bootstrap)
+     * @param originGroup          the original consumer group name supplied by the client
+     * @param originExpression     the original filter expression from the client (TAG string or
+     *                             SQL-92), may be {@code null}
+     * @param originExpressionType the expression type ({@code "TAG"} or {@code "SQL92"}),
+     *                             may be {@code null} (treated as TAG)
      * @return a {@link LabelRoutingResolver.RoutingDecision} when routing is enabled, {@code null} otherwise
      */
     public LabelRoutingResolver.RoutingDecision resolveForReceive(ProxyContext ctx, String topic,
-        String originGroup, String originExpression) {
+        String originGroup, String originExpression, String originExpressionType) {
         if (!isEnabled()) {
             return null;
         }
         String label = TrafficLabelExtractor.extract(ctx);
-        LabelRoutingResolver.RoutingDecision decision = resolver.resolve(originGroup, label, originExpression);
+        LabelRoutingResolver.RoutingDecision decision =
+            resolver.resolve(originGroup, label, originExpression, originExpressionType);
         if (TrafficLabel.isGray(label)) {
             bootstrapper.ensureGroup(topic, decision.getEffectiveGroup());
         }

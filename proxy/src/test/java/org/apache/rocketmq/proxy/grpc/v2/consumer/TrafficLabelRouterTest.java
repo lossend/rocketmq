@@ -18,6 +18,7 @@ package org.apache.rocketmq.proxy.grpc.v2.consumer;
 
 import java.util.ArrayList;
 import java.util.List;
+import org.apache.rocketmq.common.filter.ExpressionType;
 import org.apache.rocketmq.proxy.common.ProxyContext;
 import org.apache.rocketmq.proxy.config.ConfigurationManager;
 import org.apache.rocketmq.proxy.service.admin.AdminService;
@@ -117,7 +118,8 @@ public class TrafficLabelRouterTest {
         ProxyContext ctx = ProxyContext.create();
         ctx.withVal(TrafficLabel.PROPERTY_KEY, "gray1");
 
-        LabelRoutingResolver.RoutingDecision d = router.resolveForReceive(ctx, "test-topic", "G", null);
+        LabelRoutingResolver.RoutingDecision d =
+            router.resolveForReceive(ctx, "test-topic", "G", null, ExpressionType.TAG);
         assertThat(d.getEffectiveGroup()).isEqualTo("G%gray1");
         assertThat(d.getSql92()).isEqualTo("__service.tag__ = 'gray1'");
     }
@@ -128,6 +130,19 @@ public class TrafficLabelRouterTest {
         ProxyContext ctx = ProxyContext.create();
         ctx.withVal(TrafficLabel.PROPERTY_KEY, "gray1");
 
-        assertThat(router.resolveForReceive(ctx, "test-topic", "G", null)).isNull();
+        assertThat(router.resolveForReceive(ctx, "test-topic", "G", null, ExpressionType.TAG)).isNull();
+    }
+
+    @Test
+    public void resolve_for_receive_threads_tag_expression_type_through_to_sql92() {
+        ConfigurationManager.getProxyConfig().setEnableTrafficLabelRouting(true);
+        ProxyContext ctx = ProxyContext.create();
+        ctx.withVal(TrafficLabel.PROPERTY_KEY, "gray1");
+
+        // TAG expression "TagA" must arrive at the broker as TAGS in ('TagA'), not raw "TagA".
+        LabelRoutingResolver.RoutingDecision d =
+            router.resolveForReceive(ctx, "test-topic", "G", "TagA", ExpressionType.TAG);
+        assertThat(d.getSql92())
+            .isEqualTo("( TAGS in ('TagA') ) AND ( __service.tag__ = 'gray1' )");
     }
 }
