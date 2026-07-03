@@ -1,125 +1,126 @@
 ---
 name: traffic-label-routing-design
-description: 基于流量标的 RocketMQ 动态消费路由 —— 顶层设计与方案索引
+description: RocketMQ dynamic consumption routing based on traffic labels - top-level design and plan index
 date: 2026-06-29
 status: brainstorming
 ---
 
-# 基于流量标的动态消费路由 —— 顶层设计
+# Dynamic Consumption Routing Based on Traffic Labels
 
-> 本文是顶层设计索引。两个候选方案的细节分别见:
-> - [[2026-06-29-traffic-label-routing-plan-a-strict-bypass]] —— 方案 A:严格隔离 + 旁路存储
-> - [[2026-06-29-traffic-label-routing-plan-b-subcursor-harvest]] —— 方案 B:per-label 子游标 + 标准收割
+> This document is the top-level design index. The two candidate plans are:
+> - [[2026-06-29-traffic-label-routing-plan-a-strict-bypass]] - Plan A: strict isolation plus bypass storage
+> - [[2026-06-29-traffic-label-routing-plan-b-subcursor-harvest]] - Plan B: per-label sub-cursors plus standard harvesting
 >
-> 历史参考(**本次设计已独立思考,不默认沿用**):
-> - [[2026-06-26-traffic-label-routing-server-side-pop-retry]] —— 旧的 route-topic / POP retry 方案
+> Historical reference only. This design was reconsidered independently and is not bound to reuse it:
+> - [[2026-06-26-traffic-label-routing-server-side-pop-retry]] - the old route-topic / POP retry plan
 
-## 1. 背景与需求
+## 1. Background and Requirements
 
-部署上存在两类环境:
+The deployment contains two kinds of environments:
 
-- **标准环境(Standard)**:常驻,承接全量兜底流量。
-- **隔离环境(Isolated / gray)**:可同时存在多个(gray1、gray2…),用于灰度 / PR 预览 / 压测等。
+- **Standard environment**: long-lived and responsible for the full fallback traffic set.
+- **Isolated environments**: one or more can exist at the same time, such as gray1, gray2, and so on, used for gray release, PR preview, load testing, and similar scenarios.
 
-应用可部署在标准环境或某个隔离环境。期望行为:
+An application may be deployed either in the standard environment or in one of the isolated environments. The expected behavior is:
 
-1. 隔离环境的 **生产者** 给每条消息打上 **流量标(isolation tag)**,载体为消息属性 `__RMQ_TRAFFIC_LABEL`。
-2. 若存在 **同流量标的隔离环境消费者在线** → 该消息由对应隔离环境消费。
-3. 否则 → 消息 **回退** 给标准环境消费者消费。
+1. Producers in an isolated environment attach an **isolation tag**, meaning a traffic label, to every message, using the `__RMQ_TRAFFIC_LABEL` message property.
+2. If a consumer in an isolated environment with the **same traffic label is online**, that message is consumed by the corresponding isolated environment.
+3. Otherwise, the message **falls back** to consumers in the standard environment.
 
-约束:**Proxy 负责消费路由**;必须支持 **分布式部署**、**高可用**、**高性能**。
+Constraints: **the Proxy is responsible for consumption routing**, and the solution must support **distributed deployment**, **high availability**, and **high performance**.
 
-消费模型:**仅 POP / gRPC 5.x**(已确认,无 PULL/PUSH 经典模型,是最干净的情形)。
+Consumption model: **POP / gRPC 5.x only**. This has been confirmed. There is no classic PULL or PUSH model involved, which makes the situation cleaner.
 
-## 2. 根本张力:POP 单游标
+## 2. Core Tension: POP Uses a Single Cursor
 
-POP 模型下,一个 `(consumerGroup, topic, queueId)` 共享 **一个 offset 游标**。本需求要求在同一条物理 queue 上对 **单条消息粒度** 做"投给谁"的判断,这与单游标天然冲突:
+Under POP, one `(consumerGroup, topic, queueId)` shares **one offset cursor**. This requirement wants to decide, at **single-message granularity** on the same physical queue, who should consume each message. That collides directly with the single-cursor model.
 
-> "顺序单游标" + "选择性跳过部分消息" + "被跳过的消息日后仍能被其他环境消费" —— 三者不能同时廉价满足。
+> "Sequential single cursor" + "selectively skip some messages" + "messages skipped today must still be consumable later by some other environment" cannot all be satisfied cheaply at the same time.
 
-跳过一条消息(SKIP)是 **单向** 的:游标越过即把这条消息丢给对方,自己不会回头。因此要让"被标准跳过的隔离消息日后仍能回退给标准",**单纯 SKIP 做不到**,必须二选一:
+Skipping a message is **one-way**. Once the cursor moves past it, the message has effectively been handed to the other side, and the skipper will not come back to it. Therefore, if a message skipped by standard must still be able to fall back to standard later, **plain SKIP is not enough**. There are only two real choices:
 
-- **A. 把消息复制到旁路** —— 越过前先落到另一处存储,隔离消费者从旁路读。
-- **B. 不复制,改让标准去"收割"离线隔离标的子游标** —— 每个流量标一个独立子游标,标准在隔离标离线时把它的子游标抽干。
+- **A. Copy the message into a bypass path**. Before skipping it, persist it elsewhere so the isolated consumer can read it there.
+- **B. Do not copy it. Instead let standard consumers harvest the sub-cursor of an offline isolated label**. Give each traffic label its own independent sub-cursor, and let standard consumers drain that sub-cursor once the label is offline.
 
-这两条路就是下文的方案 A 与方案 B。
+Those are exactly Plan A and Plan B.
 
-## 3. 架构层结论
+## 3. Architectural Conclusions
 
-### 3.1 能否纯靠扩展点(不改核心)?
+### 3.1 Can This Be Done Using Extension Points Only?
 
-**不能完整实现。** 依据 [[Server_Extension_Points]](`docs/cn/Server_Extension_Points.md`):
+**Not fully.** According to [[Server_Extension_Points]](`docs/cn/Server_Extension_Points.md`):
 
-- Proxy 的 `PopMessageResultFilter.FilterResult` 只有 `{TO_DLQ, NO_MATCH, MATCH, TO_RETURN}` —— 无法改写 header、无法跨 topic 搬运消息、无法触发回退拉取。
-- Store 的 `MessageFilter`(`isMatchedByConsumeQueue` / `isMatchedByCommitLog`)在 pop 路径有调用点,可按消息属性决定 match/skip,但 **不持有在线视图、不能做有状态回退路由**。
+- Proxy-side `PopMessageResultFilter.FilterResult` only supports `{TO_DLQ, NO_MATCH, MATCH, TO_RETURN}`. It cannot rewrite headers, move a message across topics, or trigger fallback pulling.
+- Store-side `MessageFilter`, through `isMatchedByConsumeQueue` and `isMatchedByCommitLog`, does get invoked on the POP path and can decide match vs skip based on message properties. However, it **has no online-view state and cannot perform stateful fallback routing**.
 
-结论:纯扩展点最多实现 **弱化版**(隔离精确匹配 + 标准盲回退),无法满足"在线才隔离、离线才回退"的动态语义。
+Conclusion: pure extension points can at best implement a **weakened version** consisting of exact isolation matching plus blind standard fallback. That does not satisfy the dynamic semantics of "isolate when online, fall back when offline."
 
-> 📌 **精确化(2026-06-29 补充)**:对 plan-b 做了 5 能力 × 扩展点逐条核对,发现存在一个 **零 broker 侵入的静态隔离变体 Plan-B-Lite**(预创建真实组 `G%label` + SQL92 属性过滤 + `enablePropertyFilter`),但它 **缺动态回退**。完整对照表与补回退两条路径见 [[2026-06-29-traffic-label-routing-plan-b-subcursor-harvest]] §8-§9。要点:
-> - Proxy `PopMessageResultFilter` 的 `NO_MATCH` 会 **ACK 丢消息**,是回退陷阱,不可用(`ConsumerProcessor.java:181-190`)。
-> - 动态回退所需的 ①label 在线快照 + ⑤收割扇入,**无任何扩展点对应**,必须改核心或引入外部 operator。
+> Clarification added on 2026-06-29: after decomposing plan-b into five required capabilities and matching them against extension points one by one, it turns out there is a **zero-broker-intrusion static isolation variant, Plan-B-Lite**, built from pre-created real groups `G%label`, SQL92 property filtering, and `enablePropertyFilter`. However, it still **lacks dynamic fallback**. The full comparison table and the two fallback paths are documented in [[2026-06-29-traffic-label-routing-plan-b-subcursor-harvest]] sections 8 and 9. The key findings are:
+> - Proxy `PopMessageResultFilter.NO_MATCH` will **ack and lose the message**, so it is a fallback trap and cannot be used.
+> - Dynamic fallback requires 1) an online-label snapshot and 5) harvesting fan-in. **No extension point maps to either of those**, so core changes or an external operator are unavoidable.
 
-### 3.2 必须改 Proxy + Broker
+### 3.2 Both Proxy and Broker Must Change
 
-动态回退依赖 **流量标在线快照**(哪些 label 存在、是否在线),这是有状态的集群视图,必须:
+Dynamic fallback depends on a **traffic-label online snapshot**, which is a cluster-wide stateful view of which labels exist and whether they are online. That implies:
 
-- **Proxy 侧**:基于 `ClusterConsumerManager` + `HeartbeatSyncer` 维护跨实例的 label 在线快照,随 POP 请求把 `consumerLabel` + 在线快照下发给 Broker。
-- **Broker 侧**:在 `PopMessageProcessor` 收敛单粒度路由决策。
+- **Proxy side**: maintain a cross-instance online-label snapshot through `ClusterConsumerManager` plus `HeartbeatSyncer`, and send `consumerLabel` together with the online snapshot down to the broker with POP requests.
+- **Broker side**: centralize per-message routing decisions in `PopMessageProcessor`.
 
-两方案都建立在这个 Proxy+Broker 改造基线上,差异只在 Broker 如何处理"被跳过的隔离消息"。
+Both candidate plans share this Proxy-plus-Broker baseline. Their difference lies only in how the broker handles isolated messages that standard consumers skip.
 
-### 3.3 源码验证结论(影响选型的硬事实)
+### 3.3 Source-Level Facts That Affect the Plan Choice
 
-落地前对照源码确认,以下事实已固定:
+Comparing the design against source code locked in the following facts:
 
-| 事实 | 锚点 | 影响 |
+| Fact | Anchor | Impact |
 |---|---|---|
-| offset 记账 key = `topic@group` | `ConsumerOffsetManager.java:201,241` | 方案 B 子游标用 **虚拟订阅组 `G%label`** 落地,复用现成记账,无需新 offset 表 |
-| **POP 路径不支持 LMQ**(`PopMessageProcessor` 零 `isLmq`,LMQ 仅接 PULL) | `PopMessageProcessor.java`、`LmqPullRequestHoldService` | **LMQ 候选已推翻**,详见 [[2026-06-29-traffic-label-routing-plan-b-subcursor-harvest]] §0 |
-| 逐条投递/跳过落在 `messageFilter`,游标照常前进 | `PopMessageProcessor.java:774-776` | 两方案的"按 label 决策"都挂 filter,不动游标推进 |
-| 虚拟组在 `findSubscriptionGroupConfig` 会被拒 | `PopMessageProcessor.java:308` | 方案 B 必改点:虚拟组继承父组配置 |
+| Offset accounting key is `topic@group` | `ConsumerOffsetManager.java:201,241` | Plan B should implement sub-cursors through **virtual subscription groups `G%label`**, reusing existing accounting without a new offset table |
+| **The POP path does not support LMQ**. `PopMessageProcessor` has zero `isLmq` references, and LMQ is only used for PULL | `PopMessageProcessor.java`, `LmqPullRequestHoldService` | **The LMQ candidate is ruled out**. See [[2026-06-29-traffic-label-routing-plan-b-subcursor-harvest]] section 0 |
+| Per-message deliver-or-skip decisions happen in `messageFilter`, while cursor advancement remains unchanged | `PopMessageProcessor.java:774-776` | Both plans can hang label-based decisions on the filter without touching cursor advancement |
+| A virtual group is rejected by `findSubscriptionGroupConfig` | `PopMessageProcessor.java:308` | Plan B must modify this point so virtual groups inherit parent-group config |
 
-## 4. 两方案对比
+## 4. Side-by-Side Comparison
 
-| 维度 | 方案 A:严格隔离 + 旁路存储 | 方案 B:子游标 + 标准收割 |
+| Dimension | Plan A: strict isolation plus bypass storage | Plan B: sub-cursors plus standard harvesting |
 |---|---|---|
-| 核心机制 | 越过前把隔离消息复制到旁路存储,隔离消费者从旁路读 | 每个流量标一个独立子游标;标准在隔离标离线时收割其子游标 |
-| 是否复制消息体 | 是 | 否 |
-| 是否需要 route topic / 旁路存储 | 是 | 否 |
-| offset 记录数 | 标准 + 旁路 | label 数 × queue 数(随 label 增长膨胀) |
-| revive / retry | 需对旁路做特判 | 复用每条子游标自带的 POP retry,零特判 |
-| 回退实时性 | 高(旁路独立投递) | 中(依赖标准收割轮次) |
-| 主要风险 | 复制写放大、旁路存储一致性、revive 特判复杂 | 子游标元数据膨胀、收割并发竞争、label 极多时退化 |
-| 复杂度 | 高 | 中 |
-| 子游标载体 | route topic(旧方案思路) | **虚拟订阅组 `G%label`**(复用 `topic@group` 记账;~~LMQ 已推翻~~) |
+| Core mechanism | Copy isolated messages into bypass storage before skipping them, then let isolated consumers read from bypass | Give each traffic label its own sub-cursor, and let standard consumers harvest it when the label is offline |
+| Whether the message body is copied | Yes | No |
+| Whether route topics or bypass storage are needed | Yes | No |
+| Number of offset records | Standard plus bypass | label count x queue count, growing with label count |
+| Revive / retry | Needs special handling for bypass | Reuses each sub-cursor's POP retry directly, with zero special handling |
+| Fallback timeliness | High, because bypass delivers independently | Medium, because it depends on standard harvesting rounds |
+| Main risk | Copy amplification, bypass consistency, and complex revive special handling | Sub-cursor metadata growth, harvesting races, and degradation when label count is high |
+| Complexity | High | Medium |
+| Sub-cursor carrier | route topic, like the old plan | **Virtual subscription group `G%label`**, reusing `topic@group` accounting. LMQ is no longer considered |
 
-## 5. 共性问题(两方案都要处理)
+## 5. Shared Problems Both Plans Must Handle
 
-- **抖动窗口跨环境泄漏**:隔离标在线/离线判定有快照延迟,窗口内可能误投。
-- **at-least-once 重复投递**:收割 / 旁路切换的残余窗口需消费端幂等(RocketMQ 本就要求)。
-- **流量标在线快照** 的准确性与同步延迟,是两方案共同的可用性关键。
-- **retry topic + revive 异步孤儿**:隔离环境失败消息进虚拟组专属 retry topic(`%RETRY%G%gray1`),revive 异步重投。回收虚拟组前必须确认 retry topic 已读尽且 revive 无残留,否则孤儿(方案 B 专属,详见 plan-b §4c)。
-- **broker 主从切换 / 重启**:收割队列、宽限期计时器是内存派生态。对齐 RocketMQ 现成范式(`PopBufferMergeService` 切 slave 即 clear、reviveOffset 持久同步),零持久化、挂 `changeSpecialServiceStatus`、冷启动重建,不丢消息(方案 B 专属,详见 plan-b §4d)。
-- **同名重建语义(临时环境高频,用户拍板:接管上一代积压)**:gray 销毁后同名重建需**接管自己上一代积压**。机制:游标 `G%label` **跨代持久共享、不带 epoch**,重建后从现存游标续上;宽限期作为"接管 vs 回退"统一旋钮(宽限期内回来→全量接管,超时→标准收割剩余)。误删进度由回收临界区核对在线快照防护(方案 B 专属,详见 plan-b §4e)。
-  - ⚠️ 张力:同一条消息不能既"等 gray 回来"又"立即给标准",故接管语义下**回退被延迟 = 宽限期长度**,这是该选择的固有代价。
+- **Cross-environment leakage during state flaps**. The online/offline judgment for isolated labels is snapshot-based and has propagation delay.
+- **At-least-once duplicates**. Residual windows in harvesting or bypass switching require idempotent consumers, which RocketMQ already assumes.
+- **Accuracy and propagation delay of the online-label snapshot** are central to the availability of both plans.
+- **Retry topic plus revive asynchronous orphan risk**. Failed messages in isolated environments go to a virtual-group-specific retry topic like `%RETRY%G%gray1`, and revive resubmits asynchronously. Before deleting a virtual group, the retry topic must be drained and revive must have no leftovers, or orphan messages remain. This is specific to plan B.
+- **Broker master/slave switching and restart**. Harvest queues and grace-period timers are in-memory derived state. They should follow RocketMQ's existing pattern: zero persistence, hook into `changeSpecialServiceStatus`, and rebuild cold, without losing messages. This is also specific to plan B.
+- **Same-name rebuild semantics in temporary environments**. The user chose "a rebuilt gray environment should take over its predecessor's backlog." That requires a shared persistent cursor `G%label` without epoch in plan B, with grace period as the single knob between "wait for gray to come back" and "fallback to standard."
+  - Warning: the tension is fundamental. A message cannot both wait for gray to return and also be given immediately to standard. Under takeover semantics, **fallback is delayed by exactly the grace period**.
 
-## 6. 选型(2026-06-29 已定)
+## 6. Chosen Direction (Locked on 2026-06-29)
 
-**确定前提(用户拍板)**:隔离环境 **临时**(PR预览/压测,频繁创建销毁);gray 离线后消息**优先等同名 gray 重建接管,宽限期内未回来才回退标准**(§4e 接管语义)。
+**Locked premise from the user**: isolated environments are **temporary**, such as PR preview or load-test environments that are created and destroyed frequently. When gray goes offline, messages should **prefer waiting for a same-name gray rebuild to take over**, and only fall back to standard if gray does not come back within the grace period.
 
-由此:
+Therefore:
 
-- **Plan-B-Lite 静态版出局** —— 销毁的 gray 不会回来,纯虚拟组不收割会导致积压永久无人消费。
-- **完整 plan-b 收割版选定** —— 见 [[2026-06-29-traffic-label-routing-plan-b-subcursor-harvest]] §4/§4a/§4b。
-- 临时环境逼出的硬点:
-  1. **宽限期 `gracePeriodMs`**:接管 vs 回退的统一旋钮 —— 宽限期内 gray 回来则从持久游标全量接管,超时才启动标准收割(§4a、§4e)。
-  2. **持久共享游标(去 epoch)**:游标 `G%grayX` 跨代持久,重建的同名 gray 从现存游标续上积压(§4e)。
-  3. **虚拟组回收**:收割完成后回收 `G%grayX` 元数据,防止"创建-销毁"循环导致膨胀(§4b)。**回收判定必须是三条件**(origin/retry offset 双双读尽 ∧ revive 无 in-flight checkpoint),否则 revive 异步重投会制造 retry topic 孤儿(§4c);并在**回收临界区核对在线快照**防误删接管者进度(§4e)。
-- 收割驱动:**Broker 扇入 + 待收割轮转捎带**,正常路径零放大,收割时恒 1+1(§4 决策 A)。
+- **Plan-B-Lite static mode is ruled out**. A destroyed gray environment will never return, so pure virtual groups with no harvesting would leave backlog forever unconsumed.
+- **Full plan-b harvesting mode is selected**. See [[2026-06-29-traffic-label-routing-plan-b-subcursor-harvest]] sections 4, 4a, and 4b.
+- Temporary environments force three hard points:
+  1. **Grace period `gracePeriodMs`** is the unified knob between takeover and fallback. If gray returns within the grace period, it takes over the full backlog from the persistent cursor. Only after timeout does standard harvesting begin.
+  2. **Persistent shared cursor without epoch**. `G%grayX` survives across generations, and a same-name gray rebuild resumes from the existing cursor.
+  3. **Virtual-group cleanup** after harvesting completes, so that create-destroy cycles do not bloat metadata forever. Cleanup must use the full three-condition check, and it must re-check the online snapshot in a cleanup critical section to avoid deleting the cursor of a returning owner.
+- Harvesting should be driven by **broker-side fan-in with round-robin piggybacking**, keeping the normal path at zero amplification and the harvesting path bounded to 1+1.
 
-> 方案 A([[2026-06-29-traffic-label-routing-plan-a-strict-bypass]])保留为对照:仅当 label 数量极大致虚拟组膨胀时才回头考虑。
+> Plan A, [[2026-06-29-traffic-label-routing-plan-a-strict-bypass]], remains as a comparison option only if label count grows so large that virtual-group metadata becomes too expensive.
 
-### 下一步
-- [x] 收敛 plan-b 为可实施设计(组件边界 §10.1、数据流 §10.2 已完成,见 [[2026-06-29-traffic-label-routing-plan-b-subcursor-harvest]] §10)
-- [x] 按 planning 规则补 E2E / API 测试用例设计(5 条 E2E + API 合约表,见 [[2026-06-29-traffic-label-routing-plan-b-subcursor-harvest]] §11)
-- [ ] design → 写 plan → 实施
+### Next Steps
+
+- [x] Converge plan-b into an implementable design. Component boundaries in section 10.1 and data flow in section 10.2 are already finished in [[2026-06-29-traffic-label-routing-plan-b-subcursor-harvest]] section 10
+- [x] Add E2E and API test case design per planning rules. The five E2E cases plus the API contract table are already in [[2026-06-29-traffic-label-routing-plan-b-subcursor-harvest]] section 11
+- [ ] Turn design into an implementation plan and then implement it

@@ -1,565 +1,575 @@
 ---
 name: traffic-label-routing-plan-b-subcursor-harvest
-description: 方案 B —— 虚拟订阅组子游标 + 标准收割:用 G%label 虚拟组承载每个流量标,标准接管离线隔离标的虚拟组
+description: Plan B - virtual subscription-group sub-cursors plus standard harvesting: carry each traffic label in a virtual group G%label, and let standard consumers take over offline isolated labels
 date: 2026-06-29
 status: brainstorming
-verified: 已对照源码验证(ConsumerOffsetManager / PopMessageProcessor / LMQ 路径)
+verified: verified against source (ConsumerOffsetManager / PopMessageProcessor / LMQ path)
 ---
 
-# 方案 B:虚拟订阅组子游标 + 标准收割
+# Plan B: Virtual Subscription-Group Sub-Cursors plus Standard Harvesting
 
-> 顶层设计见 [[2026-06-29-traffic-label-routing-design]]。
-> 对照方案见 [[2026-06-29-traffic-label-routing-plan-a-strict-bypass]]。
+> See [[2026-06-29-traffic-label-routing-design]] for the top-level design.
+> For comparison, see [[2026-06-29-traffic-label-routing-plan-a-strict-bypass]].
 
-## 0. 源码验证结论(本轮新增,决定落地形态)
+## 0. Source-Level Conclusions
 
-落地前对照了 RocketMQ 源码,三个事实直接重塑了本方案:
+Comparing the design against RocketMQ source code produced three facts that directly reshape this plan:
 
-| 事实 | 锚点 | 对方案的影响 |
+| Fact | Anchor | Impact on the plan |
 |---|---|---|
-| offset 记账 key = `topic@group`,每 `(group, queueId)` 一个游标 | `ConsumerOffsetManager.java:201,241` | "per-label 子游标"最干净的落地 = **把 label 编码进 group(虚拟订阅组 `G%label`)**,offset/checkpoint/revive/retry 全部自动复用,无需新建 offset 表 |
-| **POP 路径完全不支持 LMQ**,`PopMessageProcessor` 零 `isLmq` 引用;LMQ 只接 PULL(`LmqPullRequestHoldService`) | `PopMessageProcessor.java`(全文无 isLmq);`broker/.../longpolling/LmqPullRequestHoldService.java` | **❌ 推翻上一版"用 LMQ 当子游标"的候选** —— 走 LMQ 需先把整个 POP 消费链改造成支持 LMQ,代价远大于虚拟组 |
-| 逐条投递/跳过的落地点 = `messageFilter`,filter 跳过的消息游标照常前进(`nextBeginOffset`) | `PopMessageProcessor.java:774-776`、`appendCheckPoint :831` | "按 label 投递/SKIP"挂在 filter 上即可,**不动游标推进逻辑** |
+| Offset accounting key is `topic@group`, with one cursor per `(group, queueId)` | `ConsumerOffsetManager.java:201,241` | The cleanest implementation of "per-label sub-cursors" is to **encode the label into the group name**, using virtual subscription groups such as `G%label`. Offset, checkpoint, revive, and retry can all be reused automatically, with no new offset table |
+| **The POP path does not support LMQ at all**. `PopMessageProcessor` contains zero `isLmq` references, and LMQ serves only PULL through `LmqPullRequestHoldService` | `PopMessageProcessor.java`; `broker/.../longpolling/LmqPullRequestHoldService.java` | **This invalidates the earlier LMQ-based candidate**. Supporting LMQ would require changing the entire POP path, which is far more expensive than using virtual groups |
+| The per-message deliver-or-skip decision point is `messageFilter`, and skipped messages still advance the cursor through `nextBeginOffset` | `PopMessageProcessor.java:774-776`, `appendCheckPoint:831` | Label-based deliver / skip logic can be attached to the filter, **without changing cursor advancement logic** |
 
-> ⚠️ LMQ 候选已废弃,理由见上表第 2 行。后续不再考虑 LMQ。
+> The LMQ option is officially abandoned for this plan and will not be considered further.
 
-## 1. 载体:虚拟订阅组 = 子游标
+## 1. Carrier: Virtual Subscription Group Equals Sub-Cursor
 
-不自造 offset 表,而是把每个流量标编码成一个 **虚拟订阅组**,复用现成的 `topic@group` 记账:
+Instead of inventing a new offset table, each traffic label is encoded into a **virtual subscription group**, reusing existing `topic@group` accounting.
 
-| 角色 | 真实/虚拟组 | message filter | 谁来 POP |
+| Role | Real / virtual group | Message filter | Who performs POP |
 |---|---|---|---|
-| 标准消费者 | 真实组 `G` | `label == STANDARD` | 标准消费者 |
-| gray1 在线 | 虚拟组 `G%gray1` | `label == gray1` | gray1 消费者 |
-| gray1 离线 | 虚拟组 `G%gray1` | `label == gray1` | **标准消费者(收割)** |
+| Standard consumer | Real group `G` | `label == STANDARD` | Standard consumer |
+| gray1 online | Virtual group `G%gray1` | `label == gray1` | gray1 consumer |
+| gray1 offline | Virtual group `G%gray1` | `label == gray1` | **Standard consumer for harvesting** |
 
-**核心规则:标准组 `G` 永远只消费 `STANDARD`;每个 grayX 的全部消息恒由虚拟组 `G%grayX` 承载。grayX 在线时自己 POP `G%grayX`,离线时标准接管 POP `G%grayX`。**
+**Core rule: the standard group `G` always consumes only `STANDARD`. Every message for grayX always belongs to virtual group `G%grayX`. When grayX is online, it POPs `G%grayX` itself. When grayX is offline, standard consumers take over `G%grayX`.**
 
-这是相比"标准 filter 动态放行离线 label"更收敛的设计:标准组 G 的 filter 恒定不变,不受在线快照抖动影响;抖动只影响"标准要不要去 POP 某虚拟组",判断错了最多延迟或重复(at-least-once + 幂等兜底),**绝不丢消息**。
+Compared with dynamically allowing offline labels through the standard filter, this is a much more converged design. The filter on standard group `G` stays fixed and is not affected by online-snapshot flapping. Snapshot errors only affect whether standard should go harvest a virtual group. At worst that causes delay or duplication, with at-least-once semantics and consumer idempotency as the safety net. **It does not lose messages.**
 
-## 2. 所有权转移,而非消息转移
+## 2. Ownership Transfer, Not Message Transfer
 
-上一版"反例 B 卡死"在虚拟组模型下根本不存在:
+The earlier "counterexample B gets stuck" does not exist at all under the virtual-group model:
 
-```
+```text
 queue: [stdA, gray1B, stdC]
 
-gray1 在线:
-  gray1 POP  G%gray1, filter=gray1 → 读 B,G%gray1 游标记账 B
-  标准  POP  G,       filter=STANDARD → 读 stdA/stdC(B 不属于 G,与 G 游标无关)
+gray1 online:
+  gray1 POPs G%gray1 with filter=gray1 -> reads B, and B is accounted on cursor G%gray1
+  standard POPs G with filter=STANDARD -> reads stdA/stdC, while B does not belong to G
 
-gray1 离线:
-  标准收割轮 POP G%gray1, filter=gray1
-    ├ 情况① gray1 读了 B 未 ack 就崩 → B 在 G%gray1 的 checkpoint
-    │        → revive 重投 %RETRY%G%gray1 → 标准收割 retry 队列拿到 ✓
-    └ 情况② gray1 还没读到 B → 标准从 G%gray1 游标继续读到 B ✓
-  两种情况 100% 复用 POP normal + retry + revive,零特判
+gray1 offline:
+  harvesting round by standard POPs G%gray1 with filter=gray1
+    case 1: gray1 read B but crashed before ack
+            -> B is in the checkpoint of G%gray1
+            -> revive redelivers it to %RETRY%G%gray1
+            -> standard harvesting then receives it from retry
+    case 2: gray1 had not reached B yet
+            -> standard continues from the G%gray1 cursor and reads B
+
+  In both cases, POP normal flow + retry + revive are reused 100 percent, with zero special handling
 ```
 
-关键:**B 从不归标准组 G 管**,B 的账一直记在 `G%gray1` 上;在线归 gray1、离线归标准 —— 转移的是"谁来 POP 这个虚拟组"的所有权,不是消息本身。
+The key is that **B never belongs to standard group `G`**. B is always accounted on `G%gray1`. Ownership of the virtual group moves between gray1 and standard, but the message itself does not move.
 
-## 3. 改造点清单(带锚点)
+## 3. Change List with Anchors
 
-1. **`PopMessageRequestHeader`**:新增 `consumerLabel` + `onlineLabelsSnapshot`(或快照版本号,Broker 缓存)。
-2. **Proxy**:基于 `ClusterConsumerManager` + `HeartbeatSyncer` 维护 label 在线快照;路由:
-   - gray 消费者 → 映射到 `G%label`。
-   - 标准消费者 → 真实组 G + 下发"离线 label 列表"驱动收割。
-3. **`PopMessageProcessor.processRequest`**:虚拟组 `G%grayX` 会在 `:308 findSubscriptionGroupConfig` 因组不存在被拒。**必改点**:让虚拟组继承父组 G 的 `SubscriptionGroupConfig`(自动补偿)。
-4. **message filter 构建**(`:326-356`):注入 label 维度属性过滤(`__RMQ_TRAFFIC_LABEL`)。
-5. **收割调度**:Broker 维护待收割队列,标准 POP 响应 round-robin 捎带一个待收割组,**走完整 `popMsgFromTopic`(origin + retry)**(§4 决策 A、§4c 约束 1)。
-6. **宽限期**:新增 `gracePeriodMs` 配置;label 离线计时,超时才入待收割队列。宽限期 = 接管 vs 回退的统一旋钮(§4a、§4e)。
-7. **虚拟组回收**:**三条件判定**(origin offset==max ∧ retry offset==max ∧ revive 无 in-flight ck,§4c 约束 2)+ **回收临界区核对在线快照**(§4e)后,回收 `G%grayX` 三处 offset + 订阅补偿 + retry topic 配置(§4b)。
-8. **并发**:`popMsgFromQueue` 的 lockKey 已是 `topic#group#queueId`(`:695`),虚拟组天然隔离;gray1 离线判定与突然回线的竞态,靠该锁串行 + 快照 + 宽限期 + 消费端幂等兜底。
-9. **主从切换挂载**:收割服务 + 宽限期计时器挂到 `BrokerController.java:2402 changeSpecialServiceStatus`,仅 master 运行,切 slave 即停清空,切回 master 冷启动重建(§4d)。
-10. **持久共享游标(接管语义)**:游标 `G%label` 跨代持久,**不带 epoch**;gray 重建首次 POP 复用现存游标续上积压,不触发 `getInitOffset` 初始化(§4e)。
+1. **`PopMessageRequestHeader`**: add `consumerLabel` plus `onlineLabelsSnapshot`, or a snapshot version with broker caching.
+2. **Proxy**: maintain the online-label snapshot through `ClusterConsumerManager` plus `HeartbeatSyncer`, and route as follows:
+   - gray consumer -> mapped to `G%label`
+   - standard consumer -> real group `G` plus the offline-label list used to drive harvesting
+3. **`PopMessageProcessor.processRequest`**: virtual groups such as `G%grayX` are rejected at `:308 findSubscriptionGroupConfig` because the group does not exist. This is a **mandatory change point**: virtual groups must inherit the parent group `G`'s `SubscriptionGroupConfig`.
+4. **Message-filter construction** at `:326-356`: inject label-based property filtering using `__RMQ_TRAFFIC_LABEL`.
+5. **Harvest scheduling**: the broker maintains a harvest queue, and each standard POP response piggybacks one harvest group in round-robin order, using the full `popMsgFromTopic` path for both origin and retry.
+6. **Grace period**: add `gracePeriodMs`. A label enters the harvest queue only after remaining offline past that threshold. The grace period is the unified knob between takeover and fallback.
+7. **Virtual-group cleanup**: only after the **three-condition check** is satisfied, meaning origin offset is drained, retry offset is drained, and revive has no in-flight checkpoint for the group, plus a re-check of the online snapshot in the cleanup critical section, should the system reclaim the three offset locations for `G%grayX`, the subscription compensation state, and the retry-topic config.
+8. **Concurrency**: `popMsgFromQueue` already uses lock key `topic#group#queueId` at `:695`, so virtual groups are naturally isolated. The race between gray1 being judged offline and suddenly coming back is handled by that lock, the snapshot, the grace period, and consumer-side idempotency.
+9. **Master/slave switchover integration**: the harvesting service and grace-period timers should hook into `BrokerController.java:2402 changeSpecialServiceStatus`, run only on master, stop and clear on slave, and rebuild cold when becoming master again.
+10. **Persistent shared cursor for takeover semantics**: cursor `G%label` persists across generations, **without epoch**. A rebuilt gray reuses the existing cursor instead of triggering `getInitOffset`.
 
-## 4. 已定决策(2026-06-29 用户拍板:隔离环境临时 + 要求回退)
+## 4. Locked Decisions (Confirmed on 2026-06-29)
 
-> 前提锁定:隔离环境是**临时的**(PR预览/压测,频繁创建销毁),且**要求 gray 离线后消息回退标准**。
-> 直接结论:[[2026-06-29-traffic-label-routing-plan-b-subcursor-harvest]] §9 的 Plan-B-Lite 静态版**出局**,必须完整收割版。
+> Locked premise: isolated environments are **temporary**, such as PR preview or load-test environments that are created and destroyed frequently, and **fallback to standard after gray goes offline is required**.
+> Immediate consequence: the static Plan-B-Lite variant described later is **not sufficient**. The full harvesting version is required.
 
-### 决策 A:收割驱动 = Broker 扇入 + 待收割轮转捎带
+### Decision A: Harvesting Is Driven by Broker Fan-In plus Round-Robin Piggyback
 
-朴素"标准 POP 时扇入全部离线组"在临时环境会放大成 1+N(N 抖动)。改进:
+The naive strategy of having standard POP fan in all offline groups would expand from 1 to 1+N under temporary environments with many flapping groups. The refined decision is:
 
-- Broker 维护**待收割队列**(进入条件见 §4a 宽限期)。
-- 标准消费者正常 POP 只读真实组 `G`(**零放大**)。
-- Broker 在标准 POP 响应里 **round-robin 捎带一个待收割组** `G%grayX` 的消息,单次放大恒为 **1+1**。
-- 收割完成(§4b)的组移出待收割队列。
+- The broker maintains a **harvest queue**. Entry conditions are described in section 4a.
+- Standard consumers performing ordinary POP read only real group `G`, with **zero amplification on the normal path**.
+- In each standard POP response, the broker **piggybacks one harvest group** such as `G%grayX` in round-robin order, keeping amplification bounded at **1+1**.
+- Once harvesting and cleanup complete, the group is removed from the harvest queue.
 
-### 决策 B:生命周期 = 临时,收割为刚需(见 §4a/§4b)
+### Decision B: The Lifecycle Is Temporary, So Harvesting Is Mandatory
 
-## 4a. 临时环境硬点:离线 ≠ 销毁(宽限期)
+See sections 4a and 4b.
 
-临时环境下 gray 消失有两种,**在线快照无法区分**:
+## 4a. Temporary Environments: Offline Does Not Mean Destroyed
 
-| 类型 | 含义 | 正确处理 |
+In temporary environments, a gray environment disappearing can mean one of two things, and the online snapshot **cannot distinguish them**:
+
+| Type | Meaning | Correct handling |
 |---|---|---|
-| 抖动/重启 | 短暂离线,马上回来 | **不立即收割**,否则与回来的 gray 抢消费 → 重复 |
-| 销毁 | 永久消失 | 收割干净 + 回收虚拟组(§4b) |
+| Flap / restart | Goes offline briefly, then comes back | **Do not harvest immediately**, or standard and the returning gray will race and create duplicates |
+| Destroyed | Gone permanently | Harvest cleanly, then reclaim the virtual group |
 
-**解法:宽限期 `gracePeriodMs`**。gray 离线持续超过 T 才进入待收割队列。T 是**接管 vs 回退的统一旋钮**(§4e):
-- 宽限期内 gray 回来 → 从持久游标 `G%grayX` 续上,**完全接管积压**。
-- 宽限期到 → 标准开始收割,回退启动。T = 典型重建时间(PR 重新部署通常几分钟)。
-- T 太小 → 真实重建来不及,积压过早被标准收割,gray 回来只能接管剩余(已收割部分不回头)。
-- T 太大 → 真销毁后回退延迟高,`G%grayX` 积压久。
+The solution is **grace period `gracePeriodMs`**. A gray label enters the harvest queue only after remaining offline for T. T is the **single knob between takeover and fallback**:
 
-gray 在宽限期内回线 → 直接移出待收割,从游标续上,无副作用。
+- If gray returns within the grace period, it resumes from the persistent cursor `G%grayX` and **fully takes over the backlog**.
+- Once the grace period expires, standard harvesting begins and fallback starts.
+- If T is too small, a normal rebuild may not finish in time, and standard will harvest too early. Gray can only take over the remainder.
+- If T is too large, fallback latency after a true destroy becomes too high, and backlog stays longer on `G%grayX`.
 
-## 4b. 虚拟组回收(临时环境必需)
+If gray comes back within the grace period, it is removed from the harvest queue immediately and continues from the existing cursor with no side effect.
 
-不回收则"创建-销毁"循环使 `G%grayX` 元数据无限膨胀。
+## 4b. Virtual-Group Cleanup Is Mandatory for Temporary Environments
 
-> ⚠️ **回收判定不能只看 origin offset** —— retry topic + revive 异步会制造孤儿,详见 §4c。正确判定为三条件同时满足。
+Without cleanup, repeated create-destroy cycles make metadata for `G%grayX` grow without bound.
 
+Warning: **cleanup cannot look only at the origin offset**. Retry-topic state plus asynchronous revive can create orphan messages. The correct cleanup rule is that all three conditions in section 4c must be satisfied together.
+
+```text
+gray destroyed
+  -> offline duration exceeds gracePeriodMs
+  -> enters harvest queue
+  -> standard piggybacks full POP on G%grayX, including origin + retry
+  -> all three conditions become true
+  -> cleanup critical section: lock (G, grayX) and re-check the online snapshot
+       if grayX is back online:
+         cancel cleanup and keep the cursor for takeover
+       else:
+         reclaim the three offset locations of G%grayX, subscription compensation state, and retry-topic config
 ```
-gray 销毁 → 离线超 gracePeriodMs → 进入待收割队列
-         → 标准 round-robin 捎带【完整 POP】G%grayX(origin + retry,见 §4c 约束 1)
-         → 三条件全满足(§4c)
-         → 回收临界区:持锁 (G, grayX) 重新核对在线快照(§4e)
-            ├ grayX 已回线 → 放弃回收,游标留给它接管
-            └ 仍离线 → 回收 G%grayX 三处 offset + 订阅补偿 + retry topic 配置
-```
 
-回收只针对**真正销毁**的 gray;若 gray 在宽限期内回来,游标被它接管(§4e),回收不触发。
+Cleanup targets only gray environments that are **truly destroyed**. If gray returns within the grace period, the cursor is taken over instead and cleanup does not fire.
 
-## 4c. retry topic 未消费消息的处理(本轮新增,源码验证)
+## 4c. Handling Unconsumed Messages on the Retry Topic
 
-gray1 消费失败的消息不在 origin topic,而在它**虚拟组专属的 retry topic** `%RETRY%G%gray1`。三个源码事实决定了处理方式:
+If gray1 fails to consume a message, that message is no longer on the origin topic. It goes to the **retry topic owned by the virtual group**, `%RETRY%G%gray1`. Three source-level facts determine the handling:
 
-| 事实 | 锚点 | 含义 |
+| Fact | Anchor | Meaning |
 |---|---|---|
-| retry topic 按 cid(=consumerGroup)命名,虚拟组天然独占 | `KeyBuilder.java:32-41`(`%RETRY%` + cid + sep + topic) | `G%gray1` 的失败消息进 `%RETRY%G%gray1`,与标准组 `G` 的 retry 隔离,互不串 |
-| 一次 POP 天然同时拉 origin + retry(随机先后) | `PopMessageProcessor.java:532-561` | 收割若走**完整虚拟组 POP**,retry 消息自动被捎带消费,**无需为 retry 单独写收割逻辑** |
-| revive 是**异步延迟**重投:失败消息 checkpoint 先进 revive 队列,超时后才 `putMessage` 到 retry topic | `PopReviveService.java:113-159` | 收割完 origin 的瞬间,失败消息可能还卡在 revive 队列没重投到 retry → 此刻回收会制造孤儿 |
+| Retry topics are named by consumer group | `KeyBuilder.java:32-41` | Failed messages of `G%gray1` go into `%RETRY%G%gray1`, completely isolated from standard retry |
+| One POP naturally pulls origin and retry together | `PopMessageProcessor.java:532-561` | If harvesting uses the **full virtual-group POP**, retry messages are harvested automatically, with no separate retry logic |
+| Revive is **asynchronous delayed redelivery** | `PopReviveService.java:113-159` | Right after origin is drained, failed messages may still be waiting inside revive and have not been re-put into retry yet. Cleaning up at that moment would create orphans |
 
-### 约束 1:收割必须走完整 POP
+### Constraint 1: Harvesting Must Use Full POP
 
-收割 `G%grayX` 复用现成 `popMsgFromTopic`(origin + retry 都拉),**不得优化成"只扫 origin consume queue"**,否则 retry topic 的未消费消息永远收不到。复用反而简化:retry 自动覆盖,零额外逻辑。
+Harvesting `G%grayX` must reuse the existing `popMsgFromTopic` path that pulls **both origin and retry**. It must **not** be optimized into scanning only the origin consume queue, or retry messages will be missed forever. Reuse is simpler: retry is covered automatically.
 
-### 约束 2:回收判定 = 三条件(关键)
+### Constraint 2: Cleanup Must Use Three Conditions
 
-原"只看 origin offset==maxOffset"是**错的**。反例:gray1 崩溃瞬间,B 的 checkpoint 还在 revive 队列没重投,origin 已读完、retry 仍空 —— 若据此回收,几秒后 revive 把 B 重投到 `%RETRY%G%gray1`,而虚拟组已回收、无人 POP → **B 永久孤儿**。
+The old rule of "origin offset == maxOffset" is **wrong**. Counterexample: gray1 crashes just after a message B enters checkpoint and before revive re-puts it into retry. Origin is already drained, retry is still empty, and cleanup would look safe. A few seconds later, revive re-puts B into `%RETRY%G%gray1`, but the virtual group has already been reclaimed and no one POPs it anymore, turning B into a permanent orphan.
 
-正确回收判定(同时满足):
+The correct cleanup rule is that all three conditions must hold at the same time:
 
+```text
+1) origin G%gray1        : offset == maxOffset
+2) retry  %RETRY%G%gray1 : offset == maxOffset
+3) revive has no in-flight checkpoint for G%gray1
 ```
-① origin G%gray1        : offset == maxOffset
-② retry  %RETRY%G%gray1 : offset == maxOffset
-③ revive 队列无 G%gray1 的 in-flight checkpoint(无待重投)
-```
 
-③ 是关键防线:必须等 revive 把该组所有 checkpoint 消化完(重投到 retry 或确认),retry topic 才算真空。回收时清三处:`G%gray1@origin`、`%RETRY%G%gray1` 的 offset、相关 checkpoint 残留。
+Condition 3 is the key defense. Cleanup must wait until revive has completely drained the group's pending checkpoints, either by re-putting them to retry or finalizing them. At cleanup time, remove `G%gray1@origin`, the offsets for `%RETRY%G%gray1`, and any related checkpoint residue.
 
-## 4d. broker 主从切换 / 重启(内存态重建,源码验证)
+## 4d. Broker Master/Slave Switching and Restart
 
-收割服务的待收割队列、宽限期计时器都是**内存态**。结论:**对齐 RocketMQ 现成范式,零持久化,切换即清空、按持久真相重建**——不另起一套持久化。
+The harvest queue and grace-period timers are **in-memory derived state**. The conclusion is to follow RocketMQ's existing pattern: **persist nothing new, clear state on role change, and rebuild from persistent truth after restart or switchover**.
 
-### 现成范式(四个源码事实)
+### Existing Pattern from Source
 
-| 事实 | 锚点 | 含义 |
+| Fact | Anchor | Meaning |
 |---|---|---|
-| revive 进度**持久化**(系统组 offset,随主从同步) | `PopReviveService.java:84`(`queryOffset` 初始化 reviveOffset) | 重启/切换后在途失败消息的 revive 进度不丢,继续重投到 `%RETRY%G%grayX` —— 关键安全垫 |
-| POP 内存态设计成**可丢弃**:切 slave 直接 `buffer.clear()` | `PopBufferMergeService.java:74-101`(`isShouldRunning` + clear) | 内存 buffer 只是加速层,真相在持久 offset/checkpoint store;敢清空 |
-| 统一主从切换钩子 | `BrokerController.java:2402 changeSpecialServiceStatus`(通知 schedule/transaction/**PopReviveService**) | 我们新增收割服务的**唯一正确挂载点** |
-| 消费者在线表是非持久内存态,靠心跳重建 | `ConsumerManager.java:44 consumerTable`、`scanNotActiveChannel` | label 在线快照天然随之重建,无需持久化 |
+| Revive progress is **persisted** as offset in a system group and replicated with master/slave sync | `PopReviveService.java:84` | On restart or failover, in-flight failed messages do not lose revive progress and can continue being re-put to `%RETRY%G%grayX` |
+| POP in-memory buffering is designed to be **discardable** | `PopBufferMergeService.java:74-101` | In-memory buffers are acceleration only. Persistent offset and checkpoint stores hold the truth |
+| There is a unified special-service switchover hook | `BrokerController.java:2402 changeSpecialServiceStatus` | This is the right place to mount the harvesting service |
+| The consumer online table itself is non-persistent and rebuilt by heartbeat | `ConsumerManager.java:44`, `scanNotActiveChannel` | The online-label snapshot can also rebuild naturally without persistence |
 
-### 设计原则:派生态零持久化
+### Design Principle: Derived State Has Zero Persistence
 
-待收割队列 + 宽限期计时器不是"真相",只是"待办索引"。真相是持久的:
+The harvest queue and grace-period timers are not the source of truth. They are only a to-do index. Persistent truth is elsewhere.
 
-| 内存态 | 重启/切换后 | 持久真相来源 |
+| In-memory state | After restart / switchover | Source of truth |
 |---|---|---|
-| 待收割队列 | 丢弃,冷启动重推导 | "虚拟组 offset 存在 + 无在线消费者" |
-| 宽限期计时器 | 重新计时(从 0) | label 在线状态由心跳重建,最坏多等一个宽限期 |
-| 收割进度 | 无需恢复 | `G%grayX` 的 offset 已持久(`topic@group` 记账) |
-| 失败消息 revive | 自动继续 | reviveOffset 持久 + 主从同步 |
+| Harvest queue | Discard and infer again on cold start | Existence of virtual-group offset plus absence of online consumer |
+| Grace-period timer | Restart from zero | Online label state rebuilt from heartbeat, at worst delaying by one extra grace period |
+| Harvest progress | No restoration required | Offset for `G%grayX` is already persistent through `topic@group` |
+| Revive of failed messages | Continues automatically | reviveOffset is persisted and replicated |
 
-### 三条规则
+### Three Rules
 
-- **规则 1（角色感知）**:收割服务 + 宽限期计时器只在 master 跑,挂到 `changeSpecialServiceStatus`,切 slave 即停并清空 —— 完全比照 `PopBufferMergeService`。
-- **规则 2（冷启动重建）**:切回 master 后扫描所有 `G%label` 虚拟组 offset,对照当前在线快照,离线者重新进入宽限期(从 0 计)。最坏代价:一次额外宽限期延迟,**不丢消息**。
-- **规则 3（收割中途崩溃）**:已 POP 未 ack 的收割消息,checkpoint 已在持久 store,新 master 的 revive 重投到 `%RETRY%G%grayX`,下一轮收割捡回。**与 §4c 三条件回收天然自洽**:revive 没清完不会判定回收。
+- **Rule 1: role awareness**. The harvesting service and grace-period timers run only on master, hook into `changeSpecialServiceStatus`, and stop and clear immediately when the broker becomes slave.
+- **Rule 2: cold-start rebuild**. When becoming master again, scan all `G%label` virtual-group offsets, compare them against the current online snapshot, and restart grace-period timing for offline labels from zero. At worst, harvesting is delayed by one extra grace period, but messages are not lost.
+- **Rule 3: crash during harvesting**. If a harvested message was POPed but not acked before crash, its checkpoint is already persisted. The new master's revive process re-puts it to `%RETRY%G%grayX`, and the next harvest round picks it back up. This is naturally compatible with the three-condition cleanup rule.
 
-## 4e. 同名重建:接管上一代积压(2026-06-29 用户拍板)
+## 4e. Same-Name Rebuild Takes Over the Previous Generation's Backlog
 
-> **语义决定(用户拍板)**:同名 gray 重建后**接管自己上一代的积压**,而非回退给标准。
-> 这与"gray 离线→回退标准"存在直接张力(见下),需用宽限期作为统一旋钮调和。
+> User decision: if gray is rebuilt with the same name, it **takes over the previous generation's backlog** instead of letting everything fall back to standard.
+> This directly conflicts with immediate fallback after gray goes offline. The grace period is the only way to reconcile the two.
 
-### 核心张力:同一条消息不能既"等 gray 回来"又"立即给标准"
+### Core Tension
 
-对 gray1 离线期间到达的消息 M:
-- **接管积压** → 必须留着 M 等 gray1 回来。
-- **回退标准** → 必须立即把 M 给标准。
+For a message M that arrives while gray1 is offline:
 
-二者对同一条 M 互斥。**选择接管 = 接受回退被延迟**,无法回避。
+- **Takeover semantics** means M must be kept for gray1 to return and consume.
+- **Fallback semantics** means M must be given to standard immediately.
 
-### 机制:去掉 epoch,游标按 label 持久共享
+Both cannot be true for the same message. Choosing takeover semantics means accepting that **fallback is delayed**.
 
-> ⚠️ **推翻上一版的 epoch 隔离**:epoch(`G%gray1%e2`)把同名两代物理隔离,恰恰**阻止接管**。要接管就**去掉 epoch**,游标只按 label 命名 `G%gray1`、**跨代持久共享**。
+### Mechanism: Remove Epoch and Share the Cursor by Label
 
-游标 `G%gray1` 持久且共享(gray1 在线时它消费,离线时标准收割它):
+The earlier epoch-based scheme, such as `G%gray1%e2`, physically isolated generations and therefore **prevented takeover**. To enable takeover, epoch must be removed. The cursor becomes `G%gray1`, persistent across generations.
 
-```
-gray1 离线
-  └─ 宽限期内:标准【不收割】(冻结),积压留给 gray1
-       ├ gray1 回来 → 从 G%gray1 续上 → 拿到 100% 积压 ✓ 完全接管
-       └ 宽限期到 → 标准开始收割 G%gray1(回退启动)
-            └ gray1 更晚回来 → 从 G%gray1 续上(共享游标)
-              → 拿到标准【尚未收割】的剩余部分,已被标准消费的不再给(at-least-once,已处理不丢)
-```
-
-- **回退延迟 = 宽限期长度**。宽限期设成典型重建时间(PR 环境重新部署通常几分钟):快速重建拿全量,真死了几分钟后回退标准。
-- gray1 重建首次 POP 发现 `G%gray1` 游标**还在**(未被清)→ offset 不<0 → **不走 `getInitOffset` 初始化** → 直接从积压处续上。**上一版"坏结局 1 静默丢失"(`max-1` 跳历史,`PopMessageProcessor.java:941`)因此不再触发。**
-
-### 坏结局 2(回收误删进度)的新防线:回收临界区
-
-去 epoch 后不能再靠物理隔离防误删,改为**回收原子核对**:
-
-```
-回收前持锁 (G, gray1) → 重新核对在线快照
-  ├ gray1 已在线 → 放弃回收,让它接管
-  └ 仍离线 ∧ §4c 三条件成立 → 才删 G%gray1
+```text
+gray1 offline
+  -> within the grace period:
+       standard does not harvest, backlog waits for gray1
+       if gray1 returns:
+         it resumes from G%gray1 and gets 100 percent of the backlog
+       else if the grace period expires:
+         standard begins harvesting G%gray1
+         if gray1 returns later:
+           it resumes from G%gray1 and gets only the part standard has not already harvested
 ```
 
-残余亚毫秒边界竞态由 at-least-once + 消费端幂等兜底(系统本就要求)。
+- **Fallback delay equals grace-period length**. Choose the grace period around the typical rebuild time. Fast rebuilds get full takeover. Truly dead gray environments eventually fall back after that delay.
+- On its first POP after rebuild, gray1 sees that cursor `G%gray1` still exists, so offset is not less than zero. That means `getInitOffset` is not triggered, and gray1 resumes from backlog instead of jumping to `max-1`.
 
-### 回收仍然需要(只是更晚)
+### New Defense for the Old "Cleanup Deletes Progress" Failure
 
-接管语义不取消回收 —— 真正销毁的 gray 仍要回收元数据,否则膨胀(§4b)。区别:回收只在"宽限期到 + 标准收割干净 + 核对仍离线"后发生。若 gray 在此前回来,游标被它接管,回收自然不触发。
+Without epoch, physical separation can no longer protect against deleting the active successor's progress. Instead, cleanup must perform an **atomic re-check**:
 
-## 5. 优点 / 缺点
+```text
+before cleanup, lock (G, gray1) and re-check the online snapshot
+  if gray1 is online:
+    cancel cleanup and let gray1 take over
+  else if the three conditions from section 4c still hold:
+    delete G%gray1
+```
 
-**优点**
-- **不复制消息体**:无 route topic、无旁路存储、无 route index。
-- **零 revive 特判**:失败重试复用每条虚拟组的 POP retry / revive。
-- **复用现成 offset 记账**:虚拟组走 `topic@group`,无新存储结构。
-- **正常路径零放大**:标准 POP 只读 G,收割靠 round-robin 捎带,单次放大恒 1+1。
+The remaining sub-millisecond race window is handled by at-least-once semantics plus consumer idempotency, which the system already requires.
 
-**缺点 / 风险**
-- **虚拟组元数据膨胀**:offset 记录数 = label 数 × queue 数。临时环境靠 §4b 回收控制;label 极多时仍倾向 [[2026-06-29-traffic-label-routing-plan-a-strict-bypass]]。
-- **宽限期权衡**:`gracePeriodMs` 太小→抖动误判致重复;太大→回退延迟高(§4a)。
-- **收割并发竞争**:gray 回线与标准收割的竞态,需锁 + 宽限期 + 幂等兜底。
-- **回退实时性中等**:依赖宽限期 + 收割轮转,非即时。
-- **在线快照强依赖**:标准必须准确知道"哪些 label 存在且离线"才能收割。
-- **主从切换冷启动延迟**:切回 master 后宽限期从 0 重计,最坏多等一个 `gracePeriodMs` 才恢复收割,期间不丢消息(§4d)。
+### Cleanup Is Still Required, Just Later
 
-## 6. 简化版(隔离环境常驻)—— ⚠️ 本项目不适用
+Takeover semantics does not eliminate cleanup. Truly destroyed gray environments still need metadata reclamation, or state grows forever. The only change is timing: cleanup happens only after the grace period has expired, standard harvesting has fully drained the backlog, and the re-check still says gray is offline. If gray comes back earlier, it takes over and cleanup never triggers.
 
-> 本项目隔离环境为**临时**(§4 决策 B),本节仅作对比保留,不采用。
+## 5. Pros and Cons
 
-若隔离环境 **常驻、仅偶尔抖动**:可退化为 **纯虚拟组、不收割**。抖动时 gray1 回来自己继续 POP `G%gray1`,不串环境,几乎零额外机制。临时环境不能用此简化版 —— 销毁的 gray 不会回来,积压消息永久无人消费。
+**Pros**
+- **No message-body copying**. There are no route topics, bypass stores, or route indexes.
+- **No revive special handling**. Failed-message retry reuses the POP retry and revive flow of each virtual group.
+- **Reuses existing offset accounting**. Virtual groups map directly onto `topic@group`.
+- **Zero amplification on the normal path**. Standard POP reads only `G`, and harvesting uses round-robin piggybacking so each response grows by at most 1+1.
 
-## 7. 适用场景
+**Cons / Risks**
+- **Virtual-group metadata growth**. Offset records grow with label count times queue count. In temporary environments this is controlled by cleanup, but when label count becomes very large, plan A may be preferable.
+- **Grace-period tuning**. Too small means flaps are mistaken for death and duplicates increase. Too large means fallback latency gets worse.
+- **Harvesting concurrency races**. A returning gray can race with standard harvesting. This requires locking, grace-period control, and idempotency.
+- **Fallback is not instantaneous**. It depends on grace period plus harvesting rotation.
+- **Heavy reliance on the online snapshot**. Standard must know which labels exist and are offline in order to harvest correctly.
+- **Cold-start delay after master/slave switching**. When becoming master again, the grace period restarts from zero, so harvesting may be delayed by one extra `gracePeriodMs`, though messages are not lost.
 
-- **本项目(临时 + 要求回退)→ 完整收割版**(§4/§4a/§4b),已选定。
-- 隔离环境常驻灰度 → 简化版(纯虚拟组),本项目不适用。
-- label 数量极大 → 虚拟组膨胀使本方案退化,倾向 [[2026-06-29-traffic-label-routing-plan-a-strict-bypass]]。
+## 6. Simplified Variant for Permanent Isolated Environments
 
-## 8. 扩展点可行性分析(回应"尽量少侵入")
+> This project does **not** use this variant. It is kept only for comparison.
 
-把 plan-b 拆成 5 个必需能力,逐一对照 [[Server_Extension_Points]](`docs/cn/Server_Extension_Points.md`)中的扩展点:
+If isolated environments are **long-lived and only flap occasionally**, the design can be simplified into **pure virtual groups with no harvesting**. When gray1 returns after a flap, it simply continues POPing `G%gray1`. That adds almost no extra machinery. Temporary environments cannot use that simplification, because destroyed gray environments never come back and their backlog would remain forever.
 
-| 必需能力 | 现有扩展点能否承载 | 锚点 | 结论 |
+## 7. Suitable Scenarios
+
+- **This project, temporary environments with required fallback, uses the full harvesting version** in sections 4, 4a, and 4b
+- Permanent isolated environments with occasional gray deployment can use the simplified virtual-group variant
+- Extremely large label counts can make virtual-group growth too expensive, which pushes the choice back toward [[2026-06-29-traffic-label-routing-plan-a-strict-bypass]]
+
+## 8. Extension-Point Feasibility Analysis
+
+Split plan-b into five required capabilities, then compare each against the extension points documented in [[Server_Extension_Points]](`docs/cn/Server_Extension_Points.md`):
+
+| Required capability | Can existing extension points carry it? | Anchor | Conclusion |
 |---|---|---|---|
-| ① label 在线快照(集群视图) | 无;`ClusterConsumerManager`/`HeartbeatSyncer` 是核心组件,需加 label 维度 | — | 改核心 |
-| ② POP 路由改写(group→`G%label`) | Proxy `RequestPipeline` 能拦截,但 ①非 SPI(pipeline 硬编码注册,无配置类名装载)②是 1→1,做不了扇入 | `proxy/.../grpc/pipeline/RequestPipeline.java` | 改核心 |
-| ③ 虚拟组可被 POP | 无扩展点伪造订阅组 | `PopMessageProcessor.java:308` | 改核心 **或** 预创建真实组(运维) |
-| ④ 按 label 过滤/SKIP | Proxy `PopMessageResultFilter` 的 `NO_MATCH` 会 **ACK 消息→丢消息**,不可用于回退;Store `MessageFilter` 可 SKIP 但注入点非 SPI;**SQL92 `ExpressionMessageFilter` 在 POP 路径现成可用** | `ConsumerProcessor.java:181-190`(陷阱)、`PopMessageProcessor.java:326`(SQL92 透传) | ✅ SQL92 零侵入 |
-| ⑤ 收割扇入(标准读 `G%grayX`) | 无扩展点;`ConsumerProcessor.popMessage` 是 1→1 | `ConsumerProcessor.java:79` | 改核心 **或** 外部 operator |
+| 1) Online label snapshot as a cluster view | No. `ClusterConsumerManager` and `HeartbeatSyncer` are core components and would need label dimension added | - | Core change required |
+| 2) Rewrite POP routing from `group` to `G%label` | Proxy `RequestPipeline` can intercept, but 1) it is not SPI and 2) it is one-to-one only and cannot do fan-in | `proxy/.../grpc/pipeline/RequestPipeline.java` | Core change required |
+| 3) Make virtual groups POP-able | No extension point can forge a subscription group | `PopMessageProcessor.java:308` | Core change required, or pre-create real groups operationally |
+| 4) Filter / SKIP by label | Proxy `PopMessageResultFilter.NO_MATCH` **acks and loses the message**, so it cannot implement fallback. Store `MessageFilter` can SKIP, but its injection point is not SPI. **SQL92 `ExpressionMessageFilter` already works on the POP path** | `ConsumerProcessor.java:181-190`, `PopMessageProcessor.java:326` | SQL92 gives zero broker intrusion for this capability |
+| 5) Harvest fan-in so standard reads `G%grayX` | No extension point. `ConsumerProcessor.popMessage` is strictly one-to-one | `ConsumerProcessor.java:79` | Core change required, or an external operator |
 
-> ⚠️ **陷阱**:Proxy `PopMessageResultFilter` 看似能"按 label 丢弃",但 `NO_MATCH` 分支直接 `ackMessage`(`ConsumerProcessor.java:181-190`),消息被确认消费、永久消失,**无法回退**。不能用于本需求。
+> Trap: Proxy `PopMessageResultFilter` looks like it might support "drop by label", but the `NO_MATCH` branch directly calls `ackMessage`. The message is confirmed and disappears permanently, so it cannot support fallback.
 
-**结论:完全零侵入(扩展点+配置+运维)只能拿到"静态隔离",拿不到"动态回退"。** 回退依赖 ①在线快照 + ⑤收割,这两个核心能力无任何扩展点对应。
+**Conclusion: a completely zero-intrusion path based only on extension points, configuration, and operational setup can provide only static isolation, not dynamic fallback.** Dynamic fallback depends on 1) the online snapshot and 5) harvesting fan-in, and no extension point covers either.
 
-## 10. 组件边界与数据流(2026-06-29 新增)
+## 10. Component Boundaries and Data Flow
 
-### 10.1 组件边界图
+### 10.1 Component Boundary Diagram
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                          Proxy                                    │
-│                                                                  │
-│  ┌──────────────────────────┐  ┌────────────────────────────┐   │
-│  │   LabelSnapshotManager   │  │         POPRouter           │   │
-│  │                          │  │                             │   │
-│  │ consumerTable            │─▶│ gray consumer               │   │
-│  │ Map<label,Set<instance>> │  │   → group G → G%label       │   │
-│  │                          │  │ std consumer                │   │
-│  │ 心跳超时 → label offline  │  │   → 真实组 G                │   │
-│  │ 触发 GracePeriodTimer     │  │   + offlineLabels[] 下发   │   │
-│  └──────────────────────────┘  └────────────┬───────────────┘   │
-│           ▲ consumer heartbeat               │ POP request header │
-└───────────┼──────────────────────────────────┼───────────────────┘
-            │ register/heartbeat               │ gRPC ReceiveMessage
-            │                                  ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                          Broker                                   │
-│                                                                  │
-│  ┌───────────────────┐  ┌──────────────────┐                    │
-│  │ VirtualGroup      │  │ LabelMsgFilter   │                    │
-│  │ Compensator       │  │                  │                    │
-│  │                   │  │ G%grayX:         │                    │
-│  │ :308 G%grayX →    │  │  label == grayX  │                    │
-│  │  继承父组 G config │  │ G(std):          │                    │
-│  └───────┬───────────┘  │  label==STD      │                    │
-│          │              │  OR IS NULL      │                    │
-│          │              └──────┬───────────┘                    │
-│          │                     │                                │
-│          ▼                     ▼                                │
-│  ┌────────────────────────────────────────────────────────┐     │
-│  │              PopMessageProcessor                        │     │
-│  │                                                        │     │
-│  │  popMsgFromTopic(origin + retry 同时拉)                │     │
-│  │  lockKey = topic#group#queueId                         │◀────┼─ HarvestScheduler
-│  │  offset → ConsumerOffsetManager(topic@group)           │     │  round-robin 捎带
-│  └────────────────────────────────────────────────────────┘     │
-│                                                                  │
-│  ┌──────────────────────────┐  ┌──────────────────────────────┐ │
-│  │    GracePeriodTimer      │  │  VirtualGroupLifecycle       │ │
-│  │                          │  │  Manager                     │ │
-│  │ label 离线 → 计时 T      │  │                              │ │
-│  │ 超时 → 入 harvestQueue   │  │ 三条件判定(§4c)              │ │
-│  │ gray 回线 → 取消计时     │  │ 回收临界区:                  │ │
-│  │                          │  │  lock(G,grayX)               │ │
-│  │ 挂 changeSpecialService  │  │  → 重核在线快照              │ │
-│  │ Status(master-only)      │  │  → 删 offset/config(§4e)     │ │
-│  └──────────────────────────┘  └──────────────────────────────┘ │
-│                                                                  │
-│  ┌──────────────────────────┐                                   │
-│  │   HarvestScheduler       │                                   │
-│  │                          │                                   │
-│  │ harvestQueue             │                                   │
-│  │ round-robin 取一         │                                   │
-│  │ → piggyback 捎带进标准   │                                   │
-│  │   POP 响应(恒 1+1)       │                                   │
-│  └──────────────────────────┘                                   │
-└──────────────────────────────────────────────────────────────────┘
+```text
++------------------------------------------------------------------+
+|                            Proxy                                 |
+|                                                                  |
+|  +--------------------------+  +------------------------------+  |
+|  | LabelSnapshotManager     |  | POPRouter                    |  |
+|  | consumerTable            |  | gray consumer -> G%label     |  |
+|  | Map<label, Set<instance>>|->| standard consumer -> G       |  |
+|  | heartbeat timeout marks  |  | plus offlineLabels[]         |  |
+|  | label offline and starts |  +---------------+--------------+  |
+|  | GracePeriodTimer                         | POP request header |
+|  +--------------------------+               | gRPC ReceiveMessage|
++-----------------------------+---------------+--------------------+
+                              |               v
++------------------------------------------------------------------+
+|                            Broker                                |
+|                                                                  |
+|  +---------------------+   +--------------------+                |
+|  | VirtualGroup        |   | LabelMsgFilter     |                |
+|  | Compensator         |   | G%grayX: label==x  |                |
+|  | G%grayX inherits G  |   | G(std): STANDARD   |                |
+|  +----------+----------+   | or IS NULL         |                |
+|             |              +---------+----------+                |
+|             v                        v                           |
+|  +----------------------------------------------------------+   |
+|  | PopMessageProcessor                                      |   |
+|  | popMsgFromTopic(origin + retry together)                 |   |
+|  | lockKey = topic#group#queueId                            |<-+ HarvestScheduler
+|  | offset -> ConsumerOffsetManager(topic@group)             |   | round-robin piggyback
+|  +----------------------------------------------------------+   |
+|                                                                  |
+|  +----------------------+  +----------------------------------+  |
+|  | GracePeriodTimer     |  | VirtualGroupLifecycleManager     |  |
+|  | label offline -> T   |  | three-condition check            |  |
+|  | timeout -> enqueue   |  | cleanup critical section         |  |
+|  | gray returns -> stop |  | lock(G, grayX) re-check snapshot |  |
+|  | mounted on special   |  | delete offset/config             |  |
+|  | service status hook  |  +----------------------------------+  |
+|  +----------------------+                                       |
+|                                                                  |
+|  +----------------------+                                       |
+|  | HarvestScheduler     |                                       |
+|  | harvestQueue         |                                       |
+|  | round-robin pick one |                                       |
+|  | piggyback into std   |                                       |
+|  | POP response, max 1+1|                                       |
+|  +----------------------+                                       |
++------------------------------------------------------------------+
 ```
 
-**接口约定:**
+**Interface contracts**
 
-| 边界 | 接口 | 数据 |
+| Boundary | Interface | Data |
 |---|---|---|
-| Proxy → Broker POP header | `PopMessageRequestHeader` | `consumerLabel`, `onlineLabelsSnapshot`(版本号或完整快照) |
-| Broker → Proxy POP 响应 | `PopMessageResponse` | 正常消息 + piggyback 收割消息(统一 `MessageExt` list) |
-| LabelSnapshotManager → GracePeriodTimer | 事件信号 | `(label, offline/online, timestamp)` |
-| GracePeriodTimer → HarvestScheduler | 入队信号 | `label` |
-| HarvestScheduler → PopMessageProcessor | 收割参数 | `group=G%grayX, topic` |
-| VirtualGroupLifecycleManager → ConsumerOffsetManager | 删除 | `topic@G%grayX`, `topic@%RETRY%G%grayX` |
+| Proxy -> Broker POP header | `PopMessageRequestHeader` | `consumerLabel`, `onlineLabelsSnapshot` as full snapshot or version |
+| Broker -> Proxy POP response | `PopMessageResponse` | Standard messages plus piggybacked harvest messages in one unified `MessageExt` list |
+| LabelSnapshotManager -> GracePeriodTimer | Event signal | `(label, offline/online, timestamp)` |
+| GracePeriodTimer -> HarvestScheduler | Enqueue signal | `label` |
+| HarvestScheduler -> PopMessageProcessor | Harvest parameters | `group=G%grayX, topic` |
+| VirtualGroupLifecycleManager -> ConsumerOffsetManager | Delete operation | `topic@G%grayX`, `topic@%RETRY%G%grayX` |
 
-### 10.2 三条核心数据流
+### 10.2 Three Core Data Flows
 
-#### Flow 1:gray1 在线正常消费
+#### Flow 1: gray1 Consumes Normally While Online
 
-```
-gray1 consumer ──POP G──▶ Proxy POPRouter
-  │ 映射 G → G%gray1, consumerLabel=gray1
-  ▼
+```text
+gray1 consumer --POP G--> Proxy POPRouter
+  -> rewrites G to G%gray1, sets consumerLabel=gray1
+
 Broker PopMessageProcessor(group=G%gray1)
-  │ VirtualGroupCompensator → 继承父组 G config(:308)
-  │ LabelMsgFilter → filter: label==gray1 (:326)
-  │ popMsgFromTopic(G%gray1, origin + retry)
-  │ ConsumerOffsetManager → G%gray1@topic cursor 前进
-  ▼
-返回 label==gray1 的消息给 gray1 consumer
+  -> VirtualGroupCompensator inherits config from G
+  -> LabelMsgFilter uses label==gray1
+  -> popMsgFromTopic(G%gray1, origin + retry)
+  -> ConsumerOffsetManager advances cursor G%gray1@topic
+
+Return only label==gray1 messages to the gray1 consumer
 ```
 
-#### Flow 2:gray1 离线 → 标准收割
+#### Flow 2: gray1 Goes Offline and Standard Harvests It
 
-```
-gray1 离线 → LabelSnapshotManager 感知
-  │ GracePeriodTimer 开始计时(gracePeriodMs)
-  │   ├ 宽限期内 gray1 回来 → 取消计时,回 Flow 1
-  │   └ 超时 → HarvestScheduler.enqueue(gray1)
+```text
+gray1 offline -> LabelSnapshotManager notices
+  -> GracePeriodTimer starts timing gracePeriodMs
+     if gray1 returns within grace period:
+       cancel timer and go back to Flow 1
+     else:
+       HarvestScheduler.enqueue(gray1)
 
-std consumer ──POP G──▶ Proxy POPRouter
-  │ group=G, offlineLabels=[gray1]
-  ▼
+std consumer --POP G--> Proxy POPRouter
+  -> sends group=G with offlineLabels=[gray1]
+
 Broker PopMessageProcessor(group=G)
-  │ LabelMsgFilter → filter: label==STANDARD OR IS NULL
-  │ HarvestScheduler round-robin → 取出 G%gray1
-  │ popMsgFromTopic(G%gray1, origin + retry) ← 完整 POP
-  │ ConsumerOffsetManager → G%gray1@topic cursor 前进
-  ▼
-POP 响应:标准消息 + piggyback gray1 收割消息(1+1)
-  └ 标准 consumer 处理两批消息,各自 ACK
+  -> LabelMsgFilter keeps only STANDARD or null
+  -> HarvestScheduler round-robin picks G%gray1
+  -> full popMsgFromTopic(G%gray1, origin + retry)
+  -> ConsumerOffsetManager advances G%gray1@topic
 
-收割持续 → 三条件满足(§4c) → VirtualGroupLifecycleManager
-  │ lock(G, gray1) + 重核在线快照
-  │   ├ gray1 回来 → 放弃回收
-  │   └ 仍离线 → 删 G%gray1 offset + retry config
-  ▼
-harvestQueue 移出 gray1,回收完成
+POP response = standard messages + piggybacked harvest messages
+Standard consumer processes both batches and ACKs them separately
+
+Once harvesting continues until the three conditions hold:
+  -> VirtualGroupLifecycleManager locks (G, gray1)
+  -> re-checks online snapshot
+     if gray1 came back:
+       cancel cleanup
+     else:
+       delete G%gray1 offsets + retry config
+
+gray1 is removed from the harvest queue and cleanup is complete
 ```
 
-#### Flow 3:同名 gray1 重建 → 接管积压
+#### Flow 3: Same-Name gray1 Rebuild Takes Over Backlog
 
-```
-gray1 重建 → 心跳到 Proxy
-  │ LabelSnapshotManager 标记 gray1 online
-  │ HarvestScheduler 移出 G%gray1(若在队中)
-  │ GracePeriodTimer 取消(若在计时)
+```text
+gray1 rebuilds -> heartbeat reaches Proxy
+  -> LabelSnapshotManager marks gray1 online
+  -> HarvestScheduler removes G%gray1 if present
+  -> GracePeriodTimer cancels if running
 
-gray1 ──POP G──▶ Proxy POPRouter → G%gray1
-  ▼
+gray1 --POP G--> Proxy POPRouter -> G%gray1
+
 Broker PopMessageProcessor(group=G%gray1)
-  │ ConsumerOffsetManager.queryOffset(topic@G%gray1)
-  │   → offset 存在(游标跨代持久)
-  │   → offset ≠ -1 → 不走 getInitOffset(:941)
-  │   → 直接从上次位置续上
-  ▼
-gray1 从积压处继续消费,已被标准收割的部分不再给(at-least-once)
-标准消费者同步感知 gray1 回线 → 停止捎带 G%gray1 收割
+  -> ConsumerOffsetManager.queryOffset(topic@G%gray1)
+  -> offset exists and is persistent across generations
+  -> offset != -1, so getInitOffset is not called
+  -> consumption resumes from the previous position
+
+gray1 continues from backlog
+Any part already harvested by standard is not returned again
+Standard sees gray1 online and stops piggyback harvesting of G%gray1
 ```
 
-## 11. E2E / API 测试用例设计(2026-06-29 新增)
+## 11. E2E and API Test Cases
 
-> 按 planning 规则:每条核心用户流至少一个 E2E。测试不 mock 依赖服务,使用真实 Broker + Proxy(Testcontainers 或本地部署)。
+> Per planning rules, every core user flow should have at least one E2E case. Tests should not mock dependent services. Use a real Broker + Proxy setup through Testcontainers or local deployment.
 
-### 11.1 三类核心流程测试矩阵
+### 11.1 Core Flow Matrix
 
-| 测试编号 | 流程类型 | 核心断言 |
+| Test ID | Flow type | Core assertion |
 |---|---|---|
-| E2E-01 | 回退流程:gray 离线后标准接管 | 无消息丢失,gray 离线后宽限期结束标准消费到 gray 消息 |
-| E2E-02 | 接管流程:同名 gray 重建后继承积压 | 重建的 gray 从上次游标续上,标准不消费 gray 消息 |
-| E2E-03 | 销毁回收:gray 销毁后元数据被清理 | 全部消息被消费,`G%gray1` offset 记录被回收 |
-| E2E-04 | 并存隔离:多个 gray 互不干扰 | gray1 消息只进 gray1,gray2 消息只进 gray2 |
-| E2E-05 | 抖动防护:短暂离线不触发收割 | gray 在宽限期内回来,标准未消费任何 gray 消息 |
+| E2E-01 | Fallback flow: gray goes offline and standard takes over | No message loss. Standard consumes gray messages after grace period ends |
+| E2E-02 | Takeover flow: same-name gray rebuild inherits backlog | Rebuilt gray resumes from the previous cursor and standard does not consume those gray messages |
+| E2E-03 | Destroy-and-cleanup flow | All messages are consumed, and `G%gray1` offset records are reclaimed |
+| E2E-04 | Isolation with multiple gray environments | gray1 messages go only to gray1, gray2 messages go only to gray2 |
+| E2E-05 | Flap protection | Short offline windows do not trigger harvesting |
 
-### 11.2 E2E-01:回退流程
+### 11.2 E2E-01: Fallback Flow
 
-```
-前提:
-  - Broker + Proxy 启动,topic=test-topic,queueNum=4
-  - 标准消费者 group=G,SQL92: label IS NULL OR label='STANDARD'
-  - gray1 消费者 group=G%gray1,SQL92: label='gray1'
+```text
+Prerequisites:
+  - Broker + Proxy running, topic=test-topic, queueNum=4
+  - standard consumer group=G, SQL92: label IS NULL OR label='STANDARD'
+  - gray1 consumer group=G%gray1, SQL92: label='gray1'
   - gracePeriodMs=10s
 
-步骤:
-  1. gray1 消费者上线,heartbeat 建立
-  2. 发送 20 条 label=gray1 的消息(M1-M20)
-  3. 断言:gray1 消费 M1-M20,标准未消费任何一条
-  4. 停止 gray1 消费者(模拟下线)
-  5. 等待 5s(宽限期内)→ 发送 10 条 label=gray1(M21-M30)
-  6. 断言:5s 内标准未消费 M21-M30(宽限期保护)
-  7. 等待 gracePeriodMs + 5s(宽限期到)
-  8. 发送 10 条 label=gray1(M31-M40)
-  9. 断言:标准消费 M21-M40(含宽限期积压 + 新消息),总数 = 40
+Steps:
+  1. Bring gray1 online and establish heartbeat
+  2. Send 20 messages with label=gray1, M1-M20
+  3. Assert that gray1 consumes M1-M20 and standard consumes none
+  4. Stop gray1 to simulate offline
+  5. Wait 5s, which is inside the grace period, then send 10 more gray1 messages M21-M30
+  6. Assert that standard still consumes none of M21-M30 during this 5s window
+  7. Wait until gracePeriodMs + 5s
+  8. Send another 10 gray1 messages M31-M40
+  9. Assert that standard consumes M21-M40, including backlog accumulated during grace period plus new messages
 
-断言明细:
-  - gray1 消费计数 = 20
-  - 标准消费计数 = 20
-  - 消息不重复(幂等性由 msgId 校验)
-  - 无消息丢失:生产总数 40 = 消费总数 40
+Detailed assertions:
+  - gray1 consumed count = 20
+  - standard consumed count = 20
+  - No duplicates, verified through msgId
+  - No message loss: produced total 40 = consumed total 40
 ```
 
-### 11.3 E2E-02:接管流程(同名重建)
+### 11.3 E2E-02: Takeover Flow for Same-Name Rebuild
 
-```
-前提:gracePeriodMs=15s
+```text
+Prerequisite: gracePeriodMs=15s
 
-步骤:
-  1. gray1 消费者上线,消费 M1-M10
-  2. 停止 gray1 消费者(游标在 M10 位置)
-  3. 立刻发送 20 条 label=gray1(M11-M30)
-  4. 等待 8s(宽限期内,< 15s)
-  5. 断言:标准未消费 M11-M30(宽限期保护)
-  6. **重建 gray1 消费者(同名 group=G%gray1)**
-  7. 等待 gray1 消费者消费完毕
-  8. 断言:gray1 从 M11 续上消费(接管积压,不从 M1 重放)
-  9. 断言:标准未消费任何 M11-M30
-  10. 断言:生产总数 30 = gray1 消费 30(M1-M30)
+Steps:
+  1. Bring gray1 online and let it consume M1-M10
+  2. Stop gray1 with the cursor at M10
+  3. Immediately send 20 more gray1 messages M11-M30
+  4. Wait 8s, which is still inside the 15s grace period
+  5. Assert that standard consumes none of M11-M30 during the grace period
+  6. Rebuild gray1 using the same group G%gray1
+  7. Wait until gray1 finishes consumption
+  8. Assert that gray1 resumes from M11 rather than replaying from M1
+  9. Assert that standard consumes none of M11-M30
+  10. Assert that produced total 30 = gray1 consumed total 30
 
-关键验证点:
-  - gray1 重建后游标位置 = M10 之后(共享游标未被重置)
-  - 标准消费者 M11-M30 消费计数 = 0
-```
-
-### 11.4 E2E-03:销毁回收
-
-```
-前提:gracePeriodMs=10s,回收检查间隔=5s
-
-步骤:
-  1. gray1 消费者上线,发送 30 条 label=gray1
-  2. gray1 消费 15 条成功(M1-M15),5 条消费失败(M16-M20,nack 进 retry),未消费 M21-M30
-  3. 停止 gray1 消费者(**不重建**)
-  4. 等待 gracePeriodMs → 标准开始收割
-  5. 等待收割完成(所有消息被标准消费,含 retry 中的 M16-M20)
-  6. 等待 revive 处理完毕(revive 周期结束)
-  7. 等待三条件满足 + 回收触发
-
-断言明细:
-  - 标准消费计数 = 15(M16-M30,含 retry)
-  - 总消费 = 30(gray1 消费 15 + 标准消费 15)
-  - 回收后:ConsumerOffsetManager 中 `test-topic@G%gray1` 记录不存在
-  - 回收后:`test-topic@%RETRY%G%gray1` 记录不存在
-  - 无孤儿消息:retry topic `%RETRY%G%gray1` 中 offset == maxOffset
+Key verification:
+  - The rebuilt gray1 starts after M10 because the shared cursor was preserved
+  - Standard consumption count for M11-M30 = 0
 ```
 
-### 11.5 E2E-04:多 gray 并存隔离
+### 11.4 E2E-03: Destroy-and-Cleanup Flow
 
-```
-步骤:
-  1. gray1 消费者(G%gray1)+ gray2 消费者(G%gray2)+ 标准消费者(G)全部上线
-  2. 各发送 10 条:label=gray1(M-g1)、label=gray2(M-g2)、label=STANDARD(M-std)
-  
-断言:
-  - gray1 消费且仅消费 M-g1(10 条)
-  - gray2 消费且仅消费 M-g2(10 条)
-  - 标准消费且仅消费 M-std(10 条)
-  - 无跨环境污染
-```
+```text
+Prerequisites: gracePeriodMs=10s, cleanup check interval=5s
 
-### 11.6 E2E-05:抖动防护(宽限期内回线)
+Steps:
+  1. Bring gray1 online and send 30 messages with label=gray1
+  2. Let gray1 consume 15 successfully, M1-M15, fail 5, M16-M20, into retry, and leave M21-M30 unconsumed
+  3. Stop gray1 and do not rebuild it
+  4. Wait for gracePeriodMs so that standard harvesting starts
+  5. Wait until harvesting completes, including retry messages M16-M20
+  6. Wait until revive finishes
+  7. Wait until the three conditions hold and cleanup triggers
 
-```
-前提:gracePeriodMs=20s
-
-步骤:
-  1. gray1 在线,发送 20 条 label=gray1
-  2. gray1 停止(模拟 GC/重启抖动)
-  3. 等待 10s(< gracePeriodMs)→ gray1 重新上线
-  4. 等待 gray1 消费完毕
-
-断言:
-  - 标准消费 M-gray1 计数 = 0(宽限期内标准未收割)
-  - gray1 消费计数 = 20(完全接管)
-  - harvestQueue 中 gray1 未出现(或出现后被移出)
+Detailed assertions:
+  - Standard consumed count = 15, covering M16-M30 including retry
+  - Total consumed = 30 = gray1 consumed 15 + standard consumed 15
+  - After cleanup, `test-topic@G%gray1` does not exist in ConsumerOffsetManager
+  - After cleanup, `test-topic@%RETRY%G%gray1` does not exist
+  - No orphan messages: retry topic `%RETRY%G%gray1` has offset == maxOffset
 ```
 
-### 11.7 API 测试:POP 请求/响应合约
+### 11.5 E2E-04: Isolation with Multiple Gray Environments
 
-| 用例 | 请求 | 预期响应 |
+```text
+Steps:
+  1. Bring all three online: gray1 consumer G%gray1, gray2 consumer G%gray2, and standard consumer G
+  2. Send 10 messages for each of the three buckets: gray1, gray2, and STANDARD
+
+Assertions:
+  - gray1 consumes and only consumes the 10 gray1 messages
+  - gray2 consumes and only consumes the 10 gray2 messages
+  - standard consumes and only consumes the 10 STANDARD messages
+  - No cross-environment contamination occurs
+```
+
+### 11.6 E2E-05: Flap Protection
+
+```text
+Prerequisite: gracePeriodMs=20s
+
+Steps:
+  1. While gray1 is online, send 20 messages with label=gray1
+  2. Stop gray1 to simulate a GC or restart flap
+  3. Wait 10s, which is below the grace period, then bring gray1 back online
+  4. Wait for gray1 to finish consuming
+
+Assertions:
+  - Standard consumes zero gray1 messages because harvesting never starts inside the grace period
+  - gray1 consumes all 20 messages and fully takes over
+  - gray1 either never appears in the harvest queue, or appears only transiently and is removed before harvesting
+```
+
+### 11.7 API Tests: POP Request and Response Contract
+
+| Case | Request | Expected response |
 |---|---|---|
-| gray consumer 正常 POP | `consumerLabel=gray1`, `onlineLabelsSnapshot={gray1:online}` | 仅返回 `label=gray1` 消息 |
-| std consumer 正常 POP | `consumerLabel=STANDARD`, `offlineLabels=[]` | 仅返回 `label=STANDARD OR IS NULL` 消息 |
-| std consumer harvest POP | `consumerLabel=STANDARD`, `offlineLabels=[gray1]` | 标准消息 + piggyback `G%gray1` 消息(1+1) |
-| 虚拟组 POP(无配置) | `group=G%gray1`(config 不存在) | 自动继承 G config,正常返回(不返回 `GROUP_NOT_EXIST`) |
-| 在线快照版本命中 | `snapshotVersion=N`(与 Broker 缓存匹配) | 复用 Broker 缓存,无需传全量快照 |
+| Normal gray POP | `consumerLabel=gray1`, `onlineLabelsSnapshot={gray1:online}` | Returns only `label=gray1` messages |
+| Normal standard POP | `consumerLabel=STANDARD`, `offlineLabels=[]` | Returns only `label=STANDARD OR IS NULL` messages |
+| Standard POP while harvesting | `consumerLabel=STANDARD`, `offlineLabels=[gray1]` | Returns standard messages plus piggybacked messages from `G%gray1`, bounded to 1+1 |
+| Virtual-group POP without config | `group=G%gray1`, config absent | Inherits config from G and succeeds rather than returning `GROUP_NOT_EXIST` |
+| Snapshot version hit | `snapshotVersion=N`, matching broker cache | Reuses broker-side snapshot cache without sending the full snapshot |
 
-## 9. 最小侵入变体:Plan-B-Lite(零 broker 侵入)
+## 9. Minimal-Intrusion Variant: Plan-B-Lite
 
-能力 ④ 的 SQL92 发现,使"静态隔离"可做到零 broker 代码改动:
+SQL92 support from capability 4 makes a **static isolation** variant possible with zero broker code changes:
 
-1. 每个隔离环境**预创建真实订阅组** `G%gray1`(mqadmin,零代码)。
-2. **gray 消费者**:group=`G%gray1`,SQL92 订阅 `__RMQ_TRAFFIC_LABEL = 'gray1'`。
-3. **标准消费者**:group=`G`,SQL92 订阅 `__RMQ_TRAFFIC_LABEL IS NULL OR __RMQ_TRAFFIC_LABEL = 'STANDARD'`。
-4. broker 开 `enablePropertyFilter`(配置项)。
+1. Pre-create a real subscription group `G%gray1` for each isolated environment through mqadmin.
+2. gray consumers use `group=G%gray1` with SQL92 subscription `__RMQ_TRAFFIC_LABEL = 'gray1'`.
+3. standard consumers use `group=G` with SQL92 subscription `__RMQ_TRAFFIC_LABEL IS NULL OR __RMQ_TRAFFIC_LABEL = 'STANDARD'`.
+4. Enable `enablePropertyFilter` on the broker.
 
-不同 group = 独立游标(解决 [[2026-06-29-traffic-label-routing-design]] §2 的单游标张力),SQL92 = 现成单粒度过滤。**全程不改 broker/proxy 一行代码。**
+Different groups mean independent cursors, which resolves the single-cursor tension from [[2026-06-29-traffic-label-routing-design]] section 2. SQL92 provides the label-level filtering that already exists today. **No broker or Proxy code needs to change at all.**
 
-### 缺口:动态回退
+### Gap: Dynamic Fallback
 
-Plan-B-Lite 缺的正是回退 —— gray1 离线后 `G%gray1` 积压,标准订阅 STANDARD 不会碰。补回退两条路:
+Plan-B-Lite lacks exactly the fallback behavior. Once gray1 goes offline, backlog on `G%gray1` remains there and standard consumers subscribed only to STANDARD will never touch it. There are only two ways to add fallback:
 
-| 补法 | 机制 | broker 侵入 | 代价 |
+| Option | Mechanism | Broker intrusion | Cost |
 |---|---|---|---|
-| **A. 改核心加收割** | 回到完整 plan-b(虚拟组 + 标准扇入收割) | 有(集中在 Proxy 路由 + `PopMessageProcessor:308` 虚拟组补偿,可控) | 改动可控,回退实时 |
-| **B. 外部 operator** | 监控 gray 在线,离线时动态让标准实例加入 `G%gray1` 改订阅收割,上线时踢出 | **零** | 新增外部组件 + 回退慢 + 上下线竞态 |
+| **A. Change core and add harvesting** | Return to the full plan-b approach with virtual groups plus standard fan-in harvesting | Yes, but concentrated in Proxy routing and the virtual-group compensation point at `PopMessageProcessor:308` | Controlled change surface with real-time fallback |
+| **B. Use an external operator** | Monitor gray online state and dynamically have standard instances join `G%gray1` for harvesting while gray is offline, then remove them once gray returns | **Zero** | Requires an extra external component, slower fallback, and introduces online/offline races |
 
-### 选型建议
+### Recommendation
 
-- 隔离环境**常驻** → Plan-B-Lite 静态版几乎够用(真零侵入)。
-- 必须**动态回退** → 改核心的收割(补法 A)比外部 operator 更可靠,侵入比想象中小。
+- If isolated environments are **long-lived**, the static Plan-B-Lite variant is almost enough and truly zero intrusion.
+- If you **must support dynamic fallback**, changing core code for harvesting is more reliable than introducing an external operator, and the intrusion is smaller than it first appears.

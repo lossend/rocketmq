@@ -1,0 +1,134 @@
+@startuml push-consumer-close
+title v5 PushConsumer close() — Full Shutdown Sequence
+
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+skinparam participantPadding 15
+skinparam boxPadding 8
+
+actor "Application" as App
+
+box "v5 Client SDK" #LightBlue
+    participant "PushConsumer\n.close()" as PC
+    participant "PushConsumerImpl\n.shutDown()" as PCI
+    participant "ProcessQueue\n(per queue)" as PQ
+    participant "ConsumptionExecutor\n(ThreadPool)" as Exec
+    participant "MessageListener\n(user code)" as ML
+    participant "ClientImpl\n.shutDown()" as CI
+end box
+
+box "Proxy" #LightYellow
+    participant "ReceiptHandle\nProcessor" as RHP
+end box
+
+box "Broker" #LightGreen
+    participant "AckMessage\nProcessor" as AMP
+    participant "PopRevive\nService" as Revive
+end box
+
+== Step 0: Application calls close() ==
+
+App -> PC : close()
+PC -> PCI : stopAsync().awaitTerminated()\n[Guava Service lifecycle]
+
+== Step 1: Stop new assignments (no new ProcessQueues) ==
+
+PCI -> PCI : scanAssignmentsFuture.cancel(false)
+note right
+  Stops periodic queue assignment scan.
+  No new MessageQueue assigned.
+  No new ProcessQueue created.
+  Existing ProcessQueues continue receiving.
+end note
+
+== Step 2: Wait for inflight receive requests ==
+
+PCI -> PCI : waitingReceiveRequestFinished()
+note right
+  maxWait = requestTimeout + longPollingTimeout
+           = 3s + 30s = 33s (default)
+  Poll inflightReceiveRequestCount every 100ms.
+  Waits until 0 or timeout.
+  Ensures all POP responses received and
+  messages cached in ProcessQueue.
+end note
+
+loop until inflightReceiveRequestCount == 0 OR timeout
+    PCI -> PCI : sleep(100ms)\ncheck inflightReceiveRequestCount
+end
+
+== Step 3: Shutdown consumptionExecutor ==
+
+PCI -> Exec : shutdown()\n+ awaitTerminated()
+note right
+  Waits for all running MessageListener
+  callbacks to finish.
+  No new consume tasks accepted after shutdown().
+end note
+
+loop for each running consume task
+    Exec -> ML : [already running] consume(messageView, ctx)
+    ML --> Exec : ConsumeResult.SUCCESS / FAILURE
+    Exec -> PQ : eraseMessage(mv, result)
+    alt SUCCESS
+        PQ -> AMP : AckMessageRequest (async)
+        AMP --> PQ : AckResult.OK
+    else FAILURE
+        PQ -> RHP : ChangeInvisibleDurationRequest\n(retryPolicy.getNextAttemptDelay)
+        RHP --> PQ : new receiptHandle
+    end
+end
+
+== Step 4: 1s grace for async ACK/NACK RPCs ==
+
+PCI -> PCI : sleep(1s)
+note right
+  Best-effort window for async ACK/NACK
+  RPCs (submitted during step 3) to complete.
+  Not guaranteed — fire-and-forget.
+end note
+
+== Step 5: super.shutDown() — ClientImpl ==
+
+PCI -> CI : super.shutDown()
+
+CI -> CI : notifyClientTermination()\n→ gRPC NOTIFY_CLIENT_TERMINATION to proxy
+CI -> CI : updateRouteCacheFuture.cancel(false)
+CI -> CI : telemetryCommandExecutor.shutdown()\n+ awaitTerminated()
+CI -> CI : releaseClientSessions()\n→ close all gRPC telemetry streams
+CI -> CI : clientManager.stopAsync().awaitTerminated()\n→ close all gRPC channels
+CI -> CI : clientCallbackExecutor.shutdown()
+CI --> PCI : done
+
+PCI --> PC : shutDown() complete
+PC --> App : close() returns
+
+== What happens to unfinished messages ==
+
+note over PQ, Revive
+  Messages NOT acked before channel closes:
+  ┌──────────────────────────────────────────────────────────────┐
+  │ Cached but never dispatched to listener                      │
+  │   → CK natural expiry → PopReviveService → %RETRY%group     │
+  │                                                              │
+  │ Listener was running, didn't finish before executor shutdown │
+  │   → No ACK/NACK sent → CK natural expiry → revive           │
+  │                                                              │
+  │ ACK/NACK RPC not completed within 1s sleep                  │
+  │   → Channel closed → proxy detects CLIENT_UNREGISTER         │
+  │   → CLEAR_GROUP → changeInvisibleTime(1s)                   │
+  │   → ~1s later → revive → %RETRY%group                       │
+  └──────────────────────────────────────────────────────────────┘
+end note
+
+RHP -> RHP : CLIENT_UNREGISTER event\n→ clearGroup(channel, group)\n→ changeInvisibleTime(1s) for all handles
+note right of RHP
+  Fastest re-delivery path:
+  ~1s after channel close,
+  message visible to other consumers.
+end note
+
+RHP -> Revive : [~1s] CK expires
+Revive -> Revive : reviveRetry()\n→ %RETRY%group\n(reconsumeTimes+1)
+
+@enduml

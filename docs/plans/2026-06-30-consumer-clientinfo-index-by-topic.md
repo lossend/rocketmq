@@ -1,36 +1,36 @@
-# Consumer ClientInfo 按 Topic 索引方案
+# Consumer ClientInfo Indexing by Topic
 
-## 背景
+## Background
 
-在 RocketMQ Proxy 集群模式下，需要获取指定 `consumerGroup + topic` 下的所有 `ClientChannelInfo`。
+In RocketMQ Proxy cluster mode, we need to retrieve all `ClientChannelInfo` entries under a given `consumerGroup + topic`.
 
-### 框架现有数据结构的局限
+### Limitations of the Existing Framework Data Structures
 
-`ConsumerGroupInfo` 内部有两张独立的 Map：
+Inside `ConsumerGroupInfo`, there are two independent maps:
 
 ```
-ConsumerGroupInfo (group 级别)
-  ├─ channelInfoTable:   Map<Channel, ClientChannelInfo>   // 连接维度，无 topic 字段
-  └─ subscriptionTable:  Map<Topic,   SubscriptionData>    // 订阅维度，无 clientId 字段
+ConsumerGroupInfo (group level)
+  ├─ channelInfoTable:   Map<Channel, ClientChannelInfo>   // connection dimension, no topic field
+  └─ subscriptionTable:  Map<Topic,   SubscriptionData>    // subscription dimension, no clientId field
 ```
 
-两张表之间**没有任何关联字段**，无法从 topic 直接导航到 ClientChannelInfo。
+There is **no linking field** between these two tables, so it is impossible to navigate directly from a topic to `ClientChannelInfo`.
 
-`ConsumerManager` 虽然维护了反向索引 `topicGroupTable: Map<topic, Set<group>>`，但只能从 topic 找到 group，再从 group 拿到**该 group 下全部 client**，无法进一步按 topic 过滤。
+Although `ConsumerManager` maintains a reverse index, `topicGroupTable: Map<topic, Set<group>>`, it can only find groups by topic. From there, it can only return **all clients in the group**, not clients filtered by topic.
 
-### 为什么不能在同一 group 内按 topic 过滤
+### Why Filtering by Topic Within the Same Group Does Not Work
 
-`ConsumerGroupInfo.updateSubscription()` 的清理逻辑会把"不在本次心跳 subList 里的 topic"从 `subscriptionTable` 中删除。若同 group 不同 client 订阅不同 topic，心跳会导致订阅状态持续抖动覆盖。
+The cleanup logic in `ConsumerGroupInfo.updateSubscription()` removes any topic that is not present in the current heartbeat `subList` from `subscriptionTable`. If different clients in the same group subscribe to different topics, heartbeats will continuously overwrite and flap the subscription state.
 
-RocketMQ 强制约定：**同一个 ConsumerGroup 的所有实例必须订阅完全相同的 topic 集合**，因此在正确使用场景下，"group 下所有 client" == "该 topic 下所有 client"，框架未提供更细粒度的查询。
+RocketMQ enforces the rule that **all instances in the same ConsumerGroup must subscribe to the exact same set of topics**. Therefore, in the correct usage model, "all clients in the group" is effectively equal to "all clients under the topic", and the framework does not provide a more fine-grained query.
 
 ---
 
-## 方案：通过 ConsumerIdsChangeListener 自建 topic → clientInfo 索引
+## Solution: Build a Custom `topic -> clientInfo` Index via `ConsumerIdsChangeListener`
 
-### 原理
+### How It Works
 
-`ConsumerManager.registerConsumer()` 在新 Channel 接入时会触发 `CLIENT_REGISTER` 事件，args 携带了 `ClientChannelInfo` 和订阅的 topic 集合，天然具备 client ↔ topic 的关联关系：
+When a new channel is registered, `ConsumerManager.registerConsumer()` triggers a `CLIENT_REGISTER` event. The event args include both `ClientChannelInfo` and the subscribed topic set, which naturally provides the `client <-> topic` relationship:
 
 ```java
 // ConsumerManager.java:252
@@ -38,28 +38,28 @@ callConsumerIdsChangeListener(ConsumerGroupEvent.CLIENT_REGISTER, group,
     clientChannelInfo,
     subList.stream().map(SubscriptionData::getTopic).collect(Collectors.toSet()));
 // args[0] = ClientChannelInfo
-// args[1] = Set<String> (topic 集合)
+// args[1] = Set<String> (topic set)
 ```
 
-### 注册入口
+### Registration Entry Point
 
-`MessagingProcessor` 接口提供了正式的注册方法：
+The `MessagingProcessor` interface provides an official registration method:
 
 ```java
 // MessagingProcessor.java
 void registerConsumerListener(ConsumerIdsChangeListener consumerIdsChangeListener);
 
-// DefaultMessagingProcessor.java:362 实现
+// DefaultMessagingProcessor.java:362 implementation
 @Override
 public void registerConsumerListener(ConsumerIdsChangeListener listener) {
     this.clientProcessor.registerConsumerIdsChangeListener(listener);
-    // → serviceManager.getConsumerManager().appendConsumerIdsChangeListener(listener)
+    // -> serviceManager.getConsumerManager().appendConsumerIdsChangeListener(listener)
 }
 ```
 
-**注意**：RocketMQ Proxy 没有 SPI 自动发现机制，必须在 `messagingProcessor.start()` 之前显式调用。
+**Note**: RocketMQ Proxy does not have an SPI-based auto-discovery mechanism. The listener must be registered explicitly before `messagingProcessor.start()`.
 
-### 实现代码
+### Implementation
 
 ```java
 public class TopicClientInfoIndex implements ConsumerIdsChangeListener {
@@ -106,7 +106,7 @@ public class TopicClientInfoIndex implements ConsumerIdsChangeListener {
     public void shutdown() {}
 
     /**
-     * 查询 group + topic 下所有 clientId
+     * Query all clientIds under the given group + topic.
      */
     public Set<String> getClientIds(String topic, String group) {
         Map<String, Set<String>> groupMap = index.get(topic);
@@ -116,7 +116,7 @@ public class TopicClientInfoIndex implements ConsumerIdsChangeListener {
     }
 
     /**
-     * 查询 topic 下所有 group 的 clientId（跨 group）
+     * Query clientIds for all groups under a topic (cross-group).
      */
     public Map<String, Set<String>> getClientIdsByTopic(String topic) {
         Map<String, Set<String>> groupMap = index.get(topic);
@@ -125,50 +125,50 @@ public class TopicClientInfoIndex implements ConsumerIdsChangeListener {
 }
 ```
 
-### 启动时注册
+### Register During Startup
 
 ```java
-// 在 ProxyStartup 或自定义启动类中
+// In ProxyStartup or a custom bootstrap class
 DefaultMessagingProcessor messagingProcessor = DefaultMessagingProcessor.createForClusterMode();
 
 TopicClientInfoIndex topicClientInfoIndex = new TopicClientInfoIndex();
-messagingProcessor.registerConsumerListener(topicClientInfoIndex);  // start() 之前注册
+messagingProcessor.registerConsumerListener(topicClientInfoIndex);  // register before start()
 
 messagingProcessor.start();
 ```
 
 ---
 
-## 调用链全貌
+## Full Call Chain
 
 ```
-Consumer 心跳 / 注册
+Consumer heartbeat / registration
   └─ ClusterConsumerManager.registerConsumer()       // proxy/service/client/ClusterConsumerManager.java:46
-       ├─ heartbeatSyncer.onConsumerRegister()        // 广播到其他 Proxy 节点
+       ├─ heartbeatSyncer.onConsumerRegister()        // broadcast to other Proxy nodes
        └─ super.registerConsumer()                    // broker/client/ConsumerManager.java:227
-            ├─ consumerGroupInfo.updateChannel()      // 更新 channelInfoTable
-            ├─ consumerGroupInfo.updateSubscription() // 更新 subscriptionTable
+            ├─ consumerGroupInfo.updateChannel()      // update channelInfoTable
+            ├─ consumerGroupInfo.updateSubscription() // update subscriptionTable
             └─ callConsumerIdsChangeListener(CLIENT_REGISTER, group, clientInfo, topics)
-                 └─ TopicClientInfoIndex.handle()     // 写入自建索引
+                 └─ TopicClientInfoIndex.handle()     // write to the custom index
 ```
 
 ---
 
-## 数据一致性说明
+## Data Consistency Notes
 
-| 场景 | 处理方式 |
-|------|---------|
-| Client 正常注销 | `CLIENT_UNREGISTER` 事件触发，从索引中移除 |
-| Channel 断开（网络中断） | `doChannelCloseEvent()` → `CLIENT_UNREGISTER` 事件，同样触发清理 |
-| 同 group 订阅变更（心跳更新） | `CLIENT_REGISTER` 覆盖写，旧 topic 在 UNREGISTER 时清理；若订阅缩减，需依赖下次 UNREGISTER 清理旧条目 |
-| HeartbeatSyncer 同步远端 Channel | 远端 Channel 注册时 `isNotifyConsumerIdsChangedEnable=false`，但仍会触发 `REGISTER` 事件（非 `CLIENT_REGISTER`），索引不受影响 |
+| Scenario | Handling |
+|------|------|
+| Client unregisters normally | `CLIENT_UNREGISTER` is triggered and removes the entry from the index |
+| Channel closes unexpectedly (network interruption) | `doChannelCloseEvent()` -> `CLIENT_UNREGISTER`, which also performs cleanup |
+| Subscription changes within the same group (heartbeat update) | `CLIENT_REGISTER` overwrites incrementally; old topics are cleaned up on `UNREGISTER`; if the subscription shrinks, stale entries depend on the next `UNREGISTER` for cleanup |
+| `HeartbeatSyncer` syncs remote channels | When a remote channel is registered, `isNotifyConsumerIdsChangedEnable=false`, but it still triggers `REGISTER` rather than `CLIENT_REGISTER`; the custom index is not affected |
 
 ---
 
-## 替代方案对比
+## Alternative Approaches
 
-| 方案 | 说明 | 缺点 |
+| Approach | Description | Drawback |
 |------|------|------|
-| `topicGroupTable` + `getChannelInfoTable()` | 框架原生，O(1) 查 group，再拿全部 client | 无法按 topic 过滤（同 group 所有 client 都返回） |
-| 自建 `ConsumerIdsChangeListener` 索引 | 事件驱动，精确维护 topic→clientId 映射 | 需要手动注册，增量维护有一定复杂度 |
-| 不同 group 隔离 | 每个 topic 用独立 group，彻底避免问题 | 改变消费模型，影响负载均衡语义 |
+| `topicGroupTable` + `getChannelInfoTable()` | Native framework approach: O(1) lookup to get groups, then fetch all clients in the group | Cannot filter by topic; all clients in the same group are returned |
+| Custom `ConsumerIdsChangeListener` index | Event-driven and accurately maintains the `topic -> clientId` mapping | Requires manual registration and some incremental maintenance logic |
+| Group isolation | Use a separate consumer group per topic to eliminate the issue entirely | Changes the consumption model and affects load-balancing semantics |
