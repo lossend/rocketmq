@@ -28,7 +28,7 @@ public final class TrafficLabel {
      * Matches the agent SDK's {@code Constants.SERVICE_TAG} so producers and consumers
      * use the same key without translation.
      */
-    public static final String PROPERTY_KEY = "__service.tag__";
+    public static final String PROPERTY_KEY = "__SERVICE_TAG__";
 
     /** Sentinel value representing the standard (non-gray) traffic lane. */
     public static final String STANDARD = "default";

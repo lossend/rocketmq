@@ -121,7 +121,7 @@ public class TrafficLabelRouterTest {
         LabelRoutingResolver.RoutingDecision d =
             router.resolveForReceive(ctx, "test-topic", "G", null, ExpressionType.TAG);
         assertThat(d.getEffectiveGroup()).isEqualTo("G%gray1");
-        assertThat(d.getSql92()).isEqualTo("__service.tag__ = 'gray1'");
+        assertThat(d.getSql92()).isEqualTo("__SERVICE_TAG__ = 'gray1'");
     }
 
     @Test
@@ -143,6 +143,6 @@ public class TrafficLabelRouterTest {
         LabelRoutingResolver.RoutingDecision d =
             router.resolveForReceive(ctx, "test-topic", "G", "TagA", ExpressionType.TAG);
         assertThat(d.getSql92())
-            .isEqualTo("( TAGS in ('TagA') ) AND ( __service.tag__ = 'gray1' )");
+            .isEqualTo("( TAGS in ('TagA') ) AND ( __SERVICE_TAG__ = 'gray1' )");
     }
 }
