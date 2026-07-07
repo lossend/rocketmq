@@ -46,7 +46,7 @@ filter dynamic and driven by an event index. Master switch stays OFF by default.
 | router wiring point | `DefaultGrpcMessagingActivity.init()` `proxy/.../grpc/v2/DefaultGrpcMessagingActivity.java:86-107` (has `messagingProcessor`) |
 | standard/gray receive integration | `ReceiveMessageActivity.java:125-140` (`trafficLabelRouter.resolveForReceive`) |
 | existing helpers to reuse | `TrafficLabel.effectiveGroup/isGray/GROUP_SEPARATOR`; `LabelRoutingResolver.toSql92Clause`/`mergeExpressions` (private today) |
-| header→ctx copy | `ContextInitPipeline.java:43-47`, header `GrpcConstants.TRAFFIC_LABEL="__rmq_traffic_label"`, key `TrafficLabel.PROPERTY_KEY="__SERVICE_TAG__"` |
+| header→ctx copy | `ContextInitPipeline.java:43-47`, header `GrpcConstants.TRAFFIC_LABEL="__SERVICE_TAG__"` (grpc-java normalizes to `__service_tag__` on the wire), key `TrafficLabel.PROPERTY_KEY="__SERVICE_TAG__"` |
 | IT harness | `test/.../grpc/v2/TrafficLabelRoutingIT.java`, base `GrpcBaseIT.java`; `createLabeledBlockingStub`, `createStandardBlockingStub`, `buildSendMessageRequestWithLabel`, `enablePropertyFilter=true` |
 
 ---
@@ -56,7 +56,7 @@ filter dynamic and driven by an event index. Master switch stays OFF by default.
 Reuse the existing gray path. Add three components and rewrite only the **standard** receive branch.
 
 ```
-gray consumer  --(header __rmq_traffic_label=gray1)--> register rewritten to G%gray1
+gray consumer  --(header __SERVICE_TAG__=gray1)--> register rewritten to G%gray1
 standard consumer --------------------------------> register stays G
                                                       |
    broker ConsumerManager emits CLIENT_REGISTER/UNREGISTER(group=G%gray1|G, topics)

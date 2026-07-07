@@ -50,7 +50,8 @@ import static org.awaitility.Awaitility.await;
  *
  * <p>Two consumer personas are tested:
  * <ol>
- *   <li><strong>Gray consumer</strong> — sends gRPC header {@code __rmq_traffic_label: gray1}.
+ *   <li><strong>Gray consumer</strong> — sends gRPC header {@code __SERVICE_TAG__: gray1}
+ *       (grpc-java normalizes the wire header to {@code __service_tag__}).
  *       Receives only messages whose {@code __SERVICE_TAG__} property equals {@code gray1}.</li>
  *   <li><strong>Standard consumer</strong> — sends no traffic-label header.
  *       While any gray consumer is online for the same (topic, group), receives only messages
@@ -60,7 +61,7 @@ import static org.awaitility.Awaitility.await;
  * <p>Prerequisites satisfied by the test framework:
  * <ul>
  *   <li>In-process broker started with {@code enablePropertyFilter=true}.</li>
- *   <li>{@code ContextInitPipeline} copies the {@code __rmq_traffic_label} gRPC header into
+ *   <li>{@code ContextInitPipeline} copies the {@code __SERVICE_TAG__} gRPC header into
  *       {@code ProxyContext}.</li>
  *   <li>{@code DefaultGrpcMessagingActivity.init()} registers {@code TopicClientInfoIndex} as a
  *       {@code ConsumerIdsChangeListener} before the processor starts.</li>

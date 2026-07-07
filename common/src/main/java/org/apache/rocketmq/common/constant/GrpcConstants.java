@@ -77,7 +77,13 @@ public class GrpcConstants {
     /**
      * gRPC metadata header key used to carry the traffic label for consumer-side lane routing.
      * Consumers set this header to opt into a specific traffic lane (e.g. a gray release).
+     *
+     * <p>The key literal is {@code __SERVICE_TAG__}, which aligns with the message user-property
+     * key {@link org.apache.rocketmq.proxy.grpc.v2.consumer.TrafficLabel#PROPERTY_KEY} so both
+     * vehicles use the same logical name. grpc-java normalizes header names to lower-case on the
+     * wire, so the actual transmitted header is {@code __service_tag__}; both proxy and client SDK
+     * apply the same normalization, ensuring interoperability.
      */
     public static final Metadata.Key<String> TRAFFIC_LABEL
-        = Metadata.Key.of("__rmq_traffic_label", Metadata.ASCII_STRING_MARSHALLER);
+        = Metadata.Key.of("__SERVICE_TAG__", Metadata.ASCII_STRING_MARSHALLER);
 }
