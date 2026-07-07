@@ -170,6 +170,9 @@ public class ClientActivity extends AbstractMessagingActivity {
                 case SIMPLE_CONSUMER:
                     validateConsumerGroup(request.getGroup());
                     String consumerGroup = request.getGroup().getName();
+                    if (trafficLabelRouter != null) {
+                        consumerGroup = trafficLabelRouter.rewriteRegistrationGroup(ctx, consumerGroup);
+                    }
                     GrpcClientChannel channel = this.grpcChannelManager.removeChannel(clientId);
                     if (channel != null) {
                         ClientChannelInfo clientChannelInfo = new ClientChannelInfo(channel, clientId, languageCode, MQVersion.Version.V5_0_0.ordinal());
@@ -430,6 +433,9 @@ public class ClientActivity extends AbstractMessagingActivity {
         String clientId = ctx.getClientID();
         LanguageCode languageCode = LanguageCode.valueOf(ctx.getLanguage());
 
+        if (trafficLabelRouter != null) {
+            consumerGroup = trafficLabelRouter.rewriteRegistrationGroup(ctx, consumerGroup);
+        }
         GrpcClientChannel channel = this.grpcChannelManager.createChannel(ctx, clientId);
         ClientChannelInfo clientChannelInfo = new ClientChannelInfo(channel, clientId, languageCode, parseClientVersion(ctx.getClientVersion()));
 

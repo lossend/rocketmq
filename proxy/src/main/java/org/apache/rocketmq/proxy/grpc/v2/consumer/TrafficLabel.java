@@ -64,4 +64,42 @@ public final class TrafficLabel {
         }
         return originGroup + GROUP_SEPARATOR + label;
     }
+
+    /**
+     * Extracts the logical (origin) group from an effective group name.
+     * Given a virtual group of the form {@code G%gray1} returns {@code G};
+     * given a plain group with no separator returns it unchanged.
+     *
+     * @param effectiveGroup the effective consumer-group name, may be {@code null}
+     * @return the logical group name, or {@code null} when {@code effectiveGroup} is {@code null}
+     */
+    public static String parseLogicalGroup(String effectiveGroup) {
+        if (effectiveGroup == null) {
+            return null;
+        }
+        int idx = effectiveGroup.indexOf(GROUP_SEPARATOR);
+        if (idx < 0) {
+            return effectiveGroup;
+        }
+        return effectiveGroup.substring(0, idx);
+    }
+
+    /**
+     * Extracts the traffic label from an effective group name.
+     * Given a virtual group of the form {@code G%gray1} returns {@code gray1};
+     * given a plain group with no separator returns {@code null}.
+     *
+     * @param effectiveGroup the effective consumer-group name, may be {@code null}
+     * @return the traffic label, or {@code null} when no label is present
+     */
+    public static String parseLabel(String effectiveGroup) {
+        if (effectiveGroup == null) {
+            return null;
+        }
+        int idx = effectiveGroup.indexOf(GROUP_SEPARATOR);
+        if (idx < 0) {
+            return null;
+        }
+        return effectiveGroup.substring(idx + GROUP_SEPARATOR.length());
+    }
 }

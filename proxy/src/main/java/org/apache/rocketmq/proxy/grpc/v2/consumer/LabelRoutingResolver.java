@@ -57,8 +57,8 @@ public class LabelRoutingResolver {
         String originExpression, String originExpressionType) {
         String effectiveGroup = TrafficLabel.effectiveGroup(originGroup, label);
         String labelCondition = buildLabelCondition(label);
-        String sql92Clause = toSql92Clause(originExpression, originExpressionType);
-        String merged = mergeExpressions(sql92Clause, labelCondition);
+        String sql92Clause = Sql92Filters.toSql92Clause(originExpression, originExpressionType);
+        String merged = Sql92Filters.merge(sql92Clause, labelCondition);
         return new RoutingDecision(effectiveGroup, merged);
     }
 
@@ -74,71 +74,6 @@ public class LabelRoutingResolver {
         }
         return TrafficLabel.PROPERTY_KEY + " IS NULL OR "
             + TrafficLabel.PROPERTY_KEY + " = '" + TrafficLabel.STANDARD + "'";
-    }
-
-    /**
-     * Converts a consumer filter expression into a valid SQL-92 clause, or {@code null}
-     * when no filtering is needed.
-     *
-     * <ul>
-     *   <li>Blank or SUB_ALL ({@code "*"}) → {@code null} (no clause needed).</li>
-     *   <li>TAG type → {@code TAGS in ('t1', 't2', ...)}; empty tag list → {@code null}.</li>
-     *   <li>SQL-92 → passed through trimmed.</li>
-     * </ul>
-     *
-     * @param expression     the filter expression string, may be {@code null}
-     * @param expressionType the expression type ({@code "TAG"} or {@code "SQL92"}),
-     *                       may be {@code null} (treated as TAG)
-     * @return valid SQL-92 clause, or {@code null} to indicate "no origin filter"
-     */
-    private String toSql92Clause(String expression, String expressionType) {
-        if (expression == null || expression.trim().isEmpty()
-            || org.apache.rocketmq.remoting.protocol.heartbeat.SubscriptionData.SUB_ALL.equals(
-                expression.trim())) {
-            return null;
-        }
-        if (org.apache.rocketmq.common.filter.ExpressionType.isTagType(expressionType)) {
-            String[] parts = expression.split("\\|\\|");
-            StringBuilder sb = new StringBuilder("TAGS in (");
-            boolean first = true;
-            for (String part : parts) {
-                String tag = part.trim();
-                if (tag.isEmpty()) {
-                    continue;
-                }
-                if (!first) {
-                    sb.append(", ");
-                }
-                // Escape single quotes inside tag values.
-                sb.append('\'').append(tag.replace("'", "''")).append('\'');
-                first = false;
-            }
-            if (first) {
-                // All parts were empty after trimming — treat as no filter.
-                return null;
-            }
-            sb.append(')');
-            return sb.toString();
-        }
-        // SQL92 expression — pass through unchanged.
-        return expression.trim();
-    }
-
-    /**
-     * AND-merges an optional origin SQL-92 clause with the required label condition.
-     * When {@code originClause} is absent the label condition is returned as-is;
-     * otherwise both clauses are wrapped in parentheses and joined with {@code AND}.
-     *
-     * @param originClause   a valid SQL-92 clause derived from the origin expression,
-     *                       may be {@code null} or blank
-     * @param labelCondition the label filter condition
-     * @return the merged SQL-92 expression
-     */
-    private String mergeExpressions(String originClause, String labelCondition) {
-        if (originClause == null || originClause.trim().isEmpty()) {
-            return labelCondition;
-        }
-        return "( " + originClause.trim() + " ) AND ( " + labelCondition + " )";
     }
 
     /**

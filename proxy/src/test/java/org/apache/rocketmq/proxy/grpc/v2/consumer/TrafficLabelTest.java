@@ -46,4 +46,24 @@ public class TrafficLabelTest {
         assertThat(TrafficLabel.isGray(null)).isFalse();
         assertThat(TrafficLabel.isGray("")).isFalse();
     }
+
+    @Test
+    public void should_parse_logical_group_from_virtual_group() {
+        assertThat(TrafficLabel.parseLogicalGroup("G%gray1")).isEqualTo("G");
+    }
+
+    @Test
+    public void should_parse_label_from_virtual_group() {
+        assertThat(TrafficLabel.parseLabel("G%gray1")).isEqualTo("gray1");
+    }
+
+    @Test
+    public void should_return_whole_group_as_logical_group_when_no_separator() {
+        assertThat(TrafficLabel.parseLogicalGroup("G")).isEqualTo("G");
+    }
+
+    @Test
+    public void should_return_null_label_when_no_separator() {
+        assertThat(TrafficLabel.parseLabel("G")).isNull();
+    }
 }

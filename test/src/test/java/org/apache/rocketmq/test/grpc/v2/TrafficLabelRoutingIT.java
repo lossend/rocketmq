@@ -19,12 +19,18 @@ package org.apache.rocketmq.test.grpc.v2;
 
 import apache.rocketmq.v2.Message;
 import apache.rocketmq.v2.MessagingServiceGrpc;
-import apache.rocketmq.v2.SendMessageResponse;
+import apache.rocketmq.v2.NotifyClientTerminationRequest;
+import apache.rocketmq.v2.Resource;
+import com.google.protobuf.ByteString;
+import com.google.protobuf.util.Timestamps;
+import io.grpc.Channel;
 import io.grpc.Metadata;
 import io.grpc.stub.MetadataUtils;
 import java.util.List;
 import java.util.UUID;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.rocketmq.common.constant.GrpcConstants;
+import org.apache.rocketmq.common.utils.NetworkUtil;
 import org.apache.rocketmq.proxy.config.ConfigurationManager;
 import org.apache.rocketmq.proxy.grpc.v2.GrpcMessagingApplication;
 import org.apache.rocketmq.proxy.grpc.v2.consumer.TrafficLabel;
@@ -45,18 +51,19 @@ import static org.awaitility.Awaitility.await;
  * <p>Two consumer personas are tested:
  * <ol>
  *   <li><strong>Gray consumer</strong> — sends gRPC header {@code __rmq_traffic_label: gray1}.
- *       It must receive only messages whose {@code __RMQ_TRAFFIC_LABEL} property equals {@code gray1}.</li>
+ *       Receives only messages whose {@code __SERVICE_TAG__} property equals {@code gray1}.</li>
  *   <li><strong>Standard consumer</strong> — sends no traffic-label header.
- *       It must receive only messages whose {@code __RMQ_TRAFFIC_LABEL} property is absent or equals
- *       {@value TrafficLabel#STANDARD}.</li>
+ *       While any gray consumer is online for the same (topic, group), receives only messages
+ *       whose {@code __SERVICE_TAG__} is absent.</li>
  * </ol>
  *
- * <p>Prerequisites already satisfied by the test framework:
+ * <p>Prerequisites satisfied by the test framework:
  * <ul>
- *   <li>The in-process broker is started with {@code enablePropertyFilter=true} (see
- *       {@code IntegrationTestBase.createAndStartBroker}).</li>
+ *   <li>In-process broker started with {@code enablePropertyFilter=true}.</li>
  *   <li>{@code ContextInitPipeline} copies the {@code __rmq_traffic_label} gRPC header into
- *       {@code ProxyContext} so the router can read it.</li>
+ *       {@code ProxyContext}.</li>
+ *   <li>{@code DefaultGrpcMessagingActivity.init()} registers {@code TopicClientInfoIndex} as a
+ *       {@code ConsumerIdsChangeListener} before the processor starts.</li>
  * </ul>
  */
 public class TrafficLabelRoutingIT extends GrpcBaseIT {
@@ -73,15 +80,13 @@ public class TrafficLabelRoutingIT extends GrpcBaseIT {
         messagingProcessor.start();
         grpcMessagingApplication = GrpcMessagingApplication.create(messagingProcessor);
         grpcMessagingApplication.start();
-        setUpServer(grpcMessagingApplication, ConfigurationManager.getProxyConfig().getGrpcServerPort(), true);
-
-        // Enable traffic-label routing so the router is active during these tests.
+        // Pass 0 so each test gets a fresh ephemeral port; setUpServer stores the actual port back.
+        setUpServer(grpcMessagingApplication, 0, true);
         ConfigurationManager.getProxyConfig().setEnableTrafficLabelRouting(true);
     }
 
     @After
     public void clean() throws Exception {
-        // Restore default to avoid leaking state into other test classes.
         ConfigurationManager.getProxyConfig().setEnableTrafficLabelRouting(false);
         messagingProcessor.shutdown();
         grpcMessagingApplication.shutdown();
@@ -89,60 +94,11 @@ public class TrafficLabelRoutingIT extends GrpcBaseIT {
     }
 
     // -------------------------------------------------------------------------
-    // Helper: build a blocking stub that attaches the traffic-label header
+    // E2E-C: Gray consumer regression — receives only gray-labeled messages
     // -------------------------------------------------------------------------
 
     /**
-     * Creates a blocking stub that attaches the given traffic label as a gRPC metadata header.
-     * The header name matches {@link GrpcConstants#TRAFFIC_LABEL} (i.e. {@code __rmq_traffic_label}).
-     *
-     * @param label the traffic label to inject, e.g. {@code "gray1"}
-     * @return a blocking stub scoped to that label
-     */
-    private MessagingServiceGrpc.MessagingServiceBlockingStub createLabeledBlockingStub(String label)
-        throws Exception {
-        Metadata labeledHeader = new Metadata();
-        // Copy all entries from the shared header (client-id, language) then add the label.
-        labeledHeader.merge(header);
-        // Each labeled consumer needs its own unique client-id to avoid conflicts.
-        labeledHeader.put(GrpcConstants.CLIENT_ID, "client-" + label + "-" + UUID.randomUUID());
-        labeledHeader.put(GrpcConstants.TRAFFIC_LABEL, label);
-
-        MessagingServiceGrpc.MessagingServiceBlockingStub stub =
-            MessagingServiceGrpc.newBlockingStub(createChannel(ConfigurationManager.getProxyConfig().getGrpcServerPort()));
-        return stub.withInterceptors(MetadataUtils.newAttachHeadersInterceptor(labeledHeader));
-    }
-
-    /**
-     * Creates a blocking stub without a traffic-label header (standard lane).
-     *
-     * @return a standard-lane blocking stub
-     */
-    private MessagingServiceGrpc.MessagingServiceBlockingStub createStandardBlockingStub()
-        throws Exception {
-        Metadata standardHeader = new Metadata();
-        standardHeader.merge(header);
-        standardHeader.put(GrpcConstants.CLIENT_ID, "client-standard-" + UUID.randomUUID());
-        // Intentionally: no TRAFFIC_LABEL put here.
-
-        MessagingServiceGrpc.MessagingServiceBlockingStub stub =
-            MessagingServiceGrpc.newBlockingStub(createChannel(ConfigurationManager.getProxyConfig().getGrpcServerPort()));
-        return stub.withInterceptors(MetadataUtils.newAttachHeadersInterceptor(standardHeader));
-    }
-
-    // -------------------------------------------------------------------------
-    // Tests
-    // -------------------------------------------------------------------------
-
-    /**
-     * Gray consumer (header {@code __rmq_traffic_label: gray1}) receives only gray-labeled messages.
-     *
-     * <p>Flow:
-     * <ol>
-     *   <li>Send one message with {@code __RMQ_TRAFFIC_LABEL=gray1}.</li>
-     *   <li>Send one message with no label (standard lane).</li>
-     *   <li>Gray-labeled consumer calls {@code ReceiveMessage} — must see exactly the gray message.</li>
-     * </ol>
+     * Gray consumer receives only messages carrying {@code __SERVICE_TAG__=gray1}.
      */
     @Test
     public void gray_consumer_receives_only_gray_labeled_messages() throws Exception {
@@ -150,109 +106,191 @@ public class TrafficLabelRoutingIT extends GrpcBaseIT {
         String group = MQRandomUtils.getRandomConsumerGroup();
         initConsumerGroup(group);
 
-        MessagingServiceGrpc.MessagingServiceBlockingStub producerStub = blockingStub;
-        MessagingServiceGrpc.MessagingServiceBlockingStub grayConsumerStub = createLabeledBlockingStub(GRAY_LABEL);
+        LabeledStubs grayStubs = createLabeledStubs(GRAY_LABEL);
 
-        // Initialize consumer offset so the consumer does not replay stale messages.
-        this.sendClientSettings(stub, buildSimpleConsumerClientSettings(group)).get();
-        receiveMessage(grayConsumerStub, topic, group, 2);
+        // Init consumer offset (drain any old messages).
+        sendClientSettings(grayStubs.async, buildSimpleConsumerClientSettings(group)).get();
+        receiveMessage(grayStubs.blocking, topic, group, 2);
 
-        // Producer settings.
-        this.sendClientSettings(stub, buildProducerClientSettings(topic)).get();
+        sendClientSettings(stub, buildProducerClientSettings(topic)).get();
 
-        // Send a gray-labeled message.
         String grayMsgId = createUniqID();
-        SendMessageResponse grayResp = producerStub.sendMessage(
-            buildSendMessageRequestWithLabel(topic, grayMsgId, GRAY_LABEL));
-        assertSendMessage(grayResp, grayMsgId);
+        assertSendMessage(
+            blockingStub.sendMessage(buildSendMessageRequestWithLabel(topic, grayMsgId, GRAY_LABEL)),
+            grayMsgId);
 
-        // Send a standard (unlabeled) message.
         String stdMsgId = createUniqID();
-        SendMessageResponse stdResp = producerStub.sendMessage(buildSendMessageRequest(topic, stdMsgId));
-        assertSendMessage(stdResp, stdMsgId);
+        assertSendMessage(blockingStub.sendMessage(buildSendMessageRequest(topic, stdMsgId)), stdMsgId);
 
-        // Gray consumer must receive the gray message.
-        this.sendClientSettings(stub, buildSimpleConsumerClientSettings(group)).get();
+        sendClientSettings(grayStubs.async, buildSimpleConsumerClientSettings(group)).get();
         await().atMost(java.time.Duration.ofSeconds(15)).untilAsserted(() -> {
             List<Message> received = getMessageFromReceiveMessageResponse(
-                receiveMessage(grayConsumerStub, topic, group, 5));
+                receiveMessage(grayStubs.blocking, topic, group, 5));
             assertThat(received).isNotEmpty();
-            // Every message the gray consumer receives must carry the gray label.
             for (Message msg : received) {
-                String labelProp = msg.getUserPropertiesMap().get(TrafficLabel.PROPERTY_KEY);
-                assertThat(labelProp)
+                assertThat(msg.getUserPropertiesMap().get(TrafficLabel.PROPERTY_KEY))
                     .as("Gray consumer must only receive messages with label " + GRAY_LABEL)
                     .isEqualTo(GRAY_LABEL);
             }
         });
     }
 
+    // -------------------------------------------------------------------------
+    // E2E-A: Gray consumer online → standard consumer excludes gray messages
+    // -------------------------------------------------------------------------
+
     /**
-     * Standard consumer (no traffic-label header) receives only unlabeled / standard messages.
+     * While a gray consumer is online, the standard consumer must not receive gray-labeled messages.
      *
-     * <p>Flow:
-     * <ol>
-     *   <li>Send one message with no label.</li>
-     *   <li>Send one message with {@code __RMQ_TRAFFIC_LABEL=gray1}.</li>
-     *   <li>Standard consumer calls {@code ReceiveMessage} — must see the unlabeled message only.</li>
-     * </ol>
+     * <p>The gray consumer registration rewrites the group to {@code G%gray1} at the broker, which
+     * causes the broker to emit {@code CLIENT_REGISTER(G%gray1, [topic])}. The
+     * {@code TopicClientInfoIndex} listener picks this up so that the standard consumer's
+     * {@code ReceiveMessage} call gets a dynamic exclusion filter.
      */
     @Test
-    public void standard_consumer_does_not_receive_gray_labeled_messages() throws Exception {
+    public void standard_consumer_does_not_receive_gray_labeled_messages_while_gray_is_online()
+        throws Exception {
         String topic = initTopic();
         String group = MQRandomUtils.getRandomConsumerGroup();
         initConsumerGroup(group);
 
-        MessagingServiceGrpc.MessagingServiceBlockingStub producerStub = blockingStub;
-        MessagingServiceGrpc.MessagingServiceBlockingStub standardConsumerStub = createStandardBlockingStub();
+        LabeledStubs grayStubs = createLabeledStubs(GRAY_LABEL);
+        MessagingServiceGrpc.MessagingServiceBlockingStub standardStub = createStandardBlockingStub();
 
-        // Initialize consumer offset.
-        this.sendClientSettings(stub, buildSimpleConsumerClientSettings(group)).get();
-        receiveMessage(standardConsumerStub, topic, group, 2);
+        // Register gray consumer so CLIENT_REGISTER fires and the index is populated.
+        sendClientSettings(grayStubs.async, buildSimpleConsumerClientSettings(group)).get();
+        receiveMessage(grayStubs.blocking, topic, group, 2);
 
-        // Producer settings.
-        this.sendClientSettings(stub, buildProducerClientSettings(topic)).get();
+        // Init standard consumer offset.
+        sendClientSettings(stub, buildSimpleConsumerClientSettings(group)).get();
+        receiveMessage(standardStub, topic, group, 2);
 
-        // Send a standard (unlabeled) message.
+        sendClientSettings(stub, buildProducerClientSettings(topic)).get();
+
         String stdMsgId = createUniqID();
-        SendMessageResponse stdResp = producerStub.sendMessage(buildSendMessageRequest(topic, stdMsgId));
-        assertSendMessage(stdResp, stdMsgId);
+        assertSendMessage(blockingStub.sendMessage(buildSendMessageRequest(topic, stdMsgId)), stdMsgId);
 
-        // Send a gray-labeled message.
         String grayMsgId = createUniqID();
-        SendMessageResponse grayResp = producerStub.sendMessage(
-            buildSendMessageRequestWithLabel(topic, grayMsgId, GRAY_LABEL));
-        assertSendMessage(grayResp, grayMsgId);
+        assertSendMessage(
+            blockingStub.sendMessage(buildSendMessageRequestWithLabel(topic, grayMsgId, GRAY_LABEL)),
+            grayMsgId);
 
-        // Standard consumer must receive only the standard message.
-        this.sendClientSettings(stub, buildSimpleConsumerClientSettings(group)).get();
+        sendClientSettings(stub, buildSimpleConsumerClientSettings(group)).get();
         await().atMost(java.time.Duration.ofSeconds(15)).untilAsserted(() -> {
             List<Message> received = getMessageFromReceiveMessageResponse(
-                receiveMessage(standardConsumerStub, topic, group, 5));
+                receiveMessage(standardStub, topic, group, 5));
             assertThat(received).isNotEmpty();
-            // No message in standard lane should carry a gray label.
             for (Message msg : received) {
-                String labelProp = msg.getUserPropertiesMap().get(TrafficLabel.PROPERTY_KEY);
-                assertThat(labelProp)
-                    .as("Standard consumer must not receive messages with gray label " + GRAY_LABEL)
+                assertThat(msg.getUserPropertiesMap().get(TrafficLabel.PROPERTY_KEY))
+                    .as("Standard consumer must not receive gray-labeled messages")
                     .isNotEqualTo(GRAY_LABEL);
             }
         });
     }
 
     // -------------------------------------------------------------------------
-    // Builders
+    // E2E-B: Gray consumer offline → exclusion removed, standard can consume
     // -------------------------------------------------------------------------
 
     /**
-     * Builds a {@link apache.rocketmq.v2.SendMessageRequest} with a {@code __RMQ_TRAFFIC_LABEL}
-     * user property set to {@code label}.
+     * After the gray consumer terminates, the index clears and the standard consumer can receive
+     * gray-labeled messages (no exclusion filter is applied).
      *
-     * @param topic     topic name
-     * @param messageId client-assigned message id
-     * @param label     traffic label value to embed as a user property
-     * @return ready-to-send request
+     * <p>{@code NotifyClientTermination} triggers {@code unRegisterConsumer} synchronously, which
+     * causes the broker to emit {@code CLIENT_UNREGISTER(G%gray1, ...)} before the RPC returns.
+     * The index is updated in the same event callback, so it is safe to assert immediately after.
      */
+    @Test
+    public void standard_consumer_receives_gray_messages_after_gray_consumer_terminates()
+        throws Exception {
+        String topic = initTopic();
+        String group = MQRandomUtils.getRandomConsumerGroup();
+        initConsumerGroup(group);
+
+        LabeledStubs grayStubs = createLabeledStubs(GRAY_LABEL);
+        MessagingServiceGrpc.MessagingServiceBlockingStub standardStub = createStandardBlockingStub();
+
+        // Register gray consumer and init offsets.
+        sendClientSettings(grayStubs.async, buildSimpleConsumerClientSettings(group)).get();
+        receiveMessage(grayStubs.blocking, topic, group, 2);
+
+        sendClientSettings(stub, buildSimpleConsumerClientSettings(group)).get();
+        receiveMessage(standardStub, topic, group, 2);
+
+        // Gray consumer goes offline — broker fires CLIENT_UNREGISTER, index clears.
+        grayStubs.blocking.notifyClientTermination(
+            NotifyClientTerminationRequest.newBuilder()
+                .setGroup(Resource.newBuilder().setName(group).build())
+                .build());
+
+        // Produce a gray-labeled message AFTER the gray consumer is gone.
+        sendClientSettings(stub, buildProducerClientSettings(topic)).get();
+        String grayMsgId = createUniqID();
+        assertSendMessage(
+            blockingStub.sendMessage(buildSendMessageRequestWithLabel(topic, grayMsgId, GRAY_LABEL)),
+            grayMsgId);
+
+        // Standard consumer should now receive it (no exclusion filter active).
+        sendClientSettings(stub, buildSimpleConsumerClientSettings(group)).get();
+        await().atMost(java.time.Duration.ofSeconds(15)).untilAsserted(() -> {
+            List<Message> received = getMessageFromReceiveMessageResponse(
+                receiveMessage(standardStub, topic, group, 5));
+            assertThat(received).isNotEmpty();
+            boolean foundGray = received.stream().anyMatch(
+                m -> GRAY_LABEL.equals(m.getUserPropertiesMap().get(TrafficLabel.PROPERTY_KEY)));
+            assertThat(foundGray)
+                .as("Standard consumer should receive gray-labeled messages after gray consumer terminates")
+                .isTrue();
+        });
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
+
+    /** Paired blocking + async stubs that share the same client-id and traffic-label header. */
+    private static class LabeledStubs {
+        final MessagingServiceGrpc.MessagingServiceBlockingStub blocking;
+        final MessagingServiceGrpc.MessagingServiceStub async;
+
+        LabeledStubs(MessagingServiceGrpc.MessagingServiceBlockingStub blocking,
+            MessagingServiceGrpc.MessagingServiceStub async) {
+            this.blocking = blocking;
+            this.async = async;
+        }
+    }
+
+    /**
+     * Creates paired stubs sharing a stable client-id and the given traffic label.
+     * Use {@link #createStandardBlockingStub()} for the standard (no-label) lane.
+     */
+    private LabeledStubs createLabeledStubs(String label) throws Exception {
+        String clientId = "client-" + label + "-" + UUID.randomUUID();
+        Metadata meta = new Metadata();
+        meta.merge(header);
+        meta.put(GrpcConstants.CLIENT_ID, clientId);
+        meta.put(GrpcConstants.TRAFFIC_LABEL, label);
+
+        Channel ch = createChannel(ConfigurationManager.getProxyConfig().getGrpcServerPort());
+        return new LabeledStubs(
+            MessagingServiceGrpc.newBlockingStub(ch)
+                .withInterceptors(MetadataUtils.newAttachHeadersInterceptor(meta)),
+            MessagingServiceGrpc.newStub(ch)
+                .withInterceptors(MetadataUtils.newAttachHeadersInterceptor(meta)));
+    }
+
+    /** Creates a blocking stub without a traffic-label header (standard lane). */
+    private MessagingServiceGrpc.MessagingServiceBlockingStub createStandardBlockingStub()
+        throws Exception {
+        Metadata meta = new Metadata();
+        meta.merge(header);
+        meta.put(GrpcConstants.CLIENT_ID, "client-standard-" + UUID.randomUUID());
+
+        return MessagingServiceGrpc.newBlockingStub(
+                createChannel(ConfigurationManager.getProxyConfig().getGrpcServerPort()))
+            .withInterceptors(MetadataUtils.newAttachHeadersInterceptor(meta));
+    }
+
     private apache.rocketmq.v2.SendMessageRequest buildSendMessageRequestWithLabel(
         String topic, String messageId, String label) {
         return apache.rocketmq.v2.SendMessageRequest.newBuilder()
@@ -262,12 +300,12 @@ public class TrafficLabelRoutingIT extends GrpcBaseIT {
                     .setMessageId(messageId)
                     .setQueueId(0)
                     .setMessageType(apache.rocketmq.v2.MessageType.NORMAL)
-                    .setBornTimestamp(com.google.protobuf.util.Timestamps.fromMillis(System.currentTimeMillis()))
-                    .setBornHost(org.apache.commons.lang3.StringUtils.defaultString(
-                        org.apache.rocketmq.common.utils.NetworkUtil.getLocalAddress(), "127.0.0.1:1234"))
+                    .setBornTimestamp(Timestamps.fromMillis(System.currentTimeMillis()))
+                    .setBornHost(StringUtils.defaultString(
+                        NetworkUtil.getLocalAddress(), "127.0.0.1:1234"))
                     .build())
                 .putUserProperties(TrafficLabel.PROPERTY_KEY, label)
-                .setBody(com.google.protobuf.ByteString.copyFromUtf8("traffic-label-test"))
+                .setBody(ByteString.copyFromUtf8("traffic-label-test"))
                 .build())
             .build();
     }

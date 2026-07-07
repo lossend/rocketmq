@@ -17,7 +17,9 @@
 package org.apache.rocketmq.proxy.grpc.v2.consumer;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import org.apache.rocketmq.broker.client.ConsumerGroupEvent;
 import org.apache.rocketmq.common.filter.ExpressionType;
 import org.apache.rocketmq.proxy.common.ProxyContext;
 import org.apache.rocketmq.proxy.config.ConfigurationManager;
@@ -67,6 +69,8 @@ public class TrafficLabelRouterTest {
     }
 
     private BootstrapperSpy bootstrapper;
+    private TopicClientInfoIndex index;
+    private StandardFilterAssembler assembler;
     private TrafficLabelRouter router;
 
     @BeforeClass
@@ -78,7 +82,9 @@ public class TrafficLabelRouterTest {
     @Before
     public void setUp() {
         bootstrapper = new BootstrapperSpy();
-        router = new TrafficLabelRouter(new LabelRoutingResolver(), bootstrapper);
+        index = new TopicClientInfoIndex();
+        assembler = new StandardFilterAssembler();
+        router = new TrafficLabelRouter(new LabelRoutingResolver(), bootstrapper, index, assembler);
         ConfigurationManager.getProxyConfig().setEnableTrafficLabelRouting(false);
         ConfigurationManager.getProxyConfig().setEnableTrafficLabelRoutingLog(false);
     }
@@ -144,5 +150,76 @@ public class TrafficLabelRouterTest {
             router.resolveForReceive(ctx, "test-topic", "G", "TagA", ExpressionType.TAG);
         assertThat(d.getSql92())
             .isEqualTo("( TAGS in ('TagA') ) AND ( __SERVICE_TAG__ = 'gray1' )");
+    }
+
+    // -------------------------------------------------------------------------
+    // Task 4: dynamic standard-side filter + rewriteRegistrationGroup
+    // -------------------------------------------------------------------------
+
+    @Test
+    public void disabled_switch_resolveForReceive_returns_null_and_rewriteRegistrationGroup_returns_input() {
+        ConfigurationManager.getProxyConfig().setEnableTrafficLabelRouting(false);
+        ProxyContext ctx = ProxyContext.create();
+        ctx.withVal(TrafficLabel.PROPERTY_KEY, "gray1");
+
+        assertThat(router.resolveForReceive(ctx, "T", "G", null, null)).isNull();
+        assertThat(router.rewriteRegistrationGroup(ctx, "G")).isEqualTo("G");
+    }
+
+    @Test
+    public void standard_receive_with_active_gray_label_in_index_returns_exclusion_decision() {
+        ConfigurationManager.getProxyConfig().setEnableTrafficLabelRouting(true);
+        // Simulate gray1 registering on topic T under logical group G.
+        index.handle(ConsumerGroupEvent.CLIENT_REGISTER, "G%gray1",
+            new Object[] {null, Collections.singleton("T")});
+
+        ProxyContext ctx = ProxyContext.create(); // no label = standard consumer
+        LabelRoutingResolver.RoutingDecision d =
+            router.resolveForReceive(ctx, "T", "G", null, null);
+
+        assertThat(d).isNotNull();
+        assertThat(d.getEffectiveGroup()).isEqualTo("G");
+        assertThat(d.getSql92()).isEqualTo(
+            "__SERVICE_TAG__ IS NULL OR (__SERVICE_TAG__ <> 'gray1')");
+        assertThat(bootstrapper.neverCalled()).isTrue();
+    }
+
+    @Test
+    public void standard_receive_with_empty_index_returns_null() {
+        ConfigurationManager.getProxyConfig().setEnableTrafficLabelRouting(true);
+        ProxyContext ctx = ProxyContext.create(); // no label = standard consumer
+
+        assertThat(router.resolveForReceive(ctx, "T", "G", null, null)).isNull();
+    }
+
+    @Test
+    public void gray_receive_with_active_index_is_unchanged_and_bootstraps() {
+        ConfigurationManager.getProxyConfig().setEnableTrafficLabelRouting(true);
+        // Even with another gray label in the index, gray consumer uses its own resolver path.
+        index.handle(ConsumerGroupEvent.CLIENT_REGISTER, "G%gray2",
+            new Object[] {null, Collections.singleton("T")});
+
+        ProxyContext ctx = ProxyContext.create();
+        ctx.withVal(TrafficLabel.PROPERTY_KEY, "gray1");
+
+        LabelRoutingResolver.RoutingDecision d =
+            router.resolveForReceive(ctx, "T", "G", null, null);
+
+        assertThat(d.getEffectiveGroup()).isEqualTo("G%gray1");
+        assertThat(d.getSql92()).isEqualTo("__SERVICE_TAG__ = 'gray1'");
+        assertThat(bootstrapper.calledOnceWith("T", "G%gray1")).isTrue();
+    }
+
+    @Test
+    public void rewriteRegistrationGroup_gray_header_returns_rewritten_group_no_bootstrap() {
+        ConfigurationManager.getProxyConfig().setEnableTrafficLabelRouting(true);
+        ProxyContext grayCtx = ProxyContext.create();
+        grayCtx.withVal(TrafficLabel.PROPERTY_KEY, "gray1");
+
+        ProxyContext stdCtx = ProxyContext.create();
+
+        assertThat(router.rewriteRegistrationGroup(grayCtx, "G")).isEqualTo("G%gray1");
+        assertThat(router.rewriteRegistrationGroup(stdCtx, "G")).isEqualTo("G");
+        assertThat(bootstrapper.neverCalled()).isTrue();
     }
 }
