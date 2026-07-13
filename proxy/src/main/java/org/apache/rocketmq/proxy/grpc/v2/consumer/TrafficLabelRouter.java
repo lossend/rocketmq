@@ -16,7 +16,9 @@
  */
 package org.apache.rocketmq.proxy.grpc.v2.consumer;
 
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.logging.org.slf4j.Logger;
 import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
@@ -53,6 +55,14 @@ public class TrafficLabelRouter {
     private final TopicClientInfoIndex index;
     private final StandardFilterAssembler assembler;
     private final MetadataService metadataService;
+
+    /**
+     * Backoff guard for the consume-path safety net. Tracks the timestamp of the last provision
+     * attempt per effective group so that a persistently-missing origin group does not trigger a
+     * full cluster RPC sweep on every message receive (H1 guard).
+     */
+    private final Map<String, Long> provisionAttemptMs = new ConcurrentHashMap<>();
+    private static final long PROVISION_BACKOFF_MS = 30_000L;
 
     /**
      * Creates a router without a dynamic index (standard path returns {@code null}).
@@ -106,8 +116,9 @@ public class TrafficLabelRouter {
      * Rewrites the consumer group name for gray traffic on the receive/ack paths.
      *
      * <p>When the master switch is disabled or the context carries no gray label,
-     * {@code originGroup} is returned unchanged. Group creation is intentionally restricted to
-     * the registration path.
+     * {@code originGroup} is returned unchanged. Group creation happens on the registration path
+     * (see {@link #rewriteRegistrationGroup}) and lazily on the receive path via
+     * {@link #resolveForReceive} as a cache-gated safety net.
      *
      * @param ctx         proxy context holding the optional traffic label
      * @param topic       topic being consumed
@@ -207,11 +218,19 @@ public class TrafficLabelRouter {
     private LabelRoutingResolver.RoutingDecision resolveGray(ProxyContext ctx, String originGroup,
         String label, String originExpression, String originExpressionType) {
         String effectiveGroup = TrafficLabel.effectiveGroup(originGroup, label);
-        // Cache-gated safety net: if the gray group is absent from the metadata cache,
-        // attempt lazy provisioning (e.g. after cleaner deletion or a transient failure).
+        // Cache-gated safety net: re-provision if the gray group is absent from the metadata cache
+        // (e.g. after cleaner deletion or a transient registration failure). Rate-limited to once
+        // per PROVISION_BACKOFF_MS per group to avoid hammering all broker masters on every receive
+        // when the origin group is genuinely missing.
         if (metadataService != null
                 && metadataService.getSubscriptionGroupConfig(ctx, effectiveGroup) == null) {
-            bootstrapper.ensureGrayGroupFromOrigin(originGroup, effectiveGroup);
+            long now = System.currentTimeMillis();
+            Long lastAttempt = provisionAttemptMs.get(effectiveGroup);
+            if (lastAttempt == null || (now - lastAttempt) > PROVISION_BACKOFF_MS) {
+                provisionAttemptMs.put(effectiveGroup, now);
+                // Best-effort; result ignored — next registration will retry on failure.
+                bootstrapper.ensureGrayGroupFromOrigin(originGroup, effectiveGroup);
+            }
         }
         LabelRoutingResolver.RoutingDecision decision =
             resolver.resolve(originGroup, label, originExpression, originExpressionType);

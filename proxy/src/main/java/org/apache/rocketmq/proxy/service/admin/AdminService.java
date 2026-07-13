@@ -41,13 +41,16 @@ public interface AdminService {
     boolean createSubscriptionGroup(String sampleTopic, SubscriptionGroupConfig config);
 
     /**
-     * Clones a source subscription group to a target group on exactly the broker masters where
-     * the source group exists. Existing target groups are left untouched.
+     * Clones a source subscription group to a target group on <em>all</em> cluster masters,
+     * sourcing the configuration from the first master that hosts the source group. This ensures
+     * the target group is reachable regardless of which master the proxy's random-broker lookup
+     * selects. Existing target groups are left untouched.
      *
      * @param sourceGroup source consumer group name
      * @param targetGroup target consumer group name
-     * @return {@code true} if at least one source group was found and every required operation
-     *         completed successfully
+     * @return {@code true} when the source group was found and the target group was confirmed
+     *         (created or already present) on every cluster master; {@code false} if the source
+     *         group exists on no master, or any master's create call failed
      */
     boolean cloneSubscriptionGroupIfAbsent(String sourceGroup, String targetGroup);
 

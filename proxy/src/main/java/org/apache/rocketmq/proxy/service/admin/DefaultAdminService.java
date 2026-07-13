@@ -18,9 +18,11 @@
 package org.apache.rocketmq.proxy.service.admin;
 
 import java.time.Duration;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
 import org.apache.rocketmq.common.MixAll;
@@ -43,6 +45,7 @@ import org.apache.rocketmq.remoting.protocol.body.SubscriptionGroupWrapper;
 
 public class DefaultAdminService implements AdminService {
     private static final Logger log = LoggerFactory.getLogger(LoggerName.PROXY_LOGGER_NAME);
+    private static final long BROKER_RPC_TIMEOUT_MS = Duration.ofSeconds(3).toMillis();
     private final MQClientAPIFactory mqClientAPIFactory;
 
     /** Thin broker-level ops used for subscription group management; injectable for testing. */
@@ -203,19 +206,23 @@ public class DefaultAdminService implements AdminService {
             return false;
         }
 
-        // Pass 1: locate the source group config on any master that hosts it.
+        // Single pass: fetch each master's full table once, find source config, then create where needed.
+        Map<String, SubscriptionGroupWrapper> tableByAddr = new HashMap<>();
         SubscriptionGroupConfig sourceConfig = null;
         for (String brokerAddr : masterBrokerAddresses) {
             try {
                 SubscriptionGroupWrapper wrapper = brokerSubscriptionOps.getAllSubscriptionGroup(
-                    brokerAddr, Duration.ofSeconds(3).toMillis());
+                    brokerAddr, BROKER_RPC_TIMEOUT_MS);
                 if (wrapper == null || wrapper.getSubscriptionGroupTable() == null) {
+                    log.warn("traffic-label admin: empty subscription group table from broker {}.", brokerAddr);
                     continue;
                 }
-                SubscriptionGroupConfig candidate = wrapper.getSubscriptionGroupTable().get(sourceGroup);
-                if (candidate != null) {
-                    sourceConfig = candidate;
-                    break;
+                tableByAddr.put(brokerAddr, wrapper);
+                if (sourceConfig == null) {
+                    SubscriptionGroupConfig candidate = wrapper.getSubscriptionGroupTable().get(sourceGroup);
+                    if (candidate != null) {
+                        sourceConfig = candidate;
+                    }
                 }
             } catch (Exception e) {
                 log.error("traffic-label admin: read subscription groups from broker {} failed.", brokerAddr, e);
@@ -228,19 +235,15 @@ public class DefaultAdminService implements AdminService {
             return false;
         }
 
-        // Pass 2: create the target group on every master that does not already have it.
         boolean complete = true;
         for (String brokerAddr : masterBrokerAddresses) {
+            SubscriptionGroupWrapper wrapper = tableByAddr.get(brokerAddr);
+            if (wrapper != null && wrapper.getSubscriptionGroupTable().containsKey(targetGroup)) {
+                continue;
+            }
             try {
-                SubscriptionGroupWrapper wrapper = brokerSubscriptionOps.getAllSubscriptionGroup(
-                    brokerAddr, Duration.ofSeconds(3).toMillis());
-                if (wrapper != null && wrapper.getSubscriptionGroupTable() != null
-                    && wrapper.getSubscriptionGroupTable().containsKey(targetGroup)) {
-                    continue;
-                }
-
                 brokerSubscriptionOps.createSubscriptionGroup(brokerAddr,
-                    copySubscriptionGroupConfig(sourceConfig, targetGroup), Duration.ofSeconds(3).toMillis());
+                    copySubscriptionGroupConfig(sourceConfig, targetGroup), BROKER_RPC_TIMEOUT_MS);
             } catch (Exception e) {
                 complete = false;
                 log.error("traffic-label admin: clone subscription group {} to {} on broker {} failed.",
