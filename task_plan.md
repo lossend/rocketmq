@@ -32,13 +32,13 @@ Three components: LabelRoutingResolver (stateless), TrafficLabelRouter (single f
 
 | # | Task | Status | Owner |
 |---|------|--------|-------|
-| 12a | DefaultAdminService.cloneSubscriptionGroupIfAbsent → cluster-wide (source once, create on ALL masters) | in_progress | agent-admin |
-| 12b | MetadataService.invalidateSubscriptionGroupConfig + ClusterMetadataService/LocalMetadataService impls | in_progress | agent-meta |
-| 12c | LabelGroupBootstrapper holds MetadataService; invalidates cache after successful ensure | in_progress | agent-meta |
-| 12d | TrafficLabelRouter.resolveGray safety-net (cache-gated ensure on receive path) | in_progress | agent-meta |
-| 12e | DefaultGrpcMessagingActivity wiring (pass MetadataService to bootstrapper and router) | in_progress | agent-meta |
-| 12f | Tests: DefaultAdminServiceTrafficLabelTest updated for cluster-wide semantics | in_progress | agent-admin |
-| 12g | Tests: LabelGroupBootstrapperTest + TrafficLabelRouterTest extended for cache invalidation and safety net | in_progress | agent-meta |
+| 12a | DefaultAdminService.cloneSubscriptionGroupIfAbsent → cluster-wide (source once, create on ALL masters) | complete | agent-admin |
+| 12b | MetadataService.invalidateSubscriptionGroupConfig + ClusterMetadataService/LocalMetadataService impls | complete | agent-meta |
+| 12c | LabelGroupBootstrapper holds MetadataService; invalidates cache after successful ensure | complete | agent-meta |
+| 12d | TrafficLabelRouter.resolveGray safety-net (cache-gated ensure on receive path) | complete | agent-meta |
+| 12e | DefaultGrpcMessagingActivity wiring (pass MetadataService to bootstrapper and router) | complete | agent-meta |
+| 12f | Tests: DefaultAdminServiceTrafficLabelTest updated for cluster-wide semantics | complete | agent-admin |
+| 12g | Tests: LabelGroupBootstrapperTest + TrafficLabelRouterTest extended for cache invalidation and safety net | complete | agent-meta |
 
 ## Errors Encountered
 | Error | Attempt | Resolution |
