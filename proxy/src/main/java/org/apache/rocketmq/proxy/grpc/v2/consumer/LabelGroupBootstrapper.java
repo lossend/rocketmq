@@ -17,51 +17,59 @@
 
 package org.apache.rocketmq.proxy.grpc.v2.consumer;
 
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import org.apache.rocketmq.proxy.service.admin.AdminService;
-import org.apache.rocketmq.remoting.protocol.subscription.SubscriptionGroupConfig;
+import org.apache.rocketmq.proxy.service.metadata.MetadataService;
 
 /**
- * Lazily creates {@code G%<label>} subscription groups on first use and caches successful creations
- * to avoid redundant broker calls on subsequent requests.
+ * Creates {@code G%<label>} subscription groups from their source group on the exact masters that
+ * contain that source group.
  *
- * <p>A creation failure (when {@link AdminService#createSubscriptionGroup} returns {@code false})
- * is not cached, so the next call for the same group will retry the creation.
+ * <p>The broker topology and source-group distribution are rechecked for every registration. This
+ * lets a later registration repair a deleted gray group or cover a newly added source broker.
  */
 public class LabelGroupBootstrapper {
 
     private final AdminService adminService;
-    private final Set<String> createdGroups = ConcurrentHashMap.newKeySet();
+    private final MetadataService metadataService;
 
     /**
-     * Constructs a bootstrapper backed by the given {@link AdminService}.
+     * Constructs a bootstrapper backed by the given {@link AdminService} without cache invalidation.
      *
      * @param adminService the admin service used to create subscription groups on brokers
      */
     public LabelGroupBootstrapper(AdminService adminService) {
-        this.adminService = adminService;
+        this(adminService, null);
     }
 
     /**
-     * Ensures that the specified subscription group exists on the brokers serving the given topic.
-     * If the group was already successfully created in a previous call it is returned from the
-     * in-memory cache and no broker call is made.  If the previous attempt failed (or this is the
-     * first call) the creation is attempted via {@link AdminService#createSubscriptionGroup};
-     * only a successful result is cached.
+     * Constructs a bootstrapper backed by the given {@link AdminService} that also invalidates the
+     * subscription group config cache after a group is successfully created.
      *
-     * @param sampleTopic    topic used to discover the target brokers via NameServer route lookup
-     * @param effectiveGroup subscription group name (e.g. {@code G%gray1}) to create/ensure
+     * @param adminService    the admin service used to create subscription groups on brokers
+     * @param metadataService the metadata service whose subscription group cache is invalidated
+     *                        after a successful create; may be {@code null} to disable invalidation
      */
-    public void ensureGroup(String sampleTopic, String effectiveGroup) {
-        if (createdGroups.contains(effectiveGroup)) {
-            return;
+    public LabelGroupBootstrapper(AdminService adminService, MetadataService metadataService) {
+        this.adminService = adminService;
+        this.metadataService = metadataService;
+    }
+
+    /**
+     * Ensures that the gray group mirrors the original group's Master-broker distribution.
+     *
+     * <p>When a group is newly created and a {@link MetadataService} was supplied, the stale
+     * (possibly negative) cache entry for the effective group is invalidated so that the next
+     * lookup reflects the freshly created group.
+     *
+     * @param originGroup    original subscription group name
+     * @param effectiveGroup gray subscription group name (e.g. {@code G%gray1}) to create/ensure
+     * @return {@code true} when every required Master has a gray group and the source exists
+     */
+    public boolean ensureGrayGroupFromOrigin(String originGroup, String effectiveGroup) {
+        boolean created = adminService.cloneSubscriptionGroupIfAbsent(originGroup, effectiveGroup);
+        if (created && metadataService != null) {
+            metadataService.invalidateSubscriptionGroupConfig(effectiveGroup);
         }
-        SubscriptionGroupConfig config = new SubscriptionGroupConfig();
-        config.setGroupName(effectiveGroup);
-        boolean ok = adminService.createSubscriptionGroup(sampleTopic, config);
-        if (ok) {
-            createdGroups.add(effectiveGroup);
-        }
+        return created;
     }
 }

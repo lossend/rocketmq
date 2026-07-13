@@ -26,6 +26,7 @@ import java.util.UUID;
 import org.apache.rocketmq.broker.client.ClientChannelInfo;
 import org.apache.rocketmq.proxy.common.ContextVariable;
 import org.apache.rocketmq.proxy.common.ProxyContext;
+import org.apache.rocketmq.proxy.common.ProxyException;
 import org.apache.rocketmq.proxy.config.ConfigurationManager;
 import org.apache.rocketmq.proxy.grpc.v2.channel.GrpcChannelManager;
 import org.apache.rocketmq.proxy.grpc.v2.common.GrpcClientSettingsManager;
@@ -43,10 +44,12 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.ArgumentCaptor.forClass;
 import org.mockito.ArgumentCaptor;
@@ -87,18 +90,26 @@ public class ClientActivityTrafficLabelTest {
 
     /** Hand-written bootstrapper stub — avoids AdminService interactions. */
     private static class NoopBootstrapper extends LabelGroupBootstrapper {
+        private String ensuredOriginGroup;
+        private String ensuredGroup;
+        private boolean ensureResult = true;
+
         NoopBootstrapper() {
             super(mock(AdminService.class));
         }
 
         @Override
-        public void ensureGroup(String topic, String group) {
+        public boolean ensureGrayGroupFromOrigin(String originGroup, String group) {
+            ensuredOriginGroup = originGroup;
+            ensuredGroup = group;
+            return ensureResult;
         }
     }
 
     private MessagingProcessor messagingProcessor;
     private SettingsManagerStub settingsManager;
     private ClientActivity clientActivity;
+    private NoopBootstrapper bootstrapper;
 
     @BeforeClass
     public static void initConfig() throws Exception {
@@ -119,8 +130,9 @@ public class ClientActivityTrafficLabelTest {
 
         clientActivity = new ClientActivity(messagingProcessor, settingsManager, channelManager);
 
+        bootstrapper = new NoopBootstrapper();
         TrafficLabelRouter router = new TrafficLabelRouter(
-            new LabelRoutingResolver(), new NoopBootstrapper(),
+            new LabelRoutingResolver(), bootstrapper,
             new TopicClientInfoIndex(), new StandardFilterAssembler());
         clientActivity.setTrafficLabelRouter(router);
 
@@ -141,6 +153,17 @@ public class ClientActivityTrafficLabelTest {
     }
 
     @Test
+    public void registerConsumer_switch_on_gray_header_bootstraps_virtual_group_from_origin_group() throws Exception {
+        ConfigurationManager.getProxyConfig().setEnableTrafficLabelRouting(true);
+
+        clientActivity.registerConsumer(grayCtx(), CONSUMER_GROUP, ClientType.SIMPLE_CONSUMER,
+            Collections.emptyList(), true);
+
+        assertThat(bootstrapper.ensuredOriginGroup).isEqualTo(CONSUMER_GROUP);
+        assertThat(bootstrapper.ensuredGroup).isEqualTo(GRAY_GROUP);
+    }
+
+    @Test
     public void registerConsumer_switch_on_standard_keeps_origin_group() throws Exception {
         ConfigurationManager.getProxyConfig().setEnableTrafficLabelRouting(true);
 
@@ -151,6 +174,20 @@ public class ClientActivityTrafficLabelTest {
         verify(messagingProcessor).registerConsumer(
             any(), groupCaptor.capture(), any(), any(), any(), any(), any(), anyBoolean());
         assertThat(groupCaptor.getValue()).isEqualTo(CONSUMER_GROUP);
+    }
+
+    @Test
+    public void registerConsumer_stops_before_broker_registration_when_gray_group_copy_fails() {
+        ConfigurationManager.getProxyConfig().setEnableTrafficLabelRouting(true);
+        bootstrapper.ensureResult = false;
+
+        assertThatThrownBy(() -> clientActivity.registerConsumer(grayCtx(), CONSUMER_GROUP,
+            ClientType.SIMPLE_CONSUMER, Collections.emptyList(), true))
+            .isInstanceOf(ProxyException.class)
+            .hasMessageContaining(GRAY_GROUP);
+
+        verify(messagingProcessor, never()).registerConsumer(
+            any(), any(), any(), any(), any(), any(), any(), anyBoolean());
     }
 
     @Test

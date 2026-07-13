@@ -171,7 +171,7 @@ public class ClientActivity extends AbstractMessagingActivity {
                     validateConsumerGroup(request.getGroup());
                     String consumerGroup = request.getGroup().getName();
                     if (trafficLabelRouter != null) {
-                        consumerGroup = trafficLabelRouter.rewriteRegistrationGroup(ctx, consumerGroup);
+                        consumerGroup = trafficLabelRouter.rewriteGroup(ctx, consumerGroup);
                     }
                     GrpcClientChannel channel = this.grpcChannelManager.removeChannel(clientId);
                     if (channel != null) {

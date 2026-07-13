@@ -31,6 +31,15 @@ public interface MetadataService {
 
     SubscriptionGroupConfig getSubscriptionGroupConfig(ProxyContext ctx, String group);
 
+    /**
+     * Removes any cached entry for the given group so the next lookup fetches a fresh value.
+     * Callers should invoke this after explicitly creating a subscription group to avoid a stale
+     * negative cache entry masking the new group.
+     *
+     * @param group the consumer group name whose cache entry to invalidate
+     */
+    void invalidateSubscriptionGroupConfig(String group);
+
     CompletableFuture<User> getUser(ProxyContext ctx, String username);
 
     CompletableFuture<Acl> getAcl(ProxyContext ctx, Subject subject);

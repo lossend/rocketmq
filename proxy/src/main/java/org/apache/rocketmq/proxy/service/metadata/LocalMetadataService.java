@@ -48,6 +48,17 @@ public class LocalMetadataService implements MetadataService {
         return this.brokerController.getSubscriptionGroupManager().getSubscriptionGroupTable().get(group);
     }
 
+    /**
+     * No-op: {@code LocalMetadataService} reads subscription group config directly from the broker
+     * with no cache, so there is nothing to invalidate.
+     *
+     * @param group the consumer group name (ignored)
+     */
+    @Override
+    public void invalidateSubscriptionGroupConfig(String group) {
+        // LocalMetadataService reads directly from the broker with no cache; no-op.
+    }
+
     @Override
     public CompletableFuture<User> getUser(ProxyContext ctx, String username) {
         return this.brokerController.getAuthenticationMetadataManager().getUser(username);

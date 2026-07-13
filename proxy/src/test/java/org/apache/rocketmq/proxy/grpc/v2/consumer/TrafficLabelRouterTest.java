@@ -24,12 +24,17 @@ import org.apache.rocketmq.common.filter.ExpressionType;
 import org.apache.rocketmq.proxy.common.ProxyContext;
 import org.apache.rocketmq.proxy.config.ConfigurationManager;
 import org.apache.rocketmq.proxy.service.admin.AdminService;
+import org.apache.rocketmq.proxy.service.metadata.MetadataService;
+import org.apache.rocketmq.remoting.protocol.subscription.SubscriptionGroupConfig;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Unit tests for {@link TrafficLabelRouter}.
@@ -42,7 +47,7 @@ public class TrafficLabelRouterTest {
 
     /**
      * Hand-written spy for {@link LabelGroupBootstrapper}
-     * that records every (topic, group) pair passed to {@code ensureGroup}.
+     * that records every (originGroup, grayGroup) pair passed to the registration bootstrapper.
      */
     private static class BootstrapperSpy extends LabelGroupBootstrapper {
 
@@ -53,8 +58,9 @@ public class TrafficLabelRouterTest {
         }
 
         @Override
-        public void ensureGroup(String topic, String effectiveGroup) {
-            calls.add(new String[] {topic, effectiveGroup});
+        public boolean ensureGrayGroupFromOrigin(String originGroup, String effectiveGroup) {
+            calls.add(new String[] {originGroup, effectiveGroup});
+            return true;
         }
 
         boolean neverCalled() {
@@ -71,6 +77,7 @@ public class TrafficLabelRouterTest {
     private BootstrapperSpy bootstrapper;
     private TopicClientInfoIndex index;
     private StandardFilterAssembler assembler;
+    private MetadataService metadataService;
     private TrafficLabelRouter router;
 
     @BeforeClass
@@ -84,7 +91,10 @@ public class TrafficLabelRouterTest {
         bootstrapper = new BootstrapperSpy();
         index = new TopicClientInfoIndex();
         assembler = new StandardFilterAssembler();
-        router = new TrafficLabelRouter(new LabelRoutingResolver(), bootstrapper, index, assembler);
+        metadataService = mock(MetadataService.class);
+        // Default: group not in cache (absent)
+        when(metadataService.getSubscriptionGroupConfig(any(ProxyContext.class), any())).thenReturn(null);
+        router = new TrafficLabelRouter(new LabelRoutingResolver(), bootstrapper, index, assembler, metadataService);
         ConfigurationManager.getProxyConfig().setEnableTrafficLabelRouting(false);
         ConfigurationManager.getProxyConfig().setEnableTrafficLabelRoutingLog(false);
     }
@@ -100,13 +110,13 @@ public class TrafficLabelRouterTest {
     }
 
     @Test
-    public void enabled_gray_rewrites_group_and_creates_group() {
+    public void enabled_gray_rewrites_group_without_creating_group_on_receive_or_ack_paths() {
         ConfigurationManager.getProxyConfig().setEnableTrafficLabelRouting(true);
         ProxyContext ctx = ProxyContext.create();
         ctx.withVal(TrafficLabel.PROPERTY_KEY, "gray1");
 
         assertThat(router.rewriteGroup(ctx, "test-topic", "G")).isEqualTo("G%gray1");
-        assertThat(bootstrapper.calledOnceWith("test-topic", "G%gray1")).isTrue();
+        assertThat(bootstrapper.neverCalled()).isTrue();
     }
 
     @Test
@@ -193,7 +203,7 @@ public class TrafficLabelRouterTest {
     }
 
     @Test
-    public void gray_receive_with_active_index_is_unchanged_and_bootstraps() {
+    public void gray_receive_with_active_index_is_unchanged_and_does_not_bootstrap() {
         ConfigurationManager.getProxyConfig().setEnableTrafficLabelRouting(true);
         // Even with another gray label in the index, gray consumer uses its own resolver path.
         index.handle(ConsumerGroupEvent.CLIENT_REGISTER, "G%gray2",
@@ -207,11 +217,39 @@ public class TrafficLabelRouterTest {
 
         assertThat(d.getEffectiveGroup()).isEqualTo("G%gray1");
         assertThat(d.getSql92()).isEqualTo("__SERVICE_TAG__ = 'gray1'");
-        assertThat(bootstrapper.calledOnceWith("T", "G%gray1")).isTrue();
+        // With the safety net, an absent gray group in the metadata cache triggers lazy provisioning.
+        assertThat(bootstrapper.calledOnceWith("G", "G%gray1")).isTrue();
     }
 
     @Test
-    public void rewriteRegistrationGroup_gray_header_returns_rewritten_group_no_bootstrap() {
+    public void resolveForReceive_gray_triggers_safety_net_when_group_absent_from_cache() {
+        ConfigurationManager.getProxyConfig().setEnableTrafficLabelRouting(true);
+        ProxyContext ctx = ProxyContext.create();
+        ctx.withVal(TrafficLabel.PROPERTY_KEY, "gray1");
+        when(metadataService.getSubscriptionGroupConfig(any(ProxyContext.class), eq("G%gray1")))
+            .thenReturn(null);
+
+        router.resolveForReceive(ctx, "T", "G", null, ExpressionType.TAG);
+
+        assertThat(bootstrapper.calledOnceWith("G", "G%gray1")).isTrue();
+    }
+
+    @Test
+    public void resolveForReceive_gray_skips_safety_net_when_group_present_in_cache() {
+        ConfigurationManager.getProxyConfig().setEnableTrafficLabelRouting(true);
+        ProxyContext ctx = ProxyContext.create();
+        ctx.withVal(TrafficLabel.PROPERTY_KEY, "gray1");
+        SubscriptionGroupConfig existing = new SubscriptionGroupConfig();
+        when(metadataService.getSubscriptionGroupConfig(any(ProxyContext.class), eq("G%gray1")))
+            .thenReturn(existing);
+
+        router.resolveForReceive(ctx, "T", "G", null, ExpressionType.TAG);
+
+        assertThat(bootstrapper.neverCalled()).isTrue();
+    }
+
+    @Test
+    public void rewriteRegistrationGroup_gray_header_creates_group_from_origin_distribution() {
         ConfigurationManager.getProxyConfig().setEnableTrafficLabelRouting(true);
         ProxyContext grayCtx = ProxyContext.create();
         grayCtx.withVal(TrafficLabel.PROPERTY_KEY, "gray1");
@@ -220,6 +258,6 @@ public class TrafficLabelRouterTest {
 
         assertThat(router.rewriteRegistrationGroup(grayCtx, "G")).isEqualTo("G%gray1");
         assertThat(router.rewriteRegistrationGroup(stdCtx, "G")).isEqualTo("G");
-        assertThat(bootstrapper.neverCalled()).isTrue();
+        assertThat(bootstrapper.calledOnceWith("G", "G%gray1")).isTrue();
     }
 }

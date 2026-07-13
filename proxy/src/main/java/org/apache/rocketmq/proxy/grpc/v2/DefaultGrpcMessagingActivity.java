@@ -65,6 +65,7 @@ import org.apache.rocketmq.proxy.grpc.v2.producer.SendMessageActivity;
 import org.apache.rocketmq.proxy.grpc.v2.route.RouteActivity;
 import org.apache.rocketmq.proxy.grpc.v2.transaction.EndTransactionActivity;
 import org.apache.rocketmq.proxy.processor.MessagingProcessor;
+import org.apache.rocketmq.proxy.service.metadata.MetadataService;
 
 public class DefaultGrpcMessagingActivity extends AbstractStartAndShutdown implements GrpcMessagingActivity {
     private static final Logger log = LoggerFactory.getLogger(LoggerName.PROXY_LOGGER_NAME);
@@ -100,11 +101,14 @@ public class DefaultGrpcMessagingActivity extends AbstractStartAndShutdown imple
         this.clientActivity = new ClientActivity(messagingProcessor, grpcClientSettingsManager, grpcChannelManager);
 
         // Build and inject traffic-label router (master switch defaults OFF — zero behavior change today)
-        LabelGroupBootstrapper bootstrapper = new LabelGroupBootstrapper(messagingProcessor.getAdminService());
+        MetadataService metadataService = messagingProcessor.getMetadataService();
+        LabelGroupBootstrapper bootstrapper = new LabelGroupBootstrapper(
+            messagingProcessor.getAdminService(), metadataService);
         TopicClientInfoIndex topicClientInfoIndex = new TopicClientInfoIndex();
         messagingProcessor.registerConsumerListener(topicClientInfoIndex);
         TrafficLabelRouter trafficLabelRouter = new TrafficLabelRouter(
-            new LabelRoutingResolver(), bootstrapper, topicClientInfoIndex, new StandardFilterAssembler());
+            new LabelRoutingResolver(), bootstrapper, topicClientInfoIndex,
+            new StandardFilterAssembler(), metadataService);
         this.receiveMessageActivity.setTrafficLabelRouter(trafficLabelRouter);
         this.ackMessageActivity.setTrafficLabelRouter(trafficLabelRouter);
         this.changeInvisibleDurationActivity.setTrafficLabelRouter(trafficLabelRouter);

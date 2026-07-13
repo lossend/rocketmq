@@ -41,6 +41,17 @@ public interface AdminService {
     boolean createSubscriptionGroup(String sampleTopic, SubscriptionGroupConfig config);
 
     /**
+     * Clones a source subscription group to a target group on exactly the broker masters where
+     * the source group exists. Existing target groups are left untouched.
+     *
+     * @param sourceGroup source consumer group name
+     * @param targetGroup target consumer group name
+     * @return {@code true} if at least one source group was found and every required operation
+     *         completed successfully
+     */
+    boolean cloneSubscriptionGroupIfAbsent(String sourceGroup, String targetGroup);
+
+    /**
      * Deletes a subscription group on all broker masters that serve the given sample topic.
      *
      * @param sampleTopic topic used to discover the target brokers via NameServer route lookup

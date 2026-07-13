@@ -21,7 +21,10 @@ import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.logging.org.slf4j.Logger;
 import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
 import org.apache.rocketmq.proxy.common.ProxyContext;
+import org.apache.rocketmq.proxy.common.ProxyException;
+import org.apache.rocketmq.proxy.common.ProxyExceptionCode;
 import org.apache.rocketmq.proxy.config.ConfigurationManager;
+import org.apache.rocketmq.proxy.service.metadata.MetadataService;
 
 /**
  * Facade for traffic-label-based consumer group routing.
@@ -49,6 +52,7 @@ public class TrafficLabelRouter {
     private final LabelGroupBootstrapper bootstrapper;
     private final TopicClientInfoIndex index;
     private final StandardFilterAssembler assembler;
+    private final MetadataService metadataService;
 
     /**
      * Creates a router without a dynamic index (standard path returns {@code null}).
@@ -58,7 +62,7 @@ public class TrafficLabelRouter {
      * @param bootstrapper ensures a virtual consumer group and its subscriptions exist before use
      */
     public TrafficLabelRouter(LabelRoutingResolver resolver, LabelGroupBootstrapper bootstrapper) {
-        this(resolver, bootstrapper, null, null);
+        this(resolver, bootstrapper, null, null, null);
     }
 
     /**
@@ -71,10 +75,27 @@ public class TrafficLabelRouter {
      */
     public TrafficLabelRouter(LabelRoutingResolver resolver, LabelGroupBootstrapper bootstrapper,
         TopicClientInfoIndex index, StandardFilterAssembler assembler) {
+        this(resolver, bootstrapper, index, assembler, null);
+    }
+
+    /**
+     * Creates a fully-wired router with dynamic standard-side label filtering and a consume-path
+     * safety net backed by {@link MetadataService}.
+     *
+     * @param resolver        resolves a (group, label) pair into a {@link LabelRoutingResolver.RoutingDecision}
+     * @param bootstrapper    ensures a virtual consumer group and its subscriptions exist before use
+     * @param index           tracks which gray labels are currently online per (topic, logicalGroup)
+     * @param assembler       assembles the dynamic SQL-92 exclusion filter for standard consumers
+     * @param metadataService looks up whether the gray group is present in the metadata cache to gate
+     *                        lazy re-provisioning; may be {@code null} to disable the safety net
+     */
+    public TrafficLabelRouter(LabelRoutingResolver resolver, LabelGroupBootstrapper bootstrapper,
+        TopicClientInfoIndex index, StandardFilterAssembler assembler, MetadataService metadataService) {
         this.resolver = resolver;
         this.bootstrapper = bootstrapper;
         this.index = index;
         this.assembler = assembler;
+        this.metadataService = metadataService;
     }
 
     // -------------------------------------------------------------------------
@@ -85,49 +106,51 @@ public class TrafficLabelRouter {
      * Rewrites the consumer group name for gray traffic on the receive/ack paths.
      *
      * <p>When the master switch is disabled or the context carries no gray label,
-     * {@code originGroup} is returned unchanged and the bootstrapper is never called.
+     * {@code originGroup} is returned unchanged. Group creation is intentionally restricted to
+     * the registration path.
      *
      * @param ctx         proxy context holding the optional traffic label
-     * @param topic       topic being consumed (used for group bootstrap)
+     * @param topic       topic being consumed
      * @param originGroup the original consumer group name supplied by the client
      * @return the effective group name — either the original or the virtual gray group
      */
     public String rewriteGroup(ProxyContext ctx, String topic, String originGroup) {
+        return rewriteGroup(ctx, originGroup);
+    }
+
+    /**
+     * Rewrites the consumer group name without registration side effects.
+     *
+     * @param ctx proxy context holding the optional traffic label
+     * @param group original consumer group name
+     * @return rewritten group or the original when no rewrite applies
+     */
+    public String rewriteGroup(ProxyContext ctx, String group) {
         if (!isEnabled()) {
-            return originGroup;
+            return group;
         }
         String label = TrafficLabelExtractor.extract(ctx);
         if (!TrafficLabel.isGray(label)) {
-            return originGroup;
+            return group;
         }
-        String effectiveGroup = TrafficLabel.effectiveGroup(originGroup, label);
-        bootstrapper.ensureGroup(topic, effectiveGroup);
+        String effectiveGroup = TrafficLabel.effectiveGroup(group, label);
         if (isLogEnabled()) {
-            log.info("traffic-label rewrite group {} -> {} (label={})", originGroup, effectiveGroup, label);
+            log.info("traffic-label rewrite group {} -> {} (label={})", group, effectiveGroup, label);
         }
         return effectiveGroup;
     }
 
     /**
-     * Rewrites the consumer group name for gray traffic at registration time.
-     *
-     * <p>Unlike {@link #rewriteGroup}, this method does <em>not</em> call the bootstrapper —
-     * the broker creates the virtual group when it first receives the rewritten registration.
-     * Standard consumers are returned unchanged.
-     *
-     * @param ctx   proxy context holding the optional traffic label
-     * @param group the original consumer group name from the registration request
-     * @return the rewritten group (e.g. {@code "G%gray1"}) or the original when no rewrite applies
+     * Rewrites a registration group and creates the gray group before broker registration.
      */
     public String rewriteRegistrationGroup(ProxyContext ctx, String group) {
-        if (!isEnabled()) {
-            return group;
+        String effectiveGroup = rewriteGroup(ctx, group);
+        if (!effectiveGroup.equals(group)
+            && !bootstrapper.ensureGrayGroupFromOrigin(group, effectiveGroup)) {
+            throw new ProxyException(ProxyExceptionCode.INTERNAL_SERVER_ERROR,
+                "failed to create gray consumer group " + effectiveGroup + " from " + group);
         }
-        String label = TrafficLabelExtractor.extract(ctx);
-        if (!TrafficLabel.isGray(label)) {
-            return group;
-        }
-        return TrafficLabel.effectiveGroup(group, label);
+        return effectiveGroup;
     }
 
     /**
@@ -135,8 +158,7 @@ public class TrafficLabelRouter {
      *
      * <ul>
      *   <li>Gray consumers: routes to the virtual group {@code originGroup%label} and appends a
-     *       label-match condition to the origin filter. Bootstrap is called to ensure the group
-     *       exists.</li>
+     *       label-match condition to the origin filter.</li>
      *   <li>Standard consumers: keeps the origin group and appends a dynamic exclusion clause
      *       assembled from the set of currently-online gray labels. Returns {@code null} when no
      *       label filter is necessary (index empty, no origin clause).</li>
@@ -146,7 +168,7 @@ public class TrafficLabelRouter {
      * through to standard (non-label-aware) receive logic without branching.
      *
      * @param ctx                  proxy context holding the optional traffic label
-     * @param topic                topic being consumed (used for group bootstrap on the gray path)
+     * @param topic                topic being consumed
      * @param originGroup          the original consumer group name supplied by the client
      * @param originExpression     the original filter expression from the client (TAG string or
      *                             SQL-92), may be {@code null}
@@ -162,7 +184,7 @@ public class TrafficLabelRouter {
         }
         String label = TrafficLabelExtractor.extract(ctx);
         if (TrafficLabel.isGray(label)) {
-            return resolveGray(topic, originGroup, label, originExpression, originExpressionType);
+            return resolveGray(ctx, originGroup, label, originExpression, originExpressionType);
         }
         return resolveStandard(topic, originGroup, originExpression, originExpressionType);
     }
@@ -171,11 +193,28 @@ public class TrafficLabelRouter {
     // Private helpers
     // -------------------------------------------------------------------------
 
-    private LabelRoutingResolver.RoutingDecision resolveGray(String topic, String originGroup,
+    /**
+     * Resolves the gray routing decision, lazily re-provisioning the gray group when it is missing
+     * from the metadata cache (the consume-path safety net) before delegating to the resolver.
+     *
+     * @param ctx                  proxy context used for the metadata lookup
+     * @param originGroup          the original consumer group name supplied by the client
+     * @param label                the gray traffic label
+     * @param originExpression     the original filter expression, may be {@code null}
+     * @param originExpressionType the expression type, may be {@code null} (treated as TAG)
+     * @return the gray {@link LabelRoutingResolver.RoutingDecision}
+     */
+    private LabelRoutingResolver.RoutingDecision resolveGray(ProxyContext ctx, String originGroup,
         String label, String originExpression, String originExpressionType) {
+        String effectiveGroup = TrafficLabel.effectiveGroup(originGroup, label);
+        // Cache-gated safety net: if the gray group is absent from the metadata cache,
+        // attempt lazy provisioning (e.g. after cleaner deletion or a transient failure).
+        if (metadataService != null
+                && metadataService.getSubscriptionGroupConfig(ctx, effectiveGroup) == null) {
+            bootstrapper.ensureGrayGroupFromOrigin(originGroup, effectiveGroup);
+        }
         LabelRoutingResolver.RoutingDecision decision =
             resolver.resolve(originGroup, label, originExpression, originExpressionType);
-        bootstrapper.ensureGroup(topic, decision.getEffectiveGroup());
         if (isLogEnabled()) {
             log.info("traffic-label receive group {} -> {} sql92={}",
                 originGroup, decision.getEffectiveGroup(), decision.getSql92());

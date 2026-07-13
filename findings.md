@@ -16,6 +16,16 @@
 - Label transport: gRPC metadata header `__RMQ_TRAFFIC_LABEL` on ProxyContext
 - G%label naming: `G` is origin group, `%` is separator, `gray1` is label → `G%gray1`
 
+## 2026-07-13 — Gray registration bootstrap
+
+- `ClientActivity.registerConsumer` rewrites a gray group before `ClientProcessor.registerConsumer` validates it.
+- `ClientProcessor.validateLiteMode` queries the broker subscription-group configuration before the consumer is registered.
+- Broker configuration in sg-testing has `autoCreateSubscriptionGroup=false`; a new virtual group therefore fails this pre-registration query.
+- The original topic-based bootstrap is insufficient: the source group can exist on only a subset of Master brokers and can have different configuration on each.
+- The replacement must discover the configured cluster's Master brokers, inspect each broker's subscription-group table, and create the gray group only on the brokers that contain the original group.
+- `MQClientAPIImpl.getAllSubscriptionGroup(brokerAddr, timeout)` supplies the per-broker table without treating a normal absence as `CODE: 26`; use it to determine both source and gray-group existence.
+- A JSON round-trip through `RemotingSerializable` gives `SubscriptionGroupConfig` a deep copy, including retry policy, attributes, and subscription data.
+
 ## SQL92 Merge Rule
 - Gray: `__RMQ_TRAFFIC_LABEL = 'gray1'`
 - Standard: `__RMQ_TRAFFIC_LABEL IS NULL OR __RMQ_TRAFFIC_LABEL = 'STANDARD'`

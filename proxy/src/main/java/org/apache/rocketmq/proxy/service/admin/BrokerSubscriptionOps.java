@@ -17,6 +17,7 @@
 package org.apache.rocketmq.proxy.service.admin;
 
 import org.apache.rocketmq.remoting.protocol.subscription.SubscriptionGroupConfig;
+import org.apache.rocketmq.remoting.protocol.body.SubscriptionGroupWrapper;
 
 /**
  * Thin broker-level operations for subscription-group management.
@@ -27,6 +28,15 @@ import org.apache.rocketmq.remoting.protocol.subscription.SubscriptionGroupConfi
  * {@code MQClientAPIExt}.
  */
 interface BrokerSubscriptionOps {
+
+    /**
+     * Returns all subscription-group configurations from one broker master.
+     *
+     * @param brokerAddr broker master address
+     * @param timeoutMillis RPC timeout in milliseconds
+     * @throws Exception on remoting / broker error
+     */
+    SubscriptionGroupWrapper getAllSubscriptionGroup(String brokerAddr, long timeoutMillis) throws Exception;
 
     /**
      * Creates (or updates) a subscription group on the broker at {@code brokerAddr}.

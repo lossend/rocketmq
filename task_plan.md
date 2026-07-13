@@ -28,6 +28,18 @@ Three components: LabelRoutingResolver (stateless), TrafficLabelRouter (single f
 ## Tasks 1-7 are independent-ish (build up components bottom-up)
 ## Tasks 8-11 depend on 1-7 being complete
 
+## Task 12 (Gray Group Bootstrap Hardening — Bug Fix)
+
+| # | Task | Status | Owner |
+|---|------|--------|-------|
+| 12a | DefaultAdminService.cloneSubscriptionGroupIfAbsent → cluster-wide (source once, create on ALL masters) | in_progress | agent-admin |
+| 12b | MetadataService.invalidateSubscriptionGroupConfig + ClusterMetadataService/LocalMetadataService impls | in_progress | agent-meta |
+| 12c | LabelGroupBootstrapper holds MetadataService; invalidates cache after successful ensure | in_progress | agent-meta |
+| 12d | TrafficLabelRouter.resolveGray safety-net (cache-gated ensure on receive path) | in_progress | agent-meta |
+| 12e | DefaultGrpcMessagingActivity wiring (pass MetadataService to bootstrapper and router) | in_progress | agent-meta |
+| 12f | Tests: DefaultAdminServiceTrafficLabelTest updated for cluster-wide semantics | in_progress | agent-admin |
+| 12g | Tests: LabelGroupBootstrapperTest + TrafficLabelRouterTest extended for cache invalidation and safety net | in_progress | agent-meta |
+
 ## Errors Encountered
 | Error | Attempt | Resolution |
 |-------|---------|------------|

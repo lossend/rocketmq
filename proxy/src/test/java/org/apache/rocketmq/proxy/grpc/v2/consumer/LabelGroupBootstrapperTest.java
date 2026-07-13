@@ -18,14 +18,14 @@
 package org.apache.rocketmq.proxy.grpc.v2.consumer;
 
 import org.apache.rocketmq.proxy.service.admin.AdminService;
-import org.apache.rocketmq.remoting.protocol.subscription.SubscriptionGroupConfig;
+import org.apache.rocketmq.proxy.service.metadata.MetadataService;
 import org.junit.Test;
-import org.mockito.ArgumentCaptor;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -33,40 +33,50 @@ import static org.mockito.Mockito.when;
 public class LabelGroupBootstrapperTest {
 
     @Test
-    public void creates_group_once_then_caches() {
+    public void delegates_gray_group_creation_to_distribution_aware_admin_service() {
         AdminService admin = mock(AdminService.class);
-        when(admin.createSubscriptionGroup(any(), any())).thenReturn(true);
+        when(admin.cloneSubscriptionGroupIfAbsent("G", "G%gray1")).thenReturn(true);
         LabelGroupBootstrapper boot = new LabelGroupBootstrapper(admin);
 
-        boot.ensureGroup("test-topic", "G%gray1");
-        boot.ensureGroup("test-topic", "G%gray1");
+        boolean created = boot.ensureGrayGroupFromOrigin("G", "G%gray1");
 
-        verify(admin, times(1)).createSubscriptionGroup(eq("test-topic"), any());
+        assertThat(created).isTrue();
+        verify(admin, times(1)).cloneSubscriptionGroupIfAbsent(eq("G"), eq("G%gray1"));
     }
 
     @Test
-    public void created_group_name_matches_requested() {
+    public void does_not_cache_failed_distribution_copy() {
         AdminService admin = mock(AdminService.class);
-        when(admin.createSubscriptionGroup(any(), any())).thenReturn(true);
+        when(admin.cloneSubscriptionGroupIfAbsent("G", "G%gray1")).thenReturn(false, true);
         LabelGroupBootstrapper boot = new LabelGroupBootstrapper(admin);
 
-        boot.ensureGroup("test-topic", "G%gray1");
+        assertThat(boot.ensureGrayGroupFromOrigin("G", "G%gray1")).isFalse();
+        assertThat(boot.ensureGrayGroupFromOrigin("G", "G%gray1")).isTrue();
 
-        ArgumentCaptor<SubscriptionGroupConfig> captor =
-            ArgumentCaptor.forClass(SubscriptionGroupConfig.class);
-        verify(admin).createSubscriptionGroup(eq("test-topic"), captor.capture());
-        assertThat(captor.getValue().getGroupName()).isEqualTo("G%gray1");
+        verify(admin, times(2)).cloneSubscriptionGroupIfAbsent(eq("G"), eq("G%gray1"));
     }
 
     @Test
-    public void failed_creation_is_not_cached_and_retries() {
+    public void invalidates_cache_after_successful_ensure() {
         AdminService admin = mock(AdminService.class);
-        when(admin.createSubscriptionGroup(any(), any())).thenReturn(false, true);
-        LabelGroupBootstrapper boot = new LabelGroupBootstrapper(admin);
+        MetadataService metadata = mock(MetadataService.class);
+        when(admin.cloneSubscriptionGroupIfAbsent("G", "G%gray1")).thenReturn(true);
+        LabelGroupBootstrapper boot = new LabelGroupBootstrapper(admin, metadata);
 
-        boot.ensureGroup("test-topic", "G%gray1");
-        boot.ensureGroup("test-topic", "G%gray1");
+        boot.ensureGrayGroupFromOrigin("G", "G%gray1");
 
-        verify(admin, times(2)).createSubscriptionGroup(eq("test-topic"), any());
+        verify(metadata, times(1)).invalidateSubscriptionGroupConfig(eq("G%gray1"));
+    }
+
+    @Test
+    public void does_not_invalidate_cache_when_ensure_fails() {
+        AdminService admin = mock(AdminService.class);
+        MetadataService metadata = mock(MetadataService.class);
+        when(admin.cloneSubscriptionGroupIfAbsent("G", "G%gray1")).thenReturn(false);
+        LabelGroupBootstrapper boot = new LabelGroupBootstrapper(admin, metadata);
+
+        boot.ensureGrayGroupFromOrigin("G", "G%gray1");
+
+        verify(metadata, never()).invalidateSubscriptionGroupConfig(any());
     }
 }

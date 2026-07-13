@@ -19,6 +19,7 @@ package org.apache.rocketmq.proxy.service.admin;
 
 import java.time.Duration;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.function.Function;
@@ -34,7 +35,11 @@ import org.apache.rocketmq.logging.org.slf4j.Logger;
 import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
 import org.apache.rocketmq.client.impl.mqclient.MQClientAPIExt;
 import org.apache.rocketmq.client.impl.mqclient.MQClientAPIFactory;
+import org.apache.rocketmq.proxy.config.ConfigurationManager;
 import org.apache.rocketmq.proxy.service.route.TopicRouteHelper;
+import org.apache.rocketmq.remoting.protocol.RemotingSerializable;
+import org.apache.rocketmq.remoting.protocol.body.ClusterInfo;
+import org.apache.rocketmq.remoting.protocol.body.SubscriptionGroupWrapper;
 
 public class DefaultAdminService implements AdminService {
     private static final Logger log = LoggerFactory.getLogger(LoggerName.PROXY_LOGGER_NAME);
@@ -169,6 +174,83 @@ public class DefaultAdminService implements AdminService {
     }
 
     /**
+     * Clones a subscription group onto <em>all</em> cluster masters, sourcing the configuration from
+     * the first master that already hosts the source group. Because the proxy's per-group config
+     * lookup targets a random cluster master, the gray group must exist on every master so that any
+     * lookup resolves it; otherwise a master that lacks the origin group would answer "No group in
+     * this broker". Looking up the full group table avoids treating a normal absence as a
+     * {@code CODE: 26} broker error.
+     *
+     * @param sourceGroup the existing consumer group whose configuration is copied
+     * @param targetGroup the gray consumer group to create when absent
+     * @return {@code true} only when the source group was found and the target group exists (was
+     *         created or already present) on every cluster master; {@code false} if the source group
+     *         is hosted on no master or any master's create call failed
+     */
+    @Override
+    public boolean cloneSubscriptionGroupIfAbsent(String sourceGroup, String targetGroup) {
+        ClusterInfo clusterInfo;
+        try {
+            clusterInfo = getBrokerClusterInfo();
+        } catch (Exception e) {
+            log.error("traffic-label admin: get broker cluster info failed.", e);
+            return false;
+        }
+
+        Set<String> masterBrokerAddresses = getMasterBrokerAddresses(clusterInfo);
+        if (masterBrokerAddresses.isEmpty()) {
+            log.warn("traffic-label admin: no master broker found for cluster {}.", getRocketMQClusterName());
+            return false;
+        }
+
+        // Pass 1: locate the source group config on any master that hosts it.
+        SubscriptionGroupConfig sourceConfig = null;
+        for (String brokerAddr : masterBrokerAddresses) {
+            try {
+                SubscriptionGroupWrapper wrapper = brokerSubscriptionOps.getAllSubscriptionGroup(
+                    brokerAddr, Duration.ofSeconds(3).toMillis());
+                if (wrapper == null || wrapper.getSubscriptionGroupTable() == null) {
+                    continue;
+                }
+                SubscriptionGroupConfig candidate = wrapper.getSubscriptionGroupTable().get(sourceGroup);
+                if (candidate != null) {
+                    sourceConfig = candidate;
+                    break;
+                }
+            } catch (Exception e) {
+                log.error("traffic-label admin: read subscription groups from broker {} failed.", brokerAddr, e);
+            }
+        }
+
+        if (sourceConfig == null) {
+            log.warn("traffic-label admin: source group {} not found on any master of cluster {}; "
+                + "cannot clone to {}.", sourceGroup, getRocketMQClusterName(), targetGroup);
+            return false;
+        }
+
+        // Pass 2: create the target group on every master that does not already have it.
+        boolean complete = true;
+        for (String brokerAddr : masterBrokerAddresses) {
+            try {
+                SubscriptionGroupWrapper wrapper = brokerSubscriptionOps.getAllSubscriptionGroup(
+                    brokerAddr, Duration.ofSeconds(3).toMillis());
+                if (wrapper != null && wrapper.getSubscriptionGroupTable() != null
+                    && wrapper.getSubscriptionGroupTable().containsKey(targetGroup)) {
+                    continue;
+                }
+
+                brokerSubscriptionOps.createSubscriptionGroup(brokerAddr,
+                    copySubscriptionGroupConfig(sourceConfig, targetGroup), Duration.ofSeconds(3).toMillis());
+            } catch (Exception e) {
+                complete = false;
+                log.error("traffic-label admin: clone subscription group {} to {} on broker {} failed.",
+                    sourceGroup, targetGroup, brokerAddr, e);
+            }
+        }
+        return complete;
+    }
+
+    /**
      * Deletes a subscription group on all broker masters that serve the given sample topic.
      *
      * @param sampleTopic topic used to discover the target brokers via NameServer route lookup
@@ -227,8 +309,48 @@ public class DefaultAdminService implements AdminService {
         return this.getClient().getTopicRouteInfoFromNameServer(topic, Duration.ofSeconds(3).toMillis());
     }
 
+    protected ClusterInfo getBrokerClusterInfo() throws Exception {
+        return this.getClient().getBrokerClusterInfo(Duration.ofSeconds(3).toMillis());
+    }
+
+    protected String getRocketMQClusterName() {
+        return ConfigurationManager.getProxyConfig().getRocketMQClusterName();
+    }
+
     protected MQClientAPIExt getClient() {
         return this.mqClientAPIFactory.getClient();
+    }
+
+    private Set<String> getMasterBrokerAddresses(ClusterInfo clusterInfo) {
+        Set<String> brokerAddresses = new LinkedHashSet<>();
+        if (clusterInfo == null || clusterInfo.getClusterAddrTable() == null
+            || clusterInfo.getBrokerAddrTable() == null) {
+            return brokerAddresses;
+        }
+
+        Set<String> brokerNames = clusterInfo.getClusterAddrTable().get(getRocketMQClusterName());
+        if (brokerNames == null) {
+            return brokerAddresses;
+        }
+        for (String brokerName : brokerNames) {
+            BrokerData brokerData = clusterInfo.getBrokerAddrTable().get(brokerName);
+            if (brokerData == null || brokerData.getBrokerAddrs() == null) {
+                continue;
+            }
+            String masterAddress = brokerData.getBrokerAddrs().get(MixAll.MASTER_ID);
+            if (masterAddress != null) {
+                brokerAddresses.add(masterAddress);
+            }
+        }
+        return brokerAddresses;
+    }
+
+    private SubscriptionGroupConfig copySubscriptionGroupConfig(SubscriptionGroupConfig sourceConfig,
+        String targetGroup) {
+        SubscriptionGroupConfig copiedConfig = RemotingSerializable.fromJson(
+            RemotingSerializable.toJson(sourceConfig, false), SubscriptionGroupConfig.class);
+        copiedConfig.setGroupName(targetGroup);
+        return copiedConfig;
     }
 
     /**
@@ -236,6 +358,12 @@ public class DefaultAdminService implements AdminService {
      * the {@link MQClientAPIExt} instance returned by {@link #getClient()}.
      */
     private class DefaultBrokerSubscriptionOps implements BrokerSubscriptionOps {
+
+        @Override
+        public SubscriptionGroupWrapper getAllSubscriptionGroup(String brokerAddr, long timeoutMillis)
+            throws Exception {
+            return getClient().getAllSubscriptionGroup(brokerAddr, timeoutMillis);
+        }
 
         @Override
         public void createSubscriptionGroup(String brokerAddr, SubscriptionGroupConfig config,

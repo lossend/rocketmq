@@ -144,6 +144,17 @@ public class ClusterMetadataService extends AbstractStartAndShutdown implements 
         return config;
     }
 
+    /**
+     * Removes the cached subscription group config for {@code group}, forcing the next call to
+     * {@link #getSubscriptionGroupConfig} to reload from the broker.
+     *
+     * @param group the consumer group name whose cache entry to invalidate
+     */
+    @Override
+    public void invalidateSubscriptionGroupConfig(String group) {
+        subscriptionGroupConfigCache.invalidate(group);
+    }
+
     @Override
     public CompletableFuture<User> getUser(ProxyContext ctx, String username) {
         CompletableFuture<User> result = new CompletableFuture<>();
