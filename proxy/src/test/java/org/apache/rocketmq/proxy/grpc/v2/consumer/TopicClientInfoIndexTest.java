@@ -16,6 +16,7 @@
  */
 package org.apache.rocketmq.proxy.grpc.v2.consumer;
 
+import io.netty.channel.embedded.EmbeddedChannel;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
@@ -40,8 +41,8 @@ public class TopicClientInfoIndexTest {
         index = new TopicClientInfoIndex();
     }
 
-    private ClientChannelInfo clientChannelInfo(String clientId) {
-        return new ClientChannelInfo(null, clientId, LanguageCode.JAVA, 0);
+    private ClientChannelInfo newClient(String clientId) {
+        return new ClientChannelInfo(new EmbeddedChannel(), clientId, LanguageCode.JAVA, 0);
     }
 
     private Set<String> topics(String... topics) {
@@ -51,9 +52,9 @@ public class TopicClientInfoIndexTest {
     }
 
     @Test
-    public void should_track_gray_label_when_client_register_with_labeled_group() {
+    public void should_track_gray_label_when_client_registers_with_labeled_group() {
         index.handle(ConsumerGroupEvent.CLIENT_REGISTER, "G%gray1",
-            clientChannelInfo("c1"), topics(TOPIC));
+            newClient("c1"), topics(TOPIC));
 
         assertThat(index.getActiveIsolatedLabels(TOPIC, LOGICAL_GROUP)).containsExactly("gray1");
     }
@@ -61,28 +62,76 @@ public class TopicClientInfoIndexTest {
     @Test
     public void should_not_track_any_label_when_standard_client_registers() {
         index.handle(ConsumerGroupEvent.CLIENT_REGISTER, "G",
-            clientChannelInfo("c1"), topics(TOPIC));
+            newClient("c1"), topics(TOPIC));
 
         assertThat(index.getActiveIsolatedLabels(TOPIC, LOGICAL_GROUP)).isEmpty();
     }
 
     @Test
     public void should_add_and_remove_gray_labels_across_register_and_unregister() {
-        index.handle(ConsumerGroupEvent.CLIENT_REGISTER, "G%gray1",
-            clientChannelInfo("c1"), topics(TOPIC));
-        index.handle(ConsumerGroupEvent.CLIENT_REGISTER, "G%gray2",
-            clientChannelInfo("c2"), topics(TOPIC));
+        ClientChannelInfo c1 = newClient("c1");
+        ClientChannelInfo c2 = newClient("c2");
+
+        index.handle(ConsumerGroupEvent.CLIENT_REGISTER, "G%gray1", c1, topics(TOPIC));
+        index.handle(ConsumerGroupEvent.CLIENT_REGISTER, "G%gray2", c2, topics(TOPIC));
 
         assertThat(index.getActiveIsolatedLabels(TOPIC, LOGICAL_GROUP))
             .containsExactlyInAnyOrder("gray1", "gray2");
 
-        index.handle(ConsumerGroupEvent.CLIENT_UNREGISTER, "G%gray1",
-            clientChannelInfo("c1"), topics(TOPIC));
+        index.handle(ConsumerGroupEvent.CLIENT_UNREGISTER, "G%gray1", c1, topics(TOPIC));
 
         assertThat(index.getActiveIsolatedLabels(TOPIC, LOGICAL_GROUP)).containsExactly("gray2");
 
-        index.handle(ConsumerGroupEvent.CLIENT_UNREGISTER, "G%gray2",
-            clientChannelInfo("c2"), topics(TOPIC));
+        index.handle(ConsumerGroupEvent.CLIENT_UNREGISTER, "G%gray2", c2, topics(TOPIC));
+
+        assertThat(index.getActiveIsolatedLabels(TOPIC, LOGICAL_GROUP)).isEmpty();
+    }
+
+    @Test
+    public void should_keep_label_active_when_one_of_multiple_clients_unregisters() {
+        ClientChannelInfo c1 = newClient("c1");
+        ClientChannelInfo c2 = newClient("c2");
+
+        index.handle(ConsumerGroupEvent.CLIENT_REGISTER, "G%gray1", c1, topics(TOPIC));
+        index.handle(ConsumerGroupEvent.CLIENT_REGISTER, "G%gray1", c2, topics(TOPIC));
+
+        index.handle(ConsumerGroupEvent.CLIENT_UNREGISTER, "G%gray1", c1, topics(TOPIC));
+
+        assertThat(index.getActiveIsolatedLabels(TOPIC, LOGICAL_GROUP)).containsExactly("gray1");
+    }
+
+    @Test
+    public void should_remove_label_when_last_client_unregisters() {
+        ClientChannelInfo c1 = newClient("c1");
+        ClientChannelInfo c2 = newClient("c2");
+
+        index.handle(ConsumerGroupEvent.CLIENT_REGISTER, "G%gray1", c1, topics(TOPIC));
+        index.handle(ConsumerGroupEvent.CLIENT_REGISTER, "G%gray1", c2, topics(TOPIC));
+
+        index.handle(ConsumerGroupEvent.CLIENT_UNREGISTER, "G%gray1", c1, topics(TOPIC));
+        index.handle(ConsumerGroupEvent.CLIENT_UNREGISTER, "G%gray1", c2, topics(TOPIC));
+
+        assertThat(index.getActiveIsolatedLabels(TOPIC, LOGICAL_GROUP)).isEmpty();
+    }
+
+    @Test
+    public void should_exclude_specified_label_from_query_result() {
+        index.handle(ConsumerGroupEvent.CLIENT_REGISTER, "G%gray1", newClient("c1"), topics(TOPIC));
+        index.handle(ConsumerGroupEvent.CLIENT_REGISTER, "G%gray2", newClient("c2"), topics(TOPIC));
+
+        assertThat(index.getActiveIsolatedLabels(TOPIC, LOGICAL_GROUP, "gray1"))
+            .containsExactly("gray2");
+        assertThat(index.getActiveIsolatedLabels(TOPIC, LOGICAL_GROUP, null))
+            .containsExactlyInAnyOrder("gray1", "gray2");
+    }
+
+    @Test
+    public void should_skip_client_with_null_channel_without_throwing() {
+        ClientChannelInfo nullChannel = new ClientChannelInfo(null, "c1", LanguageCode.JAVA, 0);
+
+        assertThatCode(() ->
+            index.handle(ConsumerGroupEvent.CLIENT_REGISTER, "G%gray1", nullChannel, topics(TOPIC))
+        ).doesNotThrowAnyException();
 
         assertThat(index.getActiveIsolatedLabels(TOPIC, LOGICAL_GROUP)).isEmpty();
     }
@@ -92,8 +141,7 @@ public class TopicClientInfoIndexTest {
         assertThat(index.getActiveIsolatedLabels("unknown-topic", LOGICAL_GROUP)).isNotNull().isEmpty();
         assertThat(index.getActiveIsolatedLabels(TOPIC, "unknown-group")).isNotNull().isEmpty();
 
-        index.handle(ConsumerGroupEvent.CLIENT_REGISTER, "G%gray1",
-            clientChannelInfo("c1"), topics(TOPIC));
+        index.handle(ConsumerGroupEvent.CLIENT_REGISTER, "G%gray1", newClient("c1"), topics(TOPIC));
 
         assertThat(index.getActiveIsolatedLabels(TOPIC, "other-group")).isNotNull().isEmpty();
     }
@@ -102,7 +150,7 @@ public class TopicClientInfoIndexTest {
     public void should_ignore_non_client_events_without_throwing() {
         assertThatCode(() -> {
             index.handle(ConsumerGroupEvent.CHANGE, "G%gray1", (Object[]) null);
-            index.handle(ConsumerGroupEvent.REGISTER, "G%gray1", clientChannelInfo("c1"), topics(TOPIC));
+            index.handle(ConsumerGroupEvent.REGISTER, "G%gray1", newClient("c1"), topics(TOPIC));
             index.handle(ConsumerGroupEvent.UNREGISTER, "G%gray1", new Object[] {"garbage"});
         }).doesNotThrowAnyException();
 
@@ -114,12 +162,23 @@ public class TopicClientInfoIndexTest {
         assertThatCode(() -> {
             index.handle(ConsumerGroupEvent.CLIENT_REGISTER, "G%gray1", (Object[]) null);
             index.handle(ConsumerGroupEvent.CLIENT_REGISTER, "G%gray1");
-            index.handle(ConsumerGroupEvent.CLIENT_REGISTER, "G%gray1", clientChannelInfo("c1"));
+            index.handle(ConsumerGroupEvent.CLIENT_REGISTER, "G%gray1", newClient("c1"));
             index.handle(ConsumerGroupEvent.CLIENT_REGISTER, "G%gray1", "not-a-channel", "not-a-set");
-            index.handle(ConsumerGroupEvent.CLIENT_REGISTER, "G%gray1", clientChannelInfo("c1"), "not-a-set");
+            index.handle(ConsumerGroupEvent.CLIENT_REGISTER, "G%gray1", newClient("c1"), "not-a-set");
             index.handle(ConsumerGroupEvent.CLIENT_UNREGISTER, "G%gray1", (Object[]) null);
             index.handle(ConsumerGroupEvent.CLIENT_UNREGISTER, "G%gray1", new Object[] {null, null});
         }).doesNotThrowAnyException();
+
+        assertThat(index.getActiveIsolatedLabels(TOPIC, LOGICAL_GROUP)).isEmpty();
+    }
+
+    @Test
+    public void should_be_no_op_when_unregister_called_before_register() {
+        ClientChannelInfo c1 = newClient("c1");
+
+        assertThatCode(() ->
+            index.handle(ConsumerGroupEvent.CLIENT_UNREGISTER, "G%gray1", c1, topics(TOPIC))
+        ).doesNotThrowAnyException();
 
         assertThat(index.getActiveIsolatedLabels(TOPIC, LOGICAL_GROUP)).isEmpty();
     }

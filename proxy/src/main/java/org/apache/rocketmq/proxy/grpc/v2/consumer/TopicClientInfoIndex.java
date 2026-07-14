@@ -16,10 +16,12 @@
  */
 package org.apache.rocketmq.proxy.grpc.v2.consumer;
 
+import io.netty.channel.Channel;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import org.apache.rocketmq.broker.client.ClientChannelInfo;
 import org.apache.rocketmq.broker.client.ConsumerGroupEvent;
 import org.apache.rocketmq.broker.client.ConsumerIdsChangeListener;
 
@@ -35,16 +37,25 @@ import org.apache.rocketmq.broker.client.ConsumerIdsChangeListener;
  * of live gray labels so the standard receive branch can dynamically exclude only the
  * labels that are actually online.
  *
+ * <p>A label is considered online as long as at least one {@link ClientChannelInfo} is
+ * registered for it. Multiple clients may share the same label; the label is only removed
+ * when the last client disconnects.
+ *
  * <p>Standard registrations (no label) contribute nothing to the tracked set. All other
  * event types are ignored. The index is safe for concurrent access.
  */
 public class TopicClientInfoIndex implements ConsumerIdsChangeListener {
 
     /**
-     * {@code topic -> (logicalGroup -> set of online gray labels)}.
-     * Inner sets are created via {@link ConcurrentHashMap#newKeySet()} for lock-free updates.
+     * {@code topic -> (logicalGroup -> (grayLabel -> (channel -> ClientChannelInfo)))}.
+     * Keyed on {@link Channel} rather than {@link ClientChannelInfo} because
+     * {@code ClientChannelInfo.hashCode()} includes mutable {@code lastUpdateTimestamp},
+     * making it unsafe as a map key.
      */
-    private final ConcurrentHashMap<String, ConcurrentHashMap<String, Set<String>>> activeIsolatedLabelTable =
+    private final ConcurrentHashMap<String,
+        ConcurrentHashMap<String,
+            ConcurrentHashMap<String,
+                ConcurrentHashMap<Channel, ClientChannelInfo>>>> activeIsolatedLabelTable =
         new ConcurrentHashMap<>();
 
     /**
@@ -52,7 +63,7 @@ public class TopicClientInfoIndex implements ConsumerIdsChangeListener {
      * and {@link ConsumerGroupEvent#CLIENT_UNREGISTER} are acted upon; every other event is a no-op.
      *
      * <p>Expected {@code args} shape for the two handled events (see broker {@code ConsumerManager}):
-     * {@code args[0]} is a {@code ClientChannelInfo} (unused here) and {@code args[1]} is a
+     * {@code args[0]} is a {@code ClientChannelInfo} and {@code args[1]} is a
      * {@code Set<String>} of subscribed topics. Malformed {@code args} (null, too short, or wrong
      * element types) are silently ignored rather than throwing.
      *
@@ -67,10 +78,10 @@ public class TopicClientInfoIndex implements ConsumerIdsChangeListener {
         }
         switch (event) {
             case CLIENT_REGISTER:
-                updateLabels(group, args, true);
+                updateClients(group, args, true);
                 break;
             case CLIENT_UNREGISTER:
-                updateLabels(group, args, false);
+                updateClients(group, args, false);
                 break;
             default:
                 break;
@@ -78,20 +89,27 @@ public class TopicClientInfoIndex implements ConsumerIdsChangeListener {
     }
 
     /**
-     * Adds or removes the gray label carried by {@code group} for each topic in {@code args[1]}.
-     * No-ops when {@code group} carries no gray label or {@code args} is malformed.
+     * Adds or removes the client carried by {@code args[0]} for each topic in {@code args[1]}.
+     * No-ops when {@code group} carries no gray label, {@code args} is malformed, or the
+     * client's channel is {@code null}.
      *
      * @param group the effective group; a label is derived via {@link TrafficLabel#parseLabel(String)}
-     * @param args  event arguments; {@code args[1]} is expected to be a {@code Set<String>} of topics
-     * @param add   {@code true} to add the label, {@code false} to remove it
+     * @param args  event arguments; {@code args[0]} is {@code ClientChannelInfo}, {@code args[1]} is {@code Set<String>} of topics
+     * @param add   {@code true} to register the client, {@code false} to unregister it
      */
     @SuppressWarnings("unchecked")
-    private void updateLabels(String group, Object[] args, boolean add) {
+    private void updateClients(String group, Object[] args, boolean add) {
         String label = TrafficLabel.parseLabel(group);
         if (label == null) {
             return;
         }
-        if (args == null || args.length < 2 || !(args[1] instanceof Set)) {
+        if (args == null || args.length < 2
+            || !(args[0] instanceof ClientChannelInfo)
+            || !(args[1] instanceof Set)) {
+            return;
+        }
+        ClientChannelInfo clientChannelInfo = (ClientChannelInfo) args[0];
+        if (clientChannelInfo.getChannel() == null) {
             return;
         }
         String logicalGroup = TrafficLabel.parseLogicalGroup(group);
@@ -99,52 +117,73 @@ public class TopicClientInfoIndex implements ConsumerIdsChangeListener {
         for (Object topic : topics) {
             if (topic instanceof String) {
                 if (add) {
-                    addLabel((String) topic, logicalGroup, label);
+                    addClient((String) topic, logicalGroup, label, clientChannelInfo);
                 } else {
-                    removeLabel((String) topic, logicalGroup, label);
+                    removeClient((String) topic, logicalGroup, label, clientChannelInfo);
                 }
             }
         }
     }
 
-    /**
-     * Records {@code label} as online for {@code (topic, logicalGroup)}.
-     *
-     * @param topic        the subscribed topic
-     * @param logicalGroup the origin (logical) consumer group
-     * @param label        the gray label to add
-     */
-    private void addLabel(String topic, String logicalGroup, String label) {
+    private void addClient(String topic, String logicalGroup, String label, ClientChannelInfo client) {
         activeIsolatedLabelTable
             .computeIfAbsent(topic, k -> new ConcurrentHashMap<>())
-            .computeIfAbsent(logicalGroup, k -> ConcurrentHashMap.newKeySet())
-            .add(label);
+            .computeIfAbsent(logicalGroup, k -> new ConcurrentHashMap<>())
+            .computeIfAbsent(label, k -> new ConcurrentHashMap<>())
+            .put(client.getChannel(), client);
     }
 
-    /**
-     * Removes {@code label} from the online set for {@code (topic, logicalGroup)}, pruning
-     * now-empty inner maps to avoid unbounded growth.
-     *
-     * @param topic        the subscribed topic
-     * @param logicalGroup the origin (logical) consumer group
-     * @param label        the gray label to remove
-     */
-    private void removeLabel(String topic, String logicalGroup, String label) {
-        ConcurrentHashMap<String, Set<String>> groupTable = activeIsolatedLabelTable.get(topic);
+    private void removeClient(String topic, String logicalGroup, String label, ClientChannelInfo client) {
+        ConcurrentHashMap<String, ConcurrentHashMap<String, ConcurrentHashMap<Channel, ClientChannelInfo>>> groupTable =
+            activeIsolatedLabelTable.get(topic);
         if (groupTable == null) {
             return;
         }
-        Set<String> labels = groupTable.get(logicalGroup);
-        if (labels == null) {
+        ConcurrentHashMap<String, ConcurrentHashMap<Channel, ClientChannelInfo>> labelTable =
+            groupTable.get(logicalGroup);
+        if (labelTable == null) {
             return;
         }
-        labels.remove(label);
-        if (labels.isEmpty()) {
-            groupTable.remove(logicalGroup, Collections.emptySet());
+        ConcurrentHashMap<Channel, ClientChannelInfo> clients = labelTable.get(label);
+        if (clients == null) {
+            return;
         }
-        if (groupTable.isEmpty()) {
-            activeIsolatedLabelTable.remove(topic, new ConcurrentHashMap<String, Set<String>>());
+        clients.remove(client.getChannel());
+        // computeIfPresent is atomic: removes the entry only if the map is still empty at
+        // the moment of the check, preventing a race where passing the same reference via
+        // remove(key, value) would always succeed even if a concurrent add just populated it.
+        labelTable.computeIfPresent(label, (k, v) -> v.isEmpty() ? null : v);
+        groupTable.computeIfPresent(logicalGroup, (k, v) -> v.isEmpty() ? null : v);
+        activeIsolatedLabelTable.computeIfPresent(topic, (k, v) -> v.isEmpty() ? null : v);
+    }
+
+    /**
+     * Returns an unmodifiable snapshot of the gray labels currently online for
+     * {@code (topic, logicalGroup)}, optionally excluding one label.
+     *
+     * @param topic        the topic to look up
+     * @param logicalGroup the origin (logical) consumer group to look up
+     * @param excludeLabel label to exclude from the result; {@code null} to include all
+     * @return an unmodifiable set of online gray labels; never {@code null}
+     */
+    public Set<String> getActiveIsolatedLabels(String topic, String logicalGroup, String excludeLabel) {
+        ConcurrentHashMap<String, ConcurrentHashMap<String, ConcurrentHashMap<Channel, ClientChannelInfo>>> groupTable =
+            activeIsolatedLabelTable.get(topic);
+        if (groupTable == null) {
+            return Collections.emptySet();
         }
+        ConcurrentHashMap<String, ConcurrentHashMap<Channel, ClientChannelInfo>> labelTable =
+            groupTable.get(logicalGroup);
+        if (labelTable == null) {
+            return Collections.emptySet();
+        }
+        Set<String> result = new HashSet<>();
+        for (ConcurrentHashMap.Entry<String, ConcurrentHashMap<Channel, ClientChannelInfo>> entry : labelTable.entrySet()) {
+            if (!entry.getValue().isEmpty() && !entry.getKey().equals(excludeLabel)) {
+                result.add(entry.getKey());
+            }
+        }
+        return Collections.unmodifiableSet(result);
     }
 
     /**
@@ -156,15 +195,7 @@ public class TopicClientInfoIndex implements ConsumerIdsChangeListener {
      * @return an unmodifiable set of online gray labels; never {@code null}, empty when nothing is tracked
      */
     public Set<String> getActiveIsolatedLabels(String topic, String logicalGroup) {
-        ConcurrentHashMap<String, Set<String>> groupTable = activeIsolatedLabelTable.get(topic);
-        if (groupTable == null) {
-            return Collections.emptySet();
-        }
-        Set<String> labels = groupTable.get(logicalGroup);
-        if (labels == null) {
-            return Collections.emptySet();
-        }
-        return Collections.unmodifiableSet(new HashSet<>(labels));
+        return getActiveIsolatedLabels(topic, logicalGroup, null);
     }
 
     /**

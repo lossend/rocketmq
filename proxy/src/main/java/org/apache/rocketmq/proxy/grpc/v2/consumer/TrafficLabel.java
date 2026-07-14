@@ -77,7 +77,7 @@ public final class TrafficLabel {
         if (effectiveGroup == null) {
             return null;
         }
-        int idx = effectiveGroup.indexOf(GROUP_SEPARATOR);
+        int idx = effectiveGroup.lastIndexOf(GROUP_SEPARATOR);
         if (idx < 0) {
             return effectiveGroup;
         }
@@ -96,7 +96,7 @@ public final class TrafficLabel {
         if (effectiveGroup == null) {
             return null;
         }
-        int idx = effectiveGroup.indexOf(GROUP_SEPARATOR);
+        int idx = effectiveGroup.lastIndexOf(GROUP_SEPARATOR);
         if (idx < 0) {
             return null;
         }
