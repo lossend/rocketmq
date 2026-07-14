@@ -55,6 +55,7 @@ import org.apache.rocketmq.remoting.protocol.route.QueueData;
 import org.apache.rocketmq.remoting.protocol.route.TopicRouteData;
 import org.junit.Before;
 import org.junit.Test;
+import org.junit.jupiter.api.DisplayName;
 import org.mockito.ArgumentCaptor;
 
 import static org.junit.Assert.assertEquals;
@@ -359,6 +360,41 @@ public class ReceiveMessageActivityTest extends BaseActivityTest {
         assertEquals(Code.MESSAGE_NOT_FOUND, getResponseCodeFromReceiveMessageResponseList(responseArgumentCaptor.getAllValues()));
     }
 
+    @Test
+    @DisplayName("ReceiveMessage returns UNRECOGNIZED_CLIENT_TYPE when client settings are missing")
+    public void testReceiveMessageWithMissingClientSettings() {
+        StreamObserver<ReceiveMessageResponse> receiveStreamObserver = mock(ServerCallStreamObserver.class);
+        ArgumentCaptor<ReceiveMessageResponse> responseArgumentCaptor =
+            ArgumentCaptor.forClass(ReceiveMessageResponse.class);
+        doNothing().when(receiveStreamObserver).onNext(responseArgumentCaptor.capture());
+        when(this.grpcClientSettingsManager.getClientSettings(any())).thenReturn(null);
+
+        this.receiveMessageActivity.receiveMessage(
+            createContext(),
+            ReceiveMessageRequest.newBuilder()
+                .setGroup(Resource.newBuilder().setName(CONSUMER_GROUP).build())
+                .setMessageQueue(MessageQueue.newBuilder()
+                    .setTopic(Resource.newBuilder().setName(TOPIC).build())
+                    .build())
+                .setAutoRenew(true)
+                .setFilterExpression(FilterExpression.newBuilder()
+                    .setType(FilterType.TAG)
+                    .setExpression("*")
+                    .build())
+                .build(),
+            receiveStreamObserver
+        );
+
+        assertEquals(Code.UNRECOGNIZED_CLIENT_TYPE,
+            getResponseCodeFromReceiveMessageResponseList(responseArgumentCaptor.getAllValues()));
+        verify(this.messagingProcessor, times(0)).popMessage(
+            any(), any(), anyString(), anyString(), anyInt(), anyLong(), anyLong(), anyInt(), any(),
+            anyBoolean(), any(), any(), anyLong());
+        verify(this.messagingProcessor, times(0)).popLiteMessage(
+            any(), any(), anyString(), anyString(), anyInt(), anyLong(), anyLong(), any(), any(), any(),
+            anyLong());
+    }
+
     private Code getResponseCodeFromReceiveMessageResponseList(List<ReceiveMessageResponse> responseList) {
         for (ReceiveMessageResponse response : responseList) {
             if (response.hasStatus()) {
@@ -366,59 +402,6 @@ public class ReceiveMessageActivityTest extends BaseActivityTest {
             }
         }
         return null;
-    }
-
-    @Test
-    public void receive_routes_gray_label_to_virtual_group() throws Throwable {
-        // Arrange: enable the master switch
-        ConfigurationManager.getProxyConfig().setEnableTrafficLabelRouting(true);
-        try {
-            // Wire a real TrafficLabelRouter with a stubbed bootstrapper (no broker calls needed)
-            LabelGroupBootstrapper stubBootstrapper = mock(LabelGroupBootstrapper.class);
-            TrafficLabelRouter router = new TrafficLabelRouter(new LabelRoutingResolver(), stubBootstrapper);
-            this.receiveMessageActivity.setTrafficLabelRouter(router);
-
-            StreamObserver<ReceiveMessageResponse> responseObserver = mock(ServerCallStreamObserver.class);
-            ArgumentCaptor<ReceiveMessageResponse> responseCaptor =
-                ArgumentCaptor.forClass(ReceiveMessageResponse.class);
-            doNothing().when(responseObserver).onNext(responseCaptor.capture());
-
-            when(this.grpcClientSettingsManager.getClientSettings(any()))
-                .thenReturn(Settings.newBuilder().getDefaultInstanceForType());
-
-            ArgumentCaptor<String> groupCaptor = ArgumentCaptor.forClass(String.class);
-            when(this.messagingProcessor.popMessage(
-                any(), any(), groupCaptor.capture(), anyString(), anyInt(), anyLong(), anyLong(),
-                anyInt(), any(), anyBoolean(), any(), isNull(), anyLong()))
-                .thenReturn(CompletableFuture.completedFuture(
-                    new PopResult(PopStatus.NO_NEW_MSG, Collections.emptyList())));
-
-            // Act: send request with a gray traffic label in context
-            ProxyContext grayCtx = createContext()
-                .withVal(TrafficLabel.PROPERTY_KEY, "gray1");
-
-            this.receiveMessageActivity.receiveMessage(
-                grayCtx,
-                ReceiveMessageRequest.newBuilder()
-                    .setGroup(Resource.newBuilder().setName(CONSUMER_GROUP).build())
-                    .setMessageQueue(MessageQueue.newBuilder()
-                        .setTopic(Resource.newBuilder().setName(TOPIC).build())
-                        .build())
-                    .setAutoRenew(true)
-                    .setFilterExpression(FilterExpression.newBuilder()
-                        .setType(FilterType.TAG)
-                        .setExpression("*")
-                        .build())
-                    .build(),
-                responseObserver
-            );
-
-            // Assert: popMessage was called with the virtual group name
-            assertEquals(CONSUMER_GROUP + TrafficLabel.GROUP_SEPARATOR + "gray1", groupCaptor.getValue());
-        } finally {
-            // restore default so other tests are unaffected
-            ConfigurationManager.getProxyConfig().setEnableTrafficLabelRouting(false);
-        }
     }
 
     @Test

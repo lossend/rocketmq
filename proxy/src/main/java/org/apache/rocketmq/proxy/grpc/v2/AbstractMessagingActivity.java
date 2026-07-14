@@ -23,7 +23,6 @@ import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
 import org.apache.rocketmq.proxy.grpc.v2.channel.GrpcChannelManager;
 import org.apache.rocketmq.proxy.grpc.v2.common.GrpcClientSettingsManager;
 import org.apache.rocketmq.proxy.grpc.v2.common.GrpcValidator;
-import org.apache.rocketmq.proxy.grpc.v2.consumer.TrafficLabelRouter;
 import org.apache.rocketmq.proxy.processor.MessagingProcessor;
 
 public abstract class AbstractMessagingActivity {
@@ -31,19 +30,6 @@ public abstract class AbstractMessagingActivity {
     protected final MessagingProcessor messagingProcessor;
     protected final GrpcClientSettingsManager grpcClientSettingsManager;
     protected final GrpcChannelManager grpcChannelManager;
-
-    /** Traffic-label router; {@code null} until explicitly wired via {@link #setTrafficLabelRouter}. */
-    protected TrafficLabelRouter trafficLabelRouter;
-
-    /**
-     * Injects the traffic-label router used to rewrite consumer groups and filter expressions.
-     * When not set (or set to {@code null}) routing is a no-op.
-     *
-     * @param trafficLabelRouter the router to use, or {@code null} to disable
-     */
-    public void setTrafficLabelRouter(TrafficLabelRouter trafficLabelRouter) {
-        this.trafficLabelRouter = trafficLabelRouter;
-    }
 
     public AbstractMessagingActivity(MessagingProcessor messagingProcessor,
                                      GrpcClientSettingsManager grpcClientSettingsManager, GrpcChannelManager grpcChannelManager) {

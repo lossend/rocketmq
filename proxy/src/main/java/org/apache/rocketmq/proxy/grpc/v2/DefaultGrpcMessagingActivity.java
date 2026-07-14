@@ -53,19 +53,13 @@ import org.apache.rocketmq.proxy.grpc.v2.client.ClientActivity;
 import org.apache.rocketmq.proxy.grpc.v2.common.GrpcClientSettingsManager;
 import org.apache.rocketmq.proxy.grpc.v2.consumer.AckMessageActivity;
 import org.apache.rocketmq.proxy.grpc.v2.consumer.ChangeInvisibleDurationActivity;
-import org.apache.rocketmq.proxy.grpc.v2.consumer.LabelGroupBootstrapper;
-import org.apache.rocketmq.proxy.grpc.v2.consumer.LabelRoutingResolver;
 import org.apache.rocketmq.proxy.grpc.v2.consumer.ReceiveMessageActivity;
-import org.apache.rocketmq.proxy.grpc.v2.consumer.StandardFilterAssembler;
-import org.apache.rocketmq.proxy.grpc.v2.consumer.TopicClientInfoIndex;
-import org.apache.rocketmq.proxy.grpc.v2.consumer.TrafficLabelRouter;
 import org.apache.rocketmq.proxy.grpc.v2.producer.ForwardMessageToDLQActivity;
 import org.apache.rocketmq.proxy.grpc.v2.producer.RecallMessageActivity;
 import org.apache.rocketmq.proxy.grpc.v2.producer.SendMessageActivity;
 import org.apache.rocketmq.proxy.grpc.v2.route.RouteActivity;
 import org.apache.rocketmq.proxy.grpc.v2.transaction.EndTransactionActivity;
 import org.apache.rocketmq.proxy.processor.MessagingProcessor;
-import org.apache.rocketmq.proxy.service.metadata.MetadataService;
 
 public class DefaultGrpcMessagingActivity extends AbstractStartAndShutdown implements GrpcMessagingActivity {
     private static final Logger log = LoggerFactory.getLogger(LoggerName.PROXY_LOGGER_NAME);
@@ -100,22 +94,11 @@ public class DefaultGrpcMessagingActivity extends AbstractStartAndShutdown imple
         this.routeActivity = new RouteActivity(messagingProcessor, grpcClientSettingsManager, grpcChannelManager);
         this.clientActivity = new ClientActivity(messagingProcessor, grpcClientSettingsManager, grpcChannelManager);
 
-        // Build and inject traffic-label router (master switch defaults OFF — zero behavior change today)
-        MetadataService metadataService = messagingProcessor.getMetadataService();
-        LabelGroupBootstrapper bootstrapper = new LabelGroupBootstrapper(
-            messagingProcessor.getAdminService(), metadataService);
-        TopicClientInfoIndex topicClientInfoIndex = new TopicClientInfoIndex();
-        messagingProcessor.registerConsumerListener(topicClientInfoIndex);
-        TrafficLabelRouter trafficLabelRouter = new TrafficLabelRouter(
-            new LabelRoutingResolver(), bootstrapper, topicClientInfoIndex,
-            new StandardFilterAssembler(), metadataService);
-        this.receiveMessageActivity.setTrafficLabelRouter(trafficLabelRouter);
-        this.ackMessageActivity.setTrafficLabelRouter(trafficLabelRouter);
-        this.changeInvisibleDurationActivity.setTrafficLabelRouter(trafficLabelRouter);
-        this.forwardMessageToDLQActivity.setTrafficLabelRouter(trafficLabelRouter);
-        this.clientActivity.setTrafficLabelRouter(trafficLabelRouter);
-
         this.appendStartAndShutdown(this.grpcClientSettingsManager);
+    }
+
+    GrpcClientSettingsManager getGrpcClientSettingsManager() {
+        return grpcClientSettingsManager;
     }
 
     @Override

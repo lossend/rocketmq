@@ -200,6 +200,36 @@ public class TrafficLabelRouter {
         return resolveStandard(topic, originGroup, originExpression, originExpressionType);
     }
 
+    /**
+     * Resolves a receive request for an explicitly selected effective group.
+     *
+     * <p>This overload is used after the client registration has been resolved. The traffic label
+     * is recovered from {@code effectiveGroup}, so a request remains on its registered gray lane
+     * even when its metadata no longer carries the original traffic-label header.
+     *
+     * @param ctx proxy context used for metadata lookup
+     * @param topic topic being consumed
+     * @param originGroup logical consumer group supplied by the client
+     * @param effectiveGroup consumer group selected from registration or request metadata
+     * @param originExpression original filter expression, may be {@code null}
+     * @param originExpressionType original expression type, may be {@code null}
+     * @return a routing decision when a filter change is required, {@code null} otherwise
+     */
+    public LabelRoutingResolver.RoutingDecision resolveForReceive(ProxyContext ctx, String topic,
+        String originGroup, String effectiveGroup, String originExpression, String originExpressionType) {
+        if (!isEnabled()) {
+            return null;
+        }
+        if (!originGroup.equals(effectiveGroup)) {
+            String label = TrafficLabel.parseLabel(effectiveGroup);
+            if (TrafficLabel.isGray(label)) {
+                return resolveGray(
+                    ctx, originGroup, effectiveGroup, label, originExpression, originExpressionType);
+            }
+        }
+        return resolveStandard(topic, originGroup, originExpression, originExpressionType);
+    }
+
     // -------------------------------------------------------------------------
     // Private helpers
     // -------------------------------------------------------------------------
@@ -218,6 +248,11 @@ public class TrafficLabelRouter {
     private LabelRoutingResolver.RoutingDecision resolveGray(ProxyContext ctx, String originGroup,
         String label, String originExpression, String originExpressionType) {
         String effectiveGroup = TrafficLabel.effectiveGroup(originGroup, label);
+        return resolveGray(ctx, originGroup, effectiveGroup, label, originExpression, originExpressionType);
+    }
+
+    private LabelRoutingResolver.RoutingDecision resolveGray(ProxyContext ctx, String originGroup,
+        String effectiveGroup, String label, String originExpression, String originExpressionType) {
         // Cache-gated safety net: re-provision if the gray group is absent from the metadata cache
         // (e.g. after cleaner deletion or a transient registration failure). Rate-limited to once
         // per PROVISION_BACKOFF_MS per group to avoid hammering all broker masters on every receive
@@ -232,8 +267,10 @@ public class TrafficLabelRouter {
                 bootstrapper.ensureGrayGroupFromOrigin(originGroup, effectiveGroup);
             }
         }
-        LabelRoutingResolver.RoutingDecision decision =
+        LabelRoutingResolver.RoutingDecision resolved =
             resolver.resolve(originGroup, label, originExpression, originExpressionType);
+        LabelRoutingResolver.RoutingDecision decision = new LabelRoutingResolver.RoutingDecision(
+            effectiveGroup, resolved.getSql92());
         if (isLogEnabled()) {
             log.info("traffic-label receive group {} -> {} sql92={}",
                 originGroup, decision.getEffectiveGroup(), decision.getSql92());

@@ -25,11 +25,17 @@ import apache.rocketmq.v2.MessageQueue;
 import apache.rocketmq.v2.QueryRouteRequest;
 import apache.rocketmq.v2.QueryRouteResponse;
 import apache.rocketmq.v2.Resource;
+import apache.rocketmq.v2.TelemetryCommand;
 import io.grpc.Context;
 import io.grpc.Metadata;
 import io.grpc.stub.StreamObserver;
+import java.util.Arrays;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import org.apache.rocketmq.common.constant.GrpcConstants;
 import org.apache.rocketmq.proxy.common.ProxyContext;
 import org.apache.rocketmq.proxy.config.InitConfigTest;
@@ -39,6 +45,7 @@ import org.apache.rocketmq.proxy.grpc.v2.common.ResponseBuilder;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
@@ -47,6 +54,8 @@ import org.mockito.junit.MockitoJUnitRunner;
 
 import static org.awaitility.Awaitility.await;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 @RunWith(MockitoJUnitRunner.class)
 public class GrpcMessagingApplicationTest extends InitConfigTest {
@@ -129,5 +138,64 @@ public class GrpcMessagingApplicationTest extends InitConfigTest {
         });
 
         assertEquals(Code.CLIENT_ID_REQUIRED, responseArgumentCaptor.getValue().getStatus().getCode());
+    }
+
+    @Test
+    @DisplayName("Telemetry processes queued messages before completing the stream")
+    public void telemetrySerializesOnNextAndCompletion() throws Exception {
+        StreamObserver<TelemetryCommand> responseObserver = Mockito.mock(StreamObserver.class);
+        CountDownLatch onNextStarted = new CountDownLatch(1);
+        CountDownLatch releaseOnNext = new CountDownLatch(1);
+        CountDownLatch completed = new CountDownLatch(1);
+        List<String> callbacks = new CopyOnWriteArrayList<>();
+        ContextStreamObserver<TelemetryCommand> activityObserver =
+            new ContextStreamObserver<TelemetryCommand>() {
+                @Override
+                public void onNext(ProxyContext ctx, TelemetryCommand value) {
+                    callbacks.add("onNext");
+                    onNextStarted.countDown();
+                    try {
+                        releaseOnNext.await(5, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+
+                @Override
+                public void onError(Throwable t) {
+                }
+
+                @Override
+                public void onCompleted() {
+                    callbacks.add("onCompleted");
+                    completed.countDown();
+                }
+            };
+        Mockito.when(grpcMessagingActivity.telemetry(responseObserver)).thenReturn(activityObserver);
+        Metadata metadata = new Metadata();
+        metadata.put(GrpcConstants.CLIENT_ID, CLIENT_ID);
+        metadata.put(GrpcConstants.LANGUAGE, JAVA);
+        metadata.put(GrpcConstants.REMOTE_ADDRESS, REMOTE_ADDR);
+        metadata.put(GrpcConstants.LOCAL_ADDRESS, LOCAL_ADDR);
+        Context grpcContext = Context.current().withValue(GrpcConstants.METADATA, metadata);
+        Context previous = grpcContext.attach();
+
+        try {
+            StreamObserver<TelemetryCommand> requestObserver =
+                grpcMessagingApplication.telemetry(responseObserver);
+            requestObserver.onNext(TelemetryCommand.getDefaultInstance());
+            assertTrue(onNextStarted.await(5, TimeUnit.SECONDS));
+
+            requestObserver.onCompleted();
+
+            assertFalse(completed.await(100, TimeUnit.MILLISECONDS));
+            releaseOnNext.countDown();
+            assertTrue(completed.await(5, TimeUnit.SECONDS));
+            assertEquals(Arrays.asList("onNext", "onCompleted"), callbacks);
+        } finally {
+            releaseOnNext.countDown();
+            grpcContext.detach(previous);
+            grpcMessagingApplication.shutdown();
+        }
     }
 }

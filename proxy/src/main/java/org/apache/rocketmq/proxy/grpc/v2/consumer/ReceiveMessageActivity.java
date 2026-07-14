@@ -50,6 +50,7 @@ import org.apache.rocketmq.proxy.service.route.MessageQueueSelector;
 import org.apache.rocketmq.proxy.service.route.MessageQueueView;
 import org.apache.rocketmq.remoting.protocol.filter.FilterAPI;
 import org.apache.rocketmq.remoting.protocol.heartbeat.SubscriptionData;
+
 public class ReceiveMessageActivity extends AbstractMessagingActivity {
     private static final String ILLEGAL_POLLING_TIME_INTRODUCED_CLIENT_VERSION = "5.0.3";
 
@@ -64,6 +65,11 @@ public class ReceiveMessageActivity extends AbstractMessagingActivity {
 
         try {
             Settings settings = this.grpcClientSettingsManager.getClientSettings(ctx);
+            if (settings == null) {
+                writer.writeAndComplete(ctx, Code.UNRECOGNIZED_CLIENT_TYPE,
+                    "cannot find client settings for this client");
+                return;
+            }
             final boolean isLite = ClientType.LITE_PUSH_CONSUMER.equals(settings.getClientType());
 
             Subscription subscription = settings.getSubscription();
@@ -122,23 +128,6 @@ public class ReceiveMessageActivity extends AbstractMessagingActivity {
                 return;
             }
 
-            if (trafficLabelRouter != null) {
-                LabelRoutingResolver.RoutingDecision decision =
-                    trafficLabelRouter.resolveForReceive(ctx, topic, group,
-                        filterExpression.getExpression(),
-                        GrpcConverter.getInstance().buildExpressionType(filterExpression.getType()));
-                if (decision != null) {
-                    group = decision.getEffectiveGroup();
-                    try {
-                        subscriptionData = FilterAPI.build(topic, decision.getSql92(),
-                            org.apache.rocketmq.common.filter.ExpressionType.SQL92);
-                    } catch (Exception e) {
-                        writer.writeAndComplete(ctx, Code.ILLEGAL_FILTER_EXPRESSION, e.getMessage());
-                        return;
-                    }
-                }
-            }
-
             CompletableFuture<PopResult> popFuture;
             if (isLite) {
 
@@ -193,12 +182,10 @@ public class ReceiveMessageActivity extends AbstractMessagingActivity {
             }
 
             final boolean autoRenew = proxyConfig.isEnableProxyAutoRenew() && request.getAutoRenew();
-            final String finalGroup = group;
-            final String finalTopic = topic;
             popFuture.thenAccept(popResult -> {
                 Runnable doAfterWrite = null;
                 if (autoRenew) {
-                    doAfterWrite = handleAutoRenew(ctx, request, finalGroup, finalTopic, popResult, writer);
+                    doAfterWrite = handleAutoRenew(ctx, request, group, topic, popResult, writer);
                 }
                 writer.writeAndComplete(ctx, request, popResult, doAfterWrite);
             }).exceptionally(t -> {

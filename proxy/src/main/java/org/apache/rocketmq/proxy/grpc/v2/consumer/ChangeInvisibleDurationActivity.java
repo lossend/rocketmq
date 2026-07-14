@@ -49,9 +49,6 @@ public class ChangeInvisibleDurationActivity extends AbstractMessagingActivity {
 
             ReceiptHandle receiptHandle = ReceiptHandle.decode(request.getReceiptHandle());
             String group = request.getGroup().getName();
-            if (trafficLabelRouter != null) {
-                group = trafficLabelRouter.rewriteGroup(ctx, request.getTopic().getName(), group);
-            }
 
             MessageReceiptHandle messageReceiptHandle = messagingProcessor.removeReceiptHandle(ctx, grpcChannelManager.getChannel(ctx.getClientID()), group, request.getMessageId(), receiptHandle.getReceiptHandle());
             if (messageReceiptHandle != null) {
