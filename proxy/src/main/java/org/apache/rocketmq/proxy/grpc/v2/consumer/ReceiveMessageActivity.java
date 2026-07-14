@@ -65,11 +65,6 @@ public class ReceiveMessageActivity extends AbstractMessagingActivity {
 
         try {
             Settings settings = this.grpcClientSettingsManager.getClientSettings(ctx);
-            if (settings == null) {
-                writer.writeAndComplete(ctx, Code.UNRECOGNIZED_CLIENT_TYPE,
-                    "cannot find client settings for this client");
-                return;
-            }
             final boolean isLite = ClientType.LITE_PUSH_CONSUMER.equals(settings.getClientType());
 
             Subscription subscription = settings.getSubscription();

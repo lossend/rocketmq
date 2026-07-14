@@ -160,10 +160,13 @@ public class GrpcMessagingApplication extends MessagingServiceGrpc.MessagingServ
                 .pipe(new AuthenticationPipeline(authConfig, messagingProcessor));
         }
         pipeline = pipeline.pipe(new ContextInitPipeline());
-        DefaultGrpcMessagingActivity defaultActivity = new DefaultGrpcMessagingActivity(messagingProcessor);
-        GrpcMessagingActivity activity = TrafficLabelGrpcMessagingActivity.create(
-            defaultActivity, messagingProcessor, defaultActivity.getGrpcClientSettingsManager());
-        return new GrpcMessagingApplication(activity, pipeline);
+        if (ConfigurationManager.getProxyConfig().isEnableTrafficLabelRouting()) {
+            DefaultGrpcMessagingActivity defaultActivity = new DefaultGrpcMessagingActivity(messagingProcessor);
+            GrpcMessagingActivity activity = TrafficLabelGrpcMessagingActivity.create(
+                    defaultActivity, messagingProcessor, defaultActivity.getGrpcClientSettingsManager());
+            return new GrpcMessagingApplication(activity, pipeline);
+        }
+        return new GrpcMessagingApplication(new DefaultGrpcMessagingActivity(messagingProcessor), pipeline);
     }
 
     protected Status flowLimitStatus() {
@@ -174,7 +177,7 @@ public class GrpcMessagingApplication extends MessagingServiceGrpc.MessagingServ
         return ResponseBuilder.getInstance().buildStatus(t);
     }
 
-    protected <V, T> void addExecutor(Executor executor, ProxyContext context, V request, Runnable runnable,
+    protected <V, T> void addExecutor(ExecutorService executor, ProxyContext context, V request, Runnable runnable,
         StreamObserver<T> responseObserver, Function<Status, T> statusResponseCreator) {
         if (request instanceof GeneratedMessageV3) {
             requestPipeline.execute(context, GrpcConstants.METADATA.get(Context.current()), (GeneratedMessageV3) request);
@@ -182,13 +185,7 @@ public class GrpcMessagingApplication extends MessagingServiceGrpc.MessagingServ
         } else {
             log.error("[BUG]grpc request pipe is not been executed");
         }
-        GrpcTask<V, T> grpcTask = new GrpcTask<>(
-            runnable, context, request, responseObserver, statusResponseCreator.apply(flowLimitStatus()));
-        if (executor instanceof ExecutorService) {
-            ((ExecutorService) executor).submit(grpcTask);
-        } else {
-            executor.execute(grpcTask);
-        }
+        executor.submit(new GrpcTask<>(runnable, context, request, responseObserver, statusResponseCreator.apply(flowLimitStatus())));
     }
 
     protected <V, T> void writeResponse(ProxyContext context, V request, T response, StreamObserver<T> responseObserver,
@@ -436,53 +433,30 @@ public class GrpcMessagingApplication extends MessagingServiceGrpc.MessagingServ
     public StreamObserver<TelemetryCommand> telemetry(StreamObserver<TelemetryCommand> responseObserver) {
         Function<Status, TelemetryCommand> statusResponseCreator = status -> TelemetryCommand.newBuilder().setStatus(status).build();
         ContextStreamObserver<TelemetryCommand> responseTelemetryCommand = grpcMessagingActivity.telemetry(responseObserver);
-        Executor telemetryExecutor = MoreExecutors.newSequentialExecutor(clientManagerThreadPoolExecutor);
         return new StreamObserver<TelemetryCommand>() {
-            private boolean terminated;
-
             @Override
-            public synchronized void onNext(TelemetryCommand value) {
-                if (terminated) {
-                    return;
-                }
+            public void onNext(TelemetryCommand value) {
                 ProxyContext context = createContext();
                 try {
-                    addExecutor(telemetryExecutor,
+                    addExecutor(clientManagerThreadPoolExecutor,
                         context,
                         value,
                         () -> responseTelemetryCommand.onNext(context, value),
                         responseObserver,
                         statusResponseCreator);
                 } catch (Throwable t) {
-                    terminated = true;
                     writeResponse(context, value, null, responseObserver, t, statusResponseCreator);
                 }
             }
 
             @Override
-            public synchronized void onError(Throwable t) {
-                if (terminated) {
-                    return;
-                }
-                terminated = true;
-                try {
-                    telemetryExecutor.execute(() -> responseTelemetryCommand.onError(t));
-                } catch (Throwable executorError) {
-                    responseTelemetryCommand.onError(t);
-                }
+            public void onError(Throwable t) {
+                responseTelemetryCommand.onError(t);
             }
 
             @Override
-            public synchronized void onCompleted() {
-                if (terminated) {
-                    return;
-                }
-                terminated = true;
-                try {
-                    telemetryExecutor.execute(responseTelemetryCommand::onCompleted);
-                } catch (Throwable t) {
-                    responseTelemetryCommand.onError(t);
-                }
+            public void onCompleted() {
+                responseTelemetryCommand.onCompleted();
             }
         };
     }
@@ -540,9 +514,7 @@ public class GrpcMessagingApplication extends MessagingServiceGrpc.MessagingServ
                 } catch (Throwable t) {
                     log.warn("write rejected error response failed", t);
                 }
-                return;
             }
-            throw new RejectedExecutionException("grpc task executor rejected an unknown task");
         }
     }
 }
