@@ -18,6 +18,9 @@
 - The Remoting Java client supports GO_AWAY reconnection by default, but the first request observing GO_AWAY pays a reconnect/retry cost unless a standby connection is already warm.
 - The RocketMQ 5.x Java gRPC client creates one `ManagedChannel` per endpoint set, disables gRPC automatic retry, and relies on producer-level immediate retries across route candidates.
 - With a single Kubernetes Service VIP and long-lived channels, scale-out does not naturally rebalance existing connections to new Pods.
+- `rocketmq-client-java` 5.0.7 and 5.2.1 both embed gRPC Java 1.50, retain the same single-Channel/`pick_first`/Producer-retry behavior, and default to three Producer attempts with a three-second RPC timeout.
+- Version 5.2.1 adds 300-second keepalive, 30-second keepalive timeout, and keepalive-without-calls. Its `ReconnectEndpointsCommand` handler only flips a boolean and has no operational Channel close/rebuild path.
+- The official classic `rocketmq-client` release line has no 5.2.1 artifact. Client 5.2.0 contains GO_AWAY reconnect/transparent-retry code, but the current server gate only emits GO_AWAY for versions newer than 5.3.1; strict Remoting coverage must therefore start at 5.3.2.
 
 ## External Source Notes
 
@@ -30,10 +33,13 @@
 
 ## Design Implications
 
-- A server-only sleep cannot meet the strict latency target; readiness withdrawal, protocol drain, exact in-flight tracking, and pre-warmed client alternatives must cooperate.
+- A server-only sleep cannot meet the strict latency target. With immutable SDKs, readiness withdrawal, standard protocol GO_AWAY, periodic randomized connection leases, exact in-flight tracking, and a long Kubernetes drain window must cooperate.
 - Planned termination can be made effectively invisible, but SIGKILL, OOM, node loss, and one-way sends cannot receive the same guarantee.
 - To avoid ambiguous retry duplicates, admitted sends must be allowed to return their Broker result before transport/process teardown.
 - A short `PreStop` propagation wait is sufficient for planned Pod deletion; the process-level drain must still handle direct SIGTERM idempotently.
+- gRPC connection age is the only available server-side mechanism that routinely breaks multi-year Telemetry streams without SDK changes. Its two-GOAWAY algorithm preserves active streams, while the Producer retry layer covers the remaining race window.
+- Remoting requires a Proxy-specific per-Channel lease because the existing global `isShuttingDown` gate only runs during final server shutdown.
+- The first rollout from old Proxy binaries cannot inherit the new guarantee: old connections have neither leases nor drain state. Strict SLO starts only after all Pods run the lifecycle version and one complete lease period has elapsed.
 
 ## Current-State Problem Inventory
 
@@ -61,6 +67,19 @@
 - PDB does not constrain every deletion path, HPA and GitOps replica ownership must be singular, and external LB deregistration behavior must be measured for the concrete environment.
 - A zero-failure sample is statistical evidence, not a mathematical guarantee; acceptance reporting must state sample size, repetitions, confidence bound, and an explicit observation window.
 - The image launch chain itself is part of graceful shutdown correctness and must be changed to `exec` through to Java or use a proven signal-forwarding init.
+- Remoting admission cannot begin in `AbstractRemotingActivity`: `NettyRemotingAbstract` creates and submits a `RequestTask` first, so a queued task could otherwise appear after drain observed zero. The admission permit must be acquired before executor submission and carried by the internal task/dispatch context.
+- `RequestTask` already owns the request, channel, and dispatch runnable, making an explicit non-wire `RequestAdmissionContext` safer than a channel/opaque side map; executor rejection, stopped tasks, and channel close can then terminate the same once-only permit without opaque-collision cleanup races.
+- `AbstractRemotingActivity` currently starts the Broker future asynchronously and calls `ctx.writeAndFlush(response)` without retaining the `ChannelFuture`; exact drain therefore requires separate Broker-terminal and RPC/write-terminal signals, including non-writable and write-failure branches.
+- gRPC call/stream terminal callbacks are application-level completion evidence, not proof that bytes left Netty. Final safety requires closing transport intake and checking bounded `Server.awaitTermination`; a false result must be visible and trigger forceful termination.
+- `NettyRemotingAbstract.processRequestCommand` currently creates the processing runnable, checks shutdown/flow control, constructs `RequestTask`, and submits it; an optional lifecycle hook can therefore acquire before submission and pass an explicit context with the task without changing any wire protocol.
+- Core Remoting `writeResponse` already accepts a callback invoked from the Netty `ChannelFuture`, so GO_AWAY, executor-reject, and other pre-dispatch responses can share exact pending-write accounting; the Proxy activity writer must be refactored onto the same terminal contract.
+- A long `PreStop` with `maxSurge: 1/maxUnavailable: 0` does not by itself serialize terminating old Pods. Strict rollout needs `minReadySeconds` longer than the full Pod termination bound plus frozen HPA scale-down, or an explicit rollout coordinator; otherwise several old Pods may drain concurrently.
+- The first lifecycle rollout needs two stages because an old image has no port 8082: deploy the capable binary with lifecycle disabled and legacy probes first, then enable lifecycle and switch to HTTP probes only after every Pod runs the capable image.
+- Current Kubernetes Deployment documentation defines `minReadySeconds` as the delay before a Ready Pod becomes Available and excludes terminating Pods from `availableReplicas`. With `maxUnavailable=0`, a 600-second availability delay therefore supplies a 60-second buffer over the 540-second Pod termination bound before another old Pod may be removed; the plan still requires a real-cluster assertion because terminating Pods can temporarily exceed `replicas + maxSurge` and controller/version behavior is part of the deployment contract.
+- gRPC creates `ServerStreamTracer` before running server interceptors. The viable association is a per-stream mutable holder created by the tracer factory, inserted by `filterContext()`, and later CAS-bound to the permit by the interceptor; an interceptor-created Context cannot be assumed visible to an already-created tracer.
+- Public `ServerTransportFilter` can tag transport Attributes but does not expose an individual transport close handle. Late gRPC transports must have send calls rejected via `ServerCall` Attributes and be terminated by max-age or global server shutdown, unless a deliberate Netty-internal channel registry is added.
+- Strict rollout must freeze both HPA directions. A concurrent HPA scale-up can create several new-revision Pods that become Available together and permit multiple old-Pod deletions even when `minReadySeconds` exceeds Pod grace.
+- Bootstrap needs admin health capability independently from lifecycle enforcement: all Pods first expose compatibility-mode 8082 while leases/drain remain off, then the chart switches NLB/probes and enables lifecycle. Otherwise a global health-port switch makes old Pods unhealthy simultaneously.
 
 ## rocketmq-helm Inspection Notes
 

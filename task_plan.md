@@ -2,16 +2,18 @@
 
 ## Goal
 
-Produce a decision-complete design for graceful Proxy scale-out and restart so Java gRPC and Remoting producers see nearly zero additional send failures or tail-latency spikes behind a Kubernetes Service/load balancer.
+Produce and persist a decision-complete, server-managed design for graceful Proxy scale-out and restart so supported Java gRPC and Remoting producers see zero observed send errors/timeouts and bounded tail-latency growth behind a Kubernetes Service/load balancer, without changing Java SDK code.
 
 ## Decisions
 
-- Cover both gRPC and Remoting protocol entries.
-- Target Kubernetes Service/load-balancer access, not direct Pod addressing.
-- Coordinate Proxy, Kubernetes deployment, and both Java client implementations.
-- Optimize for near-zero additional send failures and p99/p999 disturbance during planned scale/restart.
-- Exclude `sendOneway` from the zero-failure guarantee because it has no acknowledgement semantics.
-- Preserve compatibility through additive configuration and capability-aware fallback.
+- Change only Proxy Server and `/Users/lossend/pro/rocketmq-helm`; do not modify Java SDKs and do not add a Gateway.
+- Cover `rocketmq-client-java` 5.0.7 and 5.2.1 strictly, plus Remoting client 5.3.2+; treat Remoting 5.2.0 and older as degraded compatibility.
+- Target stable Kubernetes Service/load-balancer access, not direct Pod addressing.
+- Use five-minute randomized connection leases, server-driven GO_AWAY, lifecycle-aware readiness, exact send drain, and a 540-second Pod termination budget.
+- Require zero observed acknowledged-send errors/timeouts, event-window p99 <= baseline +100 ms, and p999 <= baseline +500 ms.
+- Exclude `sendOneway`, SIGKILL, node loss, network partitions, and concurrent multi-Pod deletion from the strict guarantee.
+- Preserve RocketMQ at-least-once semantics; duplicate messages are recorded but are not an acceptance failure.
+- Apply the strict deployment contract to the main chart; keep the single-replica standalone chart explicitly degraded.
 
 ## Current Phase
 
@@ -51,6 +53,24 @@ Complete
 - [x] Map chart defaults and gaps to the Proxy lifecycle design without changing chart runtime code.
 - [x] Add concrete Helm template/values changes, migration order, and chart-level acceptance checks to the canonical plan.
 - [x] Verify the updated plan and planning records.
+- **Status:** complete
+
+### Phase 6: Replace SDK-Dependent Design
+
+- [x] Analyze `rocketmq-client-java` 5.2.1 in addition to 5.0.7 and separate it from the nonexistent classic Remoting 5.2.1 artifact.
+- [x] Remove SDK dual-hot channels, client Drain ACK, new protocol messages, and the 120-second shutdown assumption.
+- [x] Define the server-managed connection lease, lifecycle state machine, exact drain, Helm timing contract, compatibility matrix, and bootstrap boundary.
+- [x] Preserve the original SDK-dependent plan and save the Server/Helm-only replacement as a separate Markdown plan.
+- **Status:** complete
+
+### Phase 7: Harden the Server-Managed Plan
+
+- [x] Define the old plan as non-normative Proxy implementation reference and make the new plan authoritative.
+- [x] Move Remoting admission before executor submission and specify CAS-linearized send admission plus backend/protocol dual terminals.
+- [x] Define runtime ownership, initial warmup/readiness, immutable drain cutoffs, configuration defaults, and transport termination boundaries.
+- [x] Correct rollout serialization, HPA coordination, health-port security, first-bootstrap compatibility, and controlled rollback semantics.
+- [x] Expand unit, provider, client-version, failure, and mixed-version acceptance coverage and add an executable implementation sequence.
+- [x] Verify document consistency, preserve the original plan, and update planning records.
 - **Status:** complete
 
 ## Errors Encountered
