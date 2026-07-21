@@ -17,12 +17,17 @@
 
 package org.apache.rocketmq.filter;
 
+import org.apache.rocketmq.filter.expression.BooleanExpression;
+import org.apache.rocketmq.filter.expression.EvaluationContext;
 import org.apache.rocketmq.filter.expression.Expression;
 import org.apache.rocketmq.filter.expression.MQFilterException;
 import org.apache.rocketmq.filter.parser.SelectorParser;
 import org.junit.Test;
+import org.junit.jupiter.api.DisplayName;
 
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -67,6 +72,25 @@ public class ParserTest {
             assertThat(Boolean.TRUE).isFalse();
         } catch (MQFilterException e) {
         }
+    }
+
+    @Test
+    @DisplayName("does not match a property name containing a hyphen")
+    public void testParse_hyphenatedPropertyNameIsNotMatched() throws Exception {
+        BooleanExpression expression = SelectorParser.parse("user-id = '42'");
+        EvaluationContext context = new EvaluationContext() {
+            @Override
+            public Object get(String name) {
+                return keyValues().get(name);
+            }
+
+            @Override
+            public Map<String, Object> keyValues() {
+                return Collections.<String, Object>singletonMap("user-id", "42");
+            }
+        };
+
+        assertThat(expression.matches(context)).isFalse();
     }
 
     @Test
