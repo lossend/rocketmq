@@ -8,7 +8,7 @@
 
 **架构：** 使用稳定 L4 Service/NLB、5 分钟随机连接租约、统一 Proxy 生命周期状态机和 Kubernetes 长排空窗口。客户端不增加双连接、不增加 Drain Proto/ACK，也不引入 Gateway。
 
-**技术栈：** Java 8、gRPC Java/Netty、RocketMQ Remoting、Kubernetes Deployment/Service/HPA/PDB、Helm、AWS/ACK NLB、OpenTelemetry/Prometheus。
+**技术栈：** Java 8、gRPC Java/Netty、RocketMQ Remoting、Kubernetes Deployment/Service/PDB（固定 replicas，不使用 HPA）、Helm、AWS/ACK NLB、OpenTelemetry/Prometheus。
 
 ---
 
@@ -29,22 +29,49 @@
 - 当前 `GrpcServer.shutdown()` 虽会经 `io.grpc.Server.shutdown()` 触发 grpc-java 内建双 GOAWAY，但把“发起有序关闭、固定时长等待、TLS listener 注销”揉进一个 `void` 方法；它忽略 `awaitTermination` 的 `false`、不调用 `shutdownNow()`、吞掉中断/失败，且没有回收 builder 自建的 boss/worker EventLoopGroup。
 - Helm 使用 TCP 探针和立即 `mqshutdown` 的 PreStop；NLB 摘流、连接迁移和 JVM 终止窗口没有统一时钟。
 - 容器启动链存在未 `exec` 的 shell，SIGTERM 不保证抵达 JVM。
-- 主 Chart 的生产 PDB 值被模板硬编码为 1；没有 HPA 缩容节奏，Remoting 稳定访问地址也未强制配置。
+- 主 Chart 的生产 PDB 值被模板硬编码为 1；Remoting 稳定访问地址也未强制配置。
 - L4 长连接不会因为扩容自动迁移，新 Pod 只能承接新连接。
 
 严格承诺仅覆盖：
 
-- Kubernetes 计划内 rollout、restart、HPA 或脚本控制的逐 Pod scale-down。
+- Kubernetes 计划内 rollout、restart 或脚本控制的逐 Pod scale-down（固定 replicas，不含 HPA 驱动的伸缩）。
 - 有响应的同步/异步 send；`sendOneway` 不在严格范围内。
 - RocketMQ 原有 at-least-once 语义；重连竞态产生的重复消息不算方案失败，消费者仍需幂等。
 
 不承诺 SIGKILL、OOM、节点丢失、网络分区、Pod IP 直连或一次删除多个 Pod。
 
+### 1.1 三类能力必须分开建模（复审 P0-1）
+
+以下三者语义不同，**不得**合并成一个「GOAWAY 屏障」：
+
+| 能力 | 语义 | 边界 |
+|---|---|---|
+| gRPC `Server.shutdown()` | 全局、一次性、释放 listener | **不可逆**；同一 `Server` 不能重新 start；不能在 READY 状态可逆调用 |
+| Remoting `GO_AWAY` | 请求到达后的**响应**，非可广播屏障 | 仅 `cmd.version > V5_3_1` 且非 oneway；客户端只能 transport 层重放一次 |
+| 应用层 `SendDrainGate` | 只管理已进入业务分发路径的请求 | **不等价于**连接迁移完成 |
+
+由此产生三条硬约束：
+
+- `awaitTermination()` 只证明 gRPC Server 终止，**不能**证明 Remoting 已无新请求；不得用作跨协议屏障。
+- Remoting 在返回 `GO_AWAY` 前仍需读取请求，「关闭应用 gate」**不是**它的迁移 ACK。
+- 每个协议的 no-new-work 边界是**待验证项**，必须由 §7 Step 1 的 spike 证明，不得用假想的「GOAWAY ACK」代替。
+
+若 spike 证明公共 API 下无法同时满足「不接收新业务工作」「不主动拒绝仍可能合法到达的请求」「strict client 无 `UNAVAILABLE`」，必须在四条中显式选择并记录：放宽零失败目标并定义错误预算；修改客户端重试/`waitForReady` 契约；引入新 transport 能力或拆分 listener；调整 provider 摘流方式使新请求在 listener 关闭前可证明不再到达。
+
+### 1.2 待关闭的范围决策（复审 P0-1、P0-3）
+
+以下决策必须在编码前定稿，不得由实施阶段默认：
+
+- **oneway**：当前协议下不能依赖 `GO_AWAY` 达成零丢失（`writeResponse()` 对 oneway 直接返回，shutdown 分支会跳过业务 dispatch 又不写出 `GO_AWAY`，形成静默丢失）。首期必须三选一：修改协议/客户端、排除或禁用 oneway、或证明 provider no-new-arrival 后再关闭 admission。
+- **Remoting 策略矩阵**：按 `clientVersion × sync/async/oneway` 单独选择策略，不得一句话覆盖。
+- **事务消息**：见 §9.4，四选一并记录。
+- **消费语义（ReceiptHandle/redelivery）**：是否进入严格发布门禁属于范围决策，需产品范围说明后确认，不默认升为 P0。
+
 ## 2. 客户端版本分析与兼容契约
 
 | 客户端 | 等级 | 已验证行为与设计含义 |
 |---|---|---|
-| `rocketmq-client-java:5.0.7` | 严格验收 | gRPC Java 1.50；每个 Endpoints 一个 ManagedChannel；`pick_first`；关闭 gRPC 自动重试；Producer 默认 3 次尝试、单次请求默认 3 秒。标准 GO_AWAY 会重建 transport，竞态失败由 Producer 重试吸收；Telemetry response observer 的 `onError/onCompleted` 都在 1 秒后执行 `renewRequestObserver()` 并重发 Settings，因此正常 completion 可避免 `UNAVAILABLE` 错误日志。 |
+| `rocketmq-client-java:5.0.7` | 严格验收 | gRPC Java 1.50；每个 Endpoints 一个 ManagedChannel；`pick_first`；**显式 `disableRetry()`**；无 `waitForReady`；Producer 默认 3 次尝试、单次请求默认 3 秒。标准 GO_AWAY 会重建 transport；Telemetry response observer 的 `onError/onCompleted` 都在 1 秒后执行 `renewRequestObserver()` 并重发 Settings，因此正常 completion 可避免 `UNAVAILABLE` 错误日志。**`maxAttempts=3` 只是偶然缓冲，不是正确性屏障**（见下方风险说明）。 |
 | `rocketmq-client-java:5.2.1` | 严格验收 | send 与 Telemetry 迁移能力和 5.0.7 相同；新增 300 秒 keepalive。`ReconnectEndpointsCommand` 只设置布尔标志，不关闭或重建 Channel，因此不能作为迁移机制；正常完成 Telemetry 后的 1 秒 observer renewal 才是本方案的恢复路径，`onError` 仅作异常兜底。 |
 | `rocketmq-client:5.3.2+` | 严格验收 | Remoting 支持 GO_AWAY 后重连并透明重试；服务端现有版本门槛为 `> V5_3_1`。 |
 | `rocketmq-client:5.2.0` 及更早 | 降级兼容 | 5.2.0 虽有重连代码，但当前服务端不会向其发送 GO_AWAY；只能在最终断链后依赖普通重连/Producer 重试。 |
@@ -52,7 +79,16 @@
 
 客户端行为证据固定来自 `/Users/lossend/opensource/rocketmq-clients` 的 `java-5.0.7`、`java-5.2.1` tags：`ClientSessionImpl.onError/onCompleted` 都以 `REQUEST_OBSERVER_RENEW_BACKOFF_DELAY=1s` 调度 `renewRequestObserver()`，renew 成功后调用 `syncSettings0()`；`RpcClientImpl.receiveMessage` 则把 `onError` 完成成异常、把 `onCompleted` 完成成当前响应列表。因此 drain policy 只对 Telemetry 使用 OK completion，不能把同一策略泛化给 ReceiveMessage。最终矩阵仍从正式 Maven 依赖启动独立 JVM，不能使用本地改造后的 SDK。
 
-严格测试使用客户端默认或更高的 `maxAttempts=3`、至少 3 秒请求超时，并保持 Remoting `enableReconnectForGoAway=true`。不修改任何 SDK 源码或客户端协议。
+**strict client 零失败结论仍缺真实证据（复审 P0-4）。** 5.0.7 与 5.2.1 都调用 `disableRetry()`；没有 `waitForReady` 时 RPC 在 `TRANSIENT_FAILURE` 可立即失败，应用层 `maxAttempts=3` 又是无 backoff 的快速重试，可能仍命中同一个 channel/Endpoints。因此以下四句**不得**写入规范性结论：
+
+- 「listener 关闭后的 TCP connect failure 只触发 subchannel 重连，不产生 RPC 失败」；
+- 「gRPC GOAWAY 使所有 in-flight、新建和尚未分配 transport 的 RPC 都透明成功」；
+- 「`maxAttempts=3` 可作为生命周期正确性屏障」；
+- 「客户端一般会重连」可用于关闭 P0-1。
+
+必须建立真实客户端矩阵（详见 §5.2），`maxAttempts=1` 会更早暴露竞态但不是唯一需覆盖的配置。矩阵失败时回到 §1.1 改协议、SDK、provider 或目标。
+
+严格测试使用客户端默认或更高的 `maxAttempts=3`、至少 3 秒请求超时，并覆盖 `maxAttempts=1`；保持 Remoting `enableReconnectForGoAway=true`。不修改任何 SDK 源码或客户端协议。
 
 ## 3. Proxy 运行时重构
 
@@ -82,7 +118,19 @@ STARTING/READY/QUIESCING/MIGRATING/DRAINING
 
 初始 readiness 使用一次性 `ReadinessContributor` barrier，至少要求：管理服务与两个业务 listener 已绑定、MessagingProcessor 和 ACL/TLS 已初始化、NameServer 首次同步成功、路由缓存至少成功刷新一次。`proxyWarmupTopics` 非空时，还要为每个关键 topic 完成 route lookup 和 Broker channel 建立；禁止发送真实探测消息。
 
-warmup 超时后 Pod 保持 STARTING/NotReady、记录原因并退避重试，由 rollout timeout 阻止继续替换旧 Pod，不以进程重启制造依赖风暴。首次进入 READY 后，NameServer/Broker 等共享依赖的短暂失败采用 readiness fail-open；只有 listener 关闭、核心 executor 终止、runtime fatal 等 Pod 本地不可恢复故障，或显式 lifecycle 转换，才让 readiness 失败。
+warmup 超时后 Pod 保持 STARTING/NotReady、记录原因并退避重试，由 rollout timeout 阻止继续替换旧 Pod，不以进程重启制造依赖风暴。
+
+首次进入 READY 后，`/ready`（kubelet/EndpointSlice 成员资格）对 NameServer/Broker 等共享依赖的短暂失败采用 fail-open；只有 listener 关闭、核心 executor 终止、runtime fatal 等 Pod 本地不可恢复故障，或显式 lifecycle 转换，才让 `/ready` 失败。依赖健康只反映在 `/ready-for-traffic`（provider health check），两个端点的谓词见 §3.2。
+
+**依赖故障处理（复审 P1-3）：** 依赖失败时可以先通过 provider health 停止新连接，但**不得**在 READY 状态复用 `Server.shutdown()` 做「可重复 GOAWAY 后恢复」——`Server.shutdown()` 不可逆（见 §1.1）。可选策略只有三条，必须在实施前选定：
+
+1. 在 provider 已证明的连接保留窗口内等待依赖恢复，受 `D_dependency_wait` 约束（见 §3.6）；
+2. 对可证明的 Pod-local 持续故障进入**不可逆** drain，由 Pod replacement 恢复；
+3. 另立完整的 listener rebuild 状态机与客户端迁移设计（超出本期范围）。
+
+ACK 开启 connection drain 且 unhealthy 已启动倒计时时，恢复等待必须满足 `D_dependency_wait <= D_provider_keep - D_app_hard - D_skew - D_safety`；当前 ACK 30 秒不支持任意时长恢复等待，超时后必须执行预先定义的不可逆替换/客户端迁移策略，或改 provider 配置并重新实测。
+
+**共享依赖故障的 fleet 行为：** 所有 Pod 同时 503 后再同步 GOAWAY 会形成 fleet reconnect storm。NLB all-target-unhealthy fail-open 仍会把连接路由回同一批 unhealthy targets，甚至不保证停止新连接，因此**不能**用它替代 quorum/fleet-aware 协调。本期不实现 fleet 协调，故 `/ready-for-traffic` 的依赖谓词必须配可调阈值，并把「全 fleet 同时失败」列为已知缺口。
 
 ### 3.2 管理接口
 
@@ -90,11 +138,19 @@ warmup 超时后 Pod 保持 STARTING/NotReady、记录原因并退避重试，�
 
 - `GET /started`：本地组件初始化完成后返回 200；startupProbe 使用它，不等待外部 warmup。
 - `GET /live`：仅不可恢复故障或 STOPPED 时失败；排空期间保持 200。
-- `GET /ready`：只在 READY 返回 200，其余状态返回 503。
+- `GET /ready`：lifecycle 允许成员资格、业务 listener 已绑定、无 fatal 时返回 200；共享依赖故障 fail-open。kubelet readiness/EndpointSlice 使用。
+- `GET /ready-for-traffic`：startup/warmup barrier 已完成、业务 listener 已绑定、**依赖健康**、无 fatal 时返回 200。provider health check 使用。
 - `GET /state`：仅 loopback 返回详细状态、原因、固定 cutoffs、各协议连接数、最后建连时间、send inflight、pending write/open RPC 和 forced 标志。
-- `POST /drain?wait=true&waitTimeoutSeconds=N`：仅允许 loopback socket peer；忽略 `Forwarded`/`X-Forwarded-For`。参数只限制 HTTP 调用方等待，不创建或延长 coordinator deadline。
+- `POST /drain`：仅允许 loopback socket peer；忽略 `Forwarded`/`X-Forwarded-For`。只创建或复用一次 `DrainRun`，**立即返回 `202 + runId`**，不阻塞。
+- `GET /drain/{runId}`：轮询 drain 结果。
 
-admin 开启但 lifecycle 关闭时，三个 health GET 使用兼容就绪语义，`/state` 明确显示 `lifecycleEnabled=false`，POST drain 返回 409；这只服务首次 bootstrap，不构成严格能力。镜像提供 `mqproxyctl drain --wait --timeout 480s`，通过 loopback 调用管理接口。SIGTERM shutdown hook 加入或启动同一个 `DrainRun` 作为绕过 PreStop 时的幂等兜底，然后进入独立的 `StopRun` 并同步 `join()` 到 STOPPED；HTTP drain future 完成时 admin 仍存活。NetworkPolicy 只作第二层保护，远程 POST 必须在应用层拒绝。
+**所有 handler 必须短时、非阻塞（复审 P1-4）。** 原 `?wait=true&waitTimeoutSeconds=N` 的阻塞契约删除：admin server 只有固定两个线程，两个并发或重入 waiter 就会让 `/live`、`/ready` 无线程可用，导致 Pod 在 drain 中被 kubelet 杀死。JDK `HttpServer` 只有 server 级 `setExecutor()`，无法按 `HttpContext` 分配 executor，因此「保留一个线程」不可实现。
+
+必须落实：有界队列、请求并发上限与单请求超时；在 `POST /drain` flood 下验证 `/live` 最大延迟作为门禁；admin executor 自身服从 `StopDeadline`。若后续确实要保留 blocking waiter，则 health 必须使用**另一个** `HttpServer`/listener 或显式 dispatcher 与独立执行资源。
+
+`/ready-for-traffic` 在计划内 drain 时是否继续返回 200，只能在三个条件同时成立时采用：EndpointSlice/provider deregistration 已停止新连接；provider 被证明不会因此终止既有连接（见 §4.2 属性锁定与抓包证据）；STARTING 与 STOPPED 阶段绝不提前或继续报 200。
+
+admin 开启但 lifecycle 关闭时，三个 health GET 使用兼容就绪语义，`/state` 明确显示 `lifecycleEnabled=false`，POST drain 返回 409；这只服务首次 bootstrap，不构成严格能力。镜像提供 `mqproxyctl drain --wait --timeout 480s`，通过 loopback 调用管理接口；`--wait` 由 **CLI 侧轮询** `GET /drain/{runId}` 实现，服务端 handler 始终不阻塞（见本节末），`--timeout` 只约束 CLI 自身等待，不创建也不延长 coordinator deadline。SIGTERM shutdown hook 加入或启动同一个 `DrainRun` 作为绕过 PreStop 时的幂等兜底，然后进入独立的 `StopRun` 并同步 `join()` 到 STOPPED；HTTP drain future 完成时 admin 仍存活。NetworkPolicy 只作第二层保护，远程 POST 必须在应用层拒绝。
 
 ### 3.3 连接租约
 
@@ -104,9 +160,11 @@ admin 开启但 lifecycle 关闭时，三个 health GET 使用兼容就绪语义
 - gRPC：`maxConnectionAge=300s`，使用 gRPC 内建 ±10% 抖动，`maxConnectionAgeGrace=30s`。
 - Remoting：Channel 建立时分配 270–330 秒租约。
 - gRPC 的连接租约和全局 `Server.shutdown()` 都复用 grpc-java/Netty 内建标准双 GOAWAY；Proxy 不直接访问 package-private handler、不手写 HTTP/2 帧，也不发送 RocketMQ Telemetry Reconnect 命令。
-- Remoting 5.3.2+ 在租约后的首个 acknowledged request 进入业务处理前返回 GO_AWAY；客户端在新 Channel 上透明重试原请求。
+- Remoting `> V5_3_1` 的**非 oneway** 请求在租约后的首个 acknowledged request 进入业务处理前返回 GO_AWAY；客户端在 transport 层重连同一逻辑地址并重放**一次**。第二次收到 GO_AWAY 会失败，因此重放只能缓冲单次迁移，**不能承载正确性**。oneway 与旧版本客户端不满足该路径，见 §1.2。
 - 空闲过期 Remoting Channel 在无 inflight 时关闭；旧版客户端继续服务到排空 deadline，但记入 legacy 指标。
 - 正常扩容不主动驱逐 Pod，只依靠租约让全部活跃连接在约 5.5 分钟内至少重新建连一次。
+- **steady-state lease 是容量/SLO 取舍，需压测定标（复审 P1-1）。** 300 秒 `maxConnectionAge` 带来 TLS/HTTP/2/CPU 与连接重建成本，同时承担扩容重平衡目标；关闭、延长或保留必须由压测决定，不得仅凭静态判断改成 1800 秒。压测至少输出：每 Pod **连接数 CV**（不用请求 QPS CV，见 §5.2）、TLS handshake 与 CPU/GC、连接建立失败与 reconnect 峰值、扩容后达到目标连接分布的 P95/P99 时间、以及与事务消息策略（§9.4）的联合影响。
+- **不设计不存在的 gRPC 分批 GOAWAY（复审 R4）。** grpc-java 公共 API 无按连接分片发送 GOAWAY 的能力；reconnect storm 通过 Pod 串行 drain、容量 headroom、客户端真实 backoff 与压测控制。Remoting 可按 child channel 批处理，但必须验证遍历成本、客户端回流到同一 Pod 的概率与第二次 GO_AWAY 行为。
 - drain 的 LB cutoff 后若仍有新 transport 到达，视为 provider 摘流违约且不得进入业务。gRPC transport 通过 Attributes 标记为 late，interceptor 拒绝其全部新 send RPC，最终由 max-age 或 migrationCutoff 的全局 shutdown 终止；公开 `ServerTransportFilter` 没有单 transport close handle，不虚构立即关闭能力。Remoting 5.3.2+ 返回 GO_AWAY，legacy 关闭连接并计入降级指标；晚到连接不得延长本次 drain。
 
 ### 3.4 原子准入、双终态与 transport 屏障
@@ -123,7 +181,12 @@ admin 开启但 lifecycle 关闭时，三个 health GET 使用兼容就绪语义
 
 permit 的 backend 状态使用 `NOT_STARTED -> STARTED -> TERMINAL` 或 `NOT_STARTED -> SKIPPED` 单调 CAS。只有确定 handler 未 dispatch Broker 时才能写 SKIPPED；一旦 STARTED，cancel/close 必须等待真实 Future terminal。
 
-在 QUIESCING/MIGRATING 阶段 gate 保持开放；进入 DRAINING 的线性化动作就是 `closeAdmission()`，随后立即冻结两个协议的新 intake。同步校验失败、未 dispatch、executor reject 等没有 Broker Future 的路径必须显式写入 synthetic backend terminal，不能靠 finally 猜测完成。
+**待关闭的顺序冲突（复审 P0-1）。** 本节与 §9.2 当前写的是「先 `closeAdmission()`，再 `initiateServerDrain()` 发 GOAWAY」；而 §1.1 的规范顺序是「先分协议迁移 → 到达经验证的 no-new-work 边界 → 才关闭该协议的 admission」。两者方向相反，全文只能保留一套，必须由 §7 Step 1 的 gRPC spike 数据裁定后统一改写：
+
+- 若 spike 证明 `Server.shutdown()` 的双 GOAWAY 本身即构成 gRPC 的 no-new-work 边界，则采用 §1.1 顺序，`closeAdmission()` 移到 `awaitServerTermination` 观察到 no-new-work 之后；
+- 若 GOAWAY 之后仍可能有新 stream 进入业务（strict client 竞态），则必须先关 gate，但此时**不能**再声称「不主动拒绝合法请求」，须按 §1.1 四选一显式放宽目标。
+
+在裁定前，下面的描述是**待修订**内容，不作为规范：在 QUIESCING/MIGRATING 阶段 gate 保持开放；进入 DRAINING 的线性化动作就是 `closeAdmission()`，随后立即冻结两个协议的新 intake。同步校验失败、未 dispatch、executor reject 等没有 Broker Future 的路径必须显式写入 synthetic backend terminal，不能靠 finally 猜测完成。
 
 **Remoting 实现：**
 
@@ -141,7 +204,7 @@ permit 的 backend 状态使用 `NOT_STARTED -> STARTED -> TERMINAL` 或 `NOT_ST
 - `GrpcMessagingApplication.sendMessage` 必须先 CAS `NOT_STARTED -> STARTED` 成功才可调用 Broker，`CompletableFuture` 完成后置 TERMINAL；若 ACL/同步校验/cancel 在 dispatch 前结束 RPC，wrapped call/listener 或 `streamClosed` CAS 为 SKIPPED，后到的业务入口因 STARTED CAS 失败而禁止 dispatch。`ServerStreamTracer.streamClosed` 是唯一 canonical protocol terminal；`ServerCall.close` 只记录 response-close intent，cancel/deadline 只记录原因，均不得把已 STARTED 的 backend 提前终止。
 - `ServerTransportFilter.transportReady` 只把建连时间和 late 标记写进 transport Attributes，interceptor 从 `ServerCall.getAttributes()` 拒绝 late transport 的 send；不得把 transport filter 当成可关闭 channel 的 API，也不得由 `transportTerminated` 直接释放 holder/permit。
 - 原始 `io.grpc.Server`、TLS reload listener 和 builder 创建的 boss/worker EventLoopGroup 只能由 `GrpcServer` 持有；`GrpcDrainAdapter` 不得持有或直接操作这些对象，只能调用 `GrpcServer` 的阶段化生命周期接口。严格路径禁止再调用现有固定 `grpcShutdownTimeSeconds` 的一体式 `shutdown()`。
-- 进入 DRAINING 后先关 gate，再调用一次 `GrpcServer.initiateServerDrain()`；该方法只 CAS 幂等调用非阻塞的 `Server.shutdown()` 并立即返回。grpc-java 1.53.0 随后按连接发送 `GOAWAY(lastStreamId=MAX, NO_ERROR) -> PING -> PING_ACK 或 10 秒兜底 -> GOAWAY(lastStreamCreated, NO_ERROR)`，Proxy 不重复实现 GOAWAY。
+- **顺序待裁定（见 §3.4 的顺序冲突说明）：** 当前描述为「进入 DRAINING 后先关 gate，再调用一次 `GrpcServer.initiateServerDrain()`」，与 §1.1 的「先迁移 → 到达 no-new-work → 再关 admission」相反。§7 Step 1 的 gRPC spike 裁定后本条必须与 §3.4 同步改写，不得两处各留一套。`initiateServerDrain()` 只 CAS 幂等调用非阻塞的 `Server.shutdown()` 并立即返回。grpc-java 1.53.0 随后按连接发送 `GOAWAY(lastStreamId=MAX, NO_ERROR) -> PING -> PING_ACK 或 10 秒兜底 -> GOAWAY(lastStreamCreated, NO_ERROR)`，Proxy 不重复实现 GOAWAY。
 - 新增 `GrpcActiveCallRegistry` 和 `GrpcActiveCallInterceptor`，在 `next.startCall` 前登记所有非 unary RPC，因此尚未发送第一条 SETTINGS 的 Telemetry 也已被覆盖。registry 保存包装后的 `GrpcActiveCall`，包装 call 的 `sendHeaders/sendMessage/close` 使用同一互斥区和 once-only close-intent；wrapped listener 只在 `onComplete/onCancel` 时发布 canonical terminal、移除 registry 并递减 `grpcOpenDrainableCalls`。`ServerCall.close()` 返回、应用 observer 的 `onError/onCompleted` 或发出 GOAWAY 都不能直接把 call 计为 terminal。
 - accepted send 的 backend/protocol 双终态归零后，`GrpcActiveCallRegistry.closeAll(GrpcDrainStatusPolicy)` 主动结束非 unary RPC：Telemetry 使用 `Status.OK` 正常 completion，使 5.0.7/5.2.1 走无错误日志的 1 秒 observer renewal；ReceiveMessage/PullMessage 及未来未知 streaming RPC 默认使用 `Status.UNAVAILABLE.withDescription("[PROXY_DRAINING] reconnect")`，防止把被截断的业务流伪装成成功。两类 close 都单独计数、不能混入 logical send 错误；close 与正常 response/cancel 的竞态必须串行且幂等。Proxy 组件测试锁定 wire status，客户端矩阵锁定两个正式版本的真实 renewal。随后才用同一个 effective deadline 调用 `GrpcServer.awaitServerTermination(remaining)`；返回 `false` 或中断必须增加 forced 指标、调用一次 `forceServerShutdown()`，并返回 forced `DrainResult`。
 - `ServerCall.close`/`streamClosed` 不是 socket flush 或客户端收包证明。最后一个 send stream terminal 后仍保留有界 transport grace，并以 `Server.awaitTermination` 与客户端侧零观测错误共同验收。
@@ -171,8 +234,12 @@ permit 的 backend 状态使用 `NOT_STARTED -> STARTED -> TERMINAL` 或 `NOT_ST
 | `proxyPreStopWaitSeconds` | `proxy.lifecycle.preStopWaitSeconds` | `480` | 1–3600；必须大于等于 drain hard deadline，作为 PreStop 上限及 TERM stop deadline 的绝对封顶基准。 |
 | `proxyJvmShutdownTimeoutSeconds` | `proxy.lifecycle.jvmShutdownTimeoutSeconds` | `30` | 5–120；超时进入 forced close 并阻断验收。 |
 | `proxyLegacyRemotingDrainPolicy` | `proxy.lifecycle.legacyRemotingPolicy` | `SERVE_UNTIL_CUTOFF` | 只允许 `SERVE_UNTIL_CUTOFF`；legacy 永远不进入严格等级。 |
+| `proxyDependencyFailureThreshold` | `proxy.lifecycle.dependencyFailureThreshold` | `3` | `/ready-for-traffic` fail-close 的连续失败次数；`/ready` 不受影响（§3.1）。 |
+| `proxyDependencyWaitSeconds` | `proxy.lifecycle.dependencyWaitSeconds` | `0` | `D_dependency_wait`；`0` 表示不等待、直接按选定策略处置。必须满足 §3.6 的依赖不等式。 |
+| `proxyReadyForTrafficDuringDrain` | `proxy.lifecycle.readyForTrafficDuringDrain` | `false` | 保守默认：drain 期间 `/ready-for-traffic` 返回 503。仅在 §4.2 spike 证明 provider 不会因 unhealthy 终止既有连接后才允许开启（§8.4）。 |
+| `proxyAdminMaxConcurrentRequests` | `proxy.lifecycle.admin.maxConcurrentRequests` | `8` | admin 有界并发；超出返回 503，保证 health handler 不被饿死（§10.1）。 |
 
-Helm 还必须校验：lifecycle=true 蕴含 admin=true；`remotingAccessAddr` 是稳定 Service/NLB DNS 和端口；PreStop、Pod grace、NLB deregistration、`minReadySeconds`、HPA scale-down period 满足下一节公式；生命周期开启时不能渲染 TCP probe 或 `mqshutdown` PreStop。
+Helm 还必须校验：lifecycle=true 蕴含 admin=true；`remotingAccessAddr` 是稳定 Service/NLB DNS 和端口；PreStop、Pod grace、NLB deregistration、`minReadySeconds` 满足下一节的命名预算不等式；生命周期开启时不能渲染 TCP probe 或 `mqshutdown` PreStop；health probe 必须指向 admin port 的 HTTP path 而非业务端口 `tcpSocket`。
 
 ### 3.6 单一时钟与默认预算
 
@@ -185,7 +252,7 @@ migrationCutoff   = T0 + 60s + 330s + 30s = T0 + 420s
 drainHardDeadline = T0 + 420s + 30s = T0 + 450s
 preStopWait       = T0 + 480s
 podGrace          = deletion start + 540s
-rollout/HPA step  >= 600s
+rollout step      >= 600s
 ```
 
 1. T0：进入 QUIESCING，readiness 失败；同时触发 EndpointSlice/NLB 摘流。
@@ -198,6 +265,35 @@ rollout/HPA step  >= 600s
 正常排空 await 使用 `min(phaseCutoff, hardDeadline) - now`；StopRun 出现后再与 stop deadline 取最短。最终关闭 await 使用同一 `stopDeadline-now`，禁止阶段或子组件开始时重新获得完整预算。重复 drain 返回同一 `DrainRun`，重复 TERM 返回同一 `StopRun`；更短的外部停止预算只能收紧，任何调用都不能延长。单个 send 保持原 request deadline，drain deadline不得延长 Broker 超时。
 
 NLB 450 秒 deregistration/connection-drain 与 Proxy 时钟并行，从 readiness/target 摘除开始计算，绝不能再串行加到 540 秒之后。若 provider 实测最后新连接 p999 超过 60 秒，或健康检查无法直达 Pod 8082，严格 profile 必须阻断上线并整体重算全部预算，不能压缩 send drain。
+
+#### 命名预算与安全不等式（复审 P0-2、R2）
+
+上面的具体秒数是**派生结果**，不是配置源。必须先定义以下命名预算，并由**同一配置源**渲染 Helm、应用、PreStop 和 rollout supervisor：
+
+| 名称 | 含义 |
+|---|---|
+| `D_app_hard` | 应用 drain hard deadline |
+| `D_provider_keep` | provider 保留既有连接的最短时间 |
+| `D_prestop` | PreStop 最长等待 |
+| `D_process_stop` | TERM 后资源停止预算 |
+| `D_dependency_wait` | dependency unhealthy 后允许原地恢复的最长等待（见 §3.1） |
+| `D_skew` | EndpointSlice、controller、health check 与观测传播裕量 |
+| `D_safety` | 生产抖动裕量 |
+
+至少满足：
+
+```text
+D_provider_keep >= D_app_hard + D_skew + D_safety
+
+# dependency unhealthy 已启动 provider drain 时
+D_dependency_wait + D_app_hard + D_skew + D_safety <= D_provider_keep
+
+terminationGracePeriodSeconds >= D_prestop + D_process_stop + D_safety
+```
+
+**Kubernetes 阶段不可简单串行相加：** Pod grace period 在执行 PreStop 前已开始倒计时，EndpointSlice 的 terminating/ready 变化与 PreStop 也可能并行传播。`D_prestop` 若等待应用 drain 完成，必须小于 Pod grace。应用、PreStop 与 supervisor 必须引用同一份派生值，**禁止分别复制默认常量**（`proxyLbDetachTimeoutSeconds` 已是配置项，缺口是各处复制默认值）。
+
+启动时交叉校验并对不满足不等式的配置 **fail-fast**：provider keep timeout、Broker heartbeat/registration timeout、send drain deadline、PreStop 与 Pod grace、exporter/worker stop budget。
 
 ### 3.7 可观测性
 
@@ -221,29 +317,62 @@ NLB 450 秒 deregistration/connection-drain 与 Proxy 时钟并行，从 readine
 
 日志按 drain ID 记录状态迁移、固定 cutoffs、初始/最终连接数、legacy 客户端数和 force 原因；禁止使用 client ID 等高基数标签。默认 PrometheusRule 与升级 gate 将 `late connection after cutoff`、deadline exceeded、transport termination failure、forced close 的任一增量视为失败；warmup 超时阻止 rollout 继续。
 
+**补齐触发源、阶段耗时与 cutoff 快照（复审 R3）。** 至少区分：触发源 `PRESTOP` / `SIGTERM_FALLBACK` / `ADMIN` / `DEPENDENCY_FAILURE`；每一阶段的开始、完成、超时；effective deadline 与剩余时间快照；accepted/rejected/migrated/forced 数量；首个失败资源与最终 terminal。协议级还需记录 `migration_started`、`no_new_work_reached`、`admission_closed`、`accepted_inflight_zero`（§1.1 的 no-new-work 边界证据）。
+
+#### 最终 metrics 不能作为 rollout 控制的唯一来源（复审 P1-6）
+
+`ProxyMetricsManager.shutdown()` 当前调用异步 `forceFlush()`/`shutdown()` 后不等待结果；Prometheus 也不存在「关闭 metrics 前一定被最终 scrape」的屏障。loopback admin `/state` 在 Pod 退出后不可达、内存结果也会消失，因此**都不能**作为 supervisor 的主判据。
+
+必须落实：
+
+- OTLP/LOG exporter 在 remaining deadline 内等待 `CompletableResultCode`；
+- PROM 仍暴露 phase/forced 指标，但 rollout supervisor 不得只依赖最后一次 scrape；
+- 选定一个**可达且持久**的结果交接：结构化 termination message 并由串行 supervisor 确认、Pod Condition/CRD，或删除前通过受认证的 Pod-IP endpoint/exec 读取；
+- rollout pause 以该已确认的 drain result 为主、指标为辅，并定义交接写入/读取失败时 **fail-closed**；
+- 明确 missing series、stale series、query timeout 与 controller restart 时的 fail-closed 行为。
+
 ## 4. Helm 与容器落地
 
 ### 4.1 主 Chart：严格生产基线
 
 - 保持 `maxSurge: 1`、`maxUnavailable: 0`，设置 `minReadySeconds: 600`、`terminationGracePeriodSeconds: 540` 和至少 1800 秒的 `progressDeadlineSeconds`。600 秒不是 warmup 延迟，而是必须大于 540 秒终止上界的 rollout 串行化护栏：第二个新 Pod 计入 Available 前，上一个旧 Pod 必须已经退出。
-- startup/readiness/liveness 分别使用 8082 `/started`、`/ready`、`/live`；PreStop 执行 `mqproxyctl drain --wait --timeout 480s`，删除 `mqshutdown proxy || true`。
+- startup/readiness/liveness 分别使用 8082 `/started`、`/ready`、`/live`；NLB health check 单独使用 `/ready-for-traffic`（见 §4.2）。PreStop 执行 `mqproxyctl drain --wait --timeout 480s`（CLI 侧轮询），删除 `mqshutdown proxy || true`。
 - Helm command、`distribution/bin/mqproxy`、stock/docker `runserver.sh` 全部以 `exec` 传递到 Java；Docker 镜像安装 `curl`。
-- 严格模式要求 `replicas` 或 `HPA.minReplicas >= 3`，Service 不得启用 ClientIP affinity 或 `publishNotReadyAddresses`。
+- **容量门禁使用不等式，不使用魔法副本数（复审 R5）。** 不写死「最少 3/4 replicas」，而要求在一个 Pod draining 加所选 failure-domain 损失后满足：
+
+  ```text
+  remaining_ready_capacity >= peak_required_capacity * safety_factor
+  ```
+
+  同时约束 `maxUnavailable=0`、surge 是否落在独立 failure domain、Pod headroom 与连接重建峰值。Service 不得启用 ClientIP affinity 或 `publishNotReadyAddresses`。
 - Remoting 必须设置稳定 `remotingAccessAddr`；外部 Remoting 场景为 NLB 增加 8080 listener，禁止发布 Pod IP。
 - PDB 改为 values 驱动并推荐 `maxUnavailable: 1`；明确 PDB 只约束 Eviction。
 - 修复 Proxy NetworkPolicy selector，8082 只允许节点/kubelet 和 provider health checker；应用层仍依据真实 socket peer 拒绝非 loopback 的 `/state` 与 POST drain。
 - 增加 Proxy 跨节点/AZ spread，并验证 `maxSurge=1` 有调度余量。
-- 启用 HPA 时不渲染 Deployment `replicas`；`minReplicas>=3`、`stabilizationWindowSeconds>=600`，scale-down policy 只允许每 600 秒 1 Pod。rollout supervisor 不使用会被 Helm 覆盖的临时 live patch：先以 HPA-only prepare revision 安装/更新并冻结目标 HPA，再让主 upgrade 始终携带同一个 frozen overlay；观察完成后通过第二次 Helm upgrade 恢复最终 behavior。若发布中必须扩容，先 pause rollout，以受控 Helm HPA revision 扩容并稳定，再重新冻结后 resume。
+- **固定 replicas，删除 HPA freeze/unfreeze 状态机（复审 P1-8）。** 生产明确使用固定副本数，因此不为 Proxy 增加 HPA schema、不做 prepare revision / frozen overlay / restore 三段事务。改为：Deployment 始终渲染 `spec.replicas`；rollout supervisor **启动前检查目标 workload 没有 live HPA**，检测到则 fail（防止将来有人启用后静默破坏串行 drain）。这一简化削减的正是崩溃恢复路径最多、最难测试的部分。
 - 人工缩容由升级脚本逐级减 1，并等待上一 Pod DRAINED/删除完成；直接从 5 缩到 3 不属于严格流程。
 - 升级脚本持续断言最多一个旧 Pod 处于 Terminating；若 Kubernetes 版本或控制器行为突破该约束，立即 pause Deployment。本约束必须通过真实集群测试，不能只凭 `maxUnavailable=0` 推断。
 
 ### 4.2 NLB 时钟与 health-port 证据门
 
-- AWS 与 ACK NLB 使用 Pod IP 8082 `/ready` HTTP health check，但不创建面向业务的 8082 listener。实现前必须在两个真实 provider 做 spike，证明 target group 可把 health-check port 指向非业务 target port；任一 provider 不支持时，该 profile 在替代拓扑确定前不得宣称严格。
+- AWS 与 ACK NLB 使用 Pod IP 8082 `/ready-for-traffic` HTTP health check，但不创建面向业务的 8082 listener。实现前必须在两个真实 provider 做 spike，证明 target group 可把 health-check port 指向非业务 target port；任一 provider 不支持时，该 profile 在替代拓扑确定前不得宣称严格。
+- **当前 Helm 现状必须一并修改：** startup/readiness/liveness 都是业务 gRPC 端口的 `tcpSocket`，AWS 生产值是 TCP 8081 health check，ACK 未显式配置 HTTP health check。因此必须暴露命名 admin health port、把 kubelet probes 改为对应 HTTP path、分别为 AWS/ACK 配置 health-check protocol/port/path，并在模板测试中断言生成值——否则会出现「Java endpoint 已实现但流量仍由 TCP 探针控制」。
 - 默认 target deregistration/connection drain 为 450 秒，不得在 Proxy 响应排空完成前强制断开现有连接。
 - provider values 必须锁定 target type、health interval/threshold、cross-zone、externalTrafficPolicy 和连接终止属性。
+
+**Provider 必须分开建模（复审 P0-2）。** 不得共用一句「关闭 unhealthy termination 后连接一定安全」的结论；每个生产 provider 需独立配置、实测 P95 与 packet-level 证据：
+
+| Provider/路径 | 需锁定或验证的行为 | 当前结论 |
+|---|---|---|
+| AWS NLB：target deregistration | `deregistration_delay.connection_termination.enabled=false`，验证 delay 结束后既有连接行为 | 需显式配置并抓包验证 |
+| AWS NLB：target unhealthy | `target_health_state.unhealthy.connection_termination.enabled=false`，避免 unhealthy 时主动终止既有连接 | 需显式配置（**AWS 默认为 `true`**） |
+| AWS NLB：all targets unhealthy | 会 fail-open 到所有 registered targets | **不能**替代应用层 fleet 协调 |
+| ACK NLB：connection drain | timeout 到期后会主动关闭既有连接 | 当前 30 秒**短于**计划迁移时钟，不安全 |
+
 - 真实环境测量“readiness 失败后最后一个新连接到达”的 p99/p999，并以 p999 校准 60 秒摘流预算。
 - NetworkPolicy 开启后必须同时验证 kubelet 与 NLB health checker 可访问 8082，而业务源不能调用管理操作；不得信任源地址转发 header。
+
+官方依据：[Kubernetes Pod and Endpoint termination flow](https://kubernetes.io/docs/tutorials/services/pods-and-endpoint-termination-flow/)、[AWS NLB target group attributes](https://docs.aws.amazon.com/elasticloadbalancing/latest/network/edit-target-group-attributes.html)、[AWS NLB fail-open behavior](https://docs.aws.amazon.com/elasticloadbalancing/latest/network/load-balancer-troubleshooting.html)、[ACK NLB connection draining](https://www.alibabacloud.com/help/en/slb/network-load-balancer/user-guide/create-and-manage-a-server-group)、[AWS Load Balancer Controller Service annotations](https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/guide/service/annotations/)、[ACK NLB annotations](https://www.alibabacloud.com/help/en/slb/network-load-balancer/use-cases/configure-nlb-instances-by-using-annotations)。
 
 ### 4.3 Standalone Chart
 
@@ -251,10 +380,12 @@ Standalone 接入相同管理端点、HTTP probes、PreStop、exec 链、显式�
 
 ### 4.4 升级工具
 
-- `upgrade-prod.py` 增加 lint/template/schema、严格副本/PDB/HPA/预算、surge 调度余量、当前 Pod READY、无进行中 drain、previous revision 兼容性和 provider health-port 证据的 preflight。
-- 严格模式禁止无监督的 `helm upgrade --atomic`：自动 rollback 会在异常时再触发反向 rollout。脚本以 `helm upgrade --wait` 启动受监控 rollout，持续观察 Pod drain、HPA、NLB 和 SLO；异常时立即 pause Deployment、停止后续删除并保留 READY Pod。
+- `upgrade-prod.py` 增加 lint/template/schema、容量不等式（§4.1）/PDB/预算、surge 调度余量、当前 Pod READY、无进行中 drain、previous revision 兼容性和 provider health-port 证据的 preflight；并**断言目标 workload 无 live HPA**，检测到即 fail。
+- 严格模式禁止无监督的 `helm upgrade --atomic`：自动 rollback 会在异常时再触发反向 rollout。脚本以 `helm upgrade --wait` 启动受监控 rollout，持续观察 Pod drain、NLB 和 SLO；异常时立即 pause Deployment、停止后续删除并保留 READY Pod。
 - timeout 至少为 `副本数 × minReadySeconds + terminationGrace + 启动余量`。受控 rollback 是独立子命令，使用相同的串行 drain gate；前一 revision 不具备生命周期时只能执行 bootstrap 级回退，不能声称严格。
-- rollout 后检查所有 Pod READY、NLB targets healthy、forced/late-connection 指标无增量、旧 Pod 无 SIGKILL，并继续观察完整 send SLO 窗口；随后执行只恢复 HPA 最终 spec 的 Helm revision，而不是把 live patch 当作最终状态。
+- rollout 后检查所有 Pod READY、NLB targets healthy、forced/late-connection 指标无增量、旧 Pod 无 SIGKILL，并继续观察完整 send SLO 窗口。
+- **rollout 判据来源（复审 P1-6）：** pause/继续的主判据必须是 §3.7 选定的可达且持久的 drain result 交接，指标仅为辅助；交接写入/读取失败、missing/stale series、query timeout 与 controller restart 一律 **fail-closed**。
+- **forced 分级处理：** `forced && accepted_sends > 0`（有 acknowledged send 未拿到双终态，可能真丢）→ pause rollout；`forced && accepted_sends == 0`（send 已安全终止，仅流/transport 收尾慢）→ warn + 记录并继续。该策略必须由产品显式确认为阻断/人工确认/告警继续之一，不得由本计划代为决定；`proxy_forced_close_total{protocol,reason}` 需增加可区分两者的维度。
 - 修复生产 PDB values 被模板硬编码覆盖、Proxy placement 空值覆盖全局配置和 NetworkPolicy selector 错误。
 - 独立 canary 使用单独 namespace/release、Deployment selector、Service/NLB 和测试客户端入口，不加入主 Service；至少 3 副本，实际删除一个 canary Pod 验证 provider 摘流和三种严格客户端后才能进入 bootstrap。
 
@@ -275,8 +406,9 @@ Standalone 接入相同管理端点、HTTP probes、PreStop、exec 链、显式�
 - Remoting scoped admission context 在线程复用时不泄漏；submit reject、`stopRun`、`shutdownNow` 队列回收、channel-before-dispatch、channel-during-Broker、non-writable、write throw/failure 全部走 synthetic backend/双终态。
 - 普通与真实 MultiProtocol Server 的基类 lifecycle handler 都必须生效；事件循环 intake barrier 后不能再提交 late `RequestTask`，writability callback 不能重开 auto-read；GO_AWAY/UNAVAILABLE/legacy rejection write 也计入 pending，直到 Future 终态。
 - oneway 仅验证 best-effort 独立计数，不混入严格 send gate。
-- Helm 渲染断言 legacy、admin-only bootstrap、strict 三套配置及 probe/PreStop、全链路 exec、600 秒 minReady、540 秒 grace、PDB、HPA ownership/scale policy、NLB 属性、8082 不成为业务 listener 和 NetworkPolicy selector。
-- 升级工具测试 HPA absent→enabled/spec-diff 的 prepare revision、主 upgrade frozen overlay、Helm restore revision、双向 freeze/observedGeneration、最多一个 terminating old Pod、pause-on-failure、受控 rollback、两阶段 bootstrap 和 timeout 公式。
+- Helm 渲染断言 legacy、admin-only bootstrap、strict 三套配置及 probe/PreStop、全链路 exec、600 秒 minReady、540 秒 grace、PDB、固定 `spec.replicas`、NLB 属性（含两条 connection-termination）、health-check protocol/port/path 指向 `/ready-for-traffic`、8082 不成为业务 listener 和 NetworkPolicy selector。
+- 升级工具测试 `spec.replicas` 恒定渲染、**检测到 live HPA 即 fail** 的负例、最多一个 terminating old Pod、pause-on-failure、受控 rollback、一次 annotation bootstrap 和 timeout 公式。
+- admin server 在 `POST /drain` flood 下 `/live`、`/ready`、`/ready-for-traffic` 的最大延迟；重入 `POST /drain` 复用同一 runId 且始终 202；`GET /drain/{runId}` 在 forced 终态返回可区分 `accepted_sends>0` 的结果。
 
 ### 5.2 客户端矩阵集成测试
 
@@ -288,8 +420,9 @@ Standalone 接入相同管理端点、HTTP probes、PreStop、exec 链、显式�
 |---|---|
 | Provider | AWS NLB、ACK NLB |
 | Client | gRPC 5.0.7、gRPC 5.2.1、Remoting 5.3.2 |
-| API | sync send、async send；batch 单独覆盖 |
-| Event | 3→5 扩容、单 Pod restart、全量 rollout、5→3 逐 Pod/HPA 缩容 |
+| Client 配置 | `maxAttempts=3`（默认）**与 `maxAttempts=1`**；`waitForReady=false` 的真实默认路径 |
+| API | sync send、async send；batch 单独覆盖；oneway 按 §1.2 决策后单列 |
+| Event | 3→5 扩容、单 Pod restart、全量 rollout、5→3 逐 Pod 缩容 |
 | Load | 稳态低负载、目标生产负载、峰值突发；1 KiB、常规大小、5 MiB 消息 |
 | Security | 当前生产 ACL/TLS 组合 |
 
@@ -302,7 +435,7 @@ Kubernetes 场景：
 - PreStop 重入、直接 SIGTERM、LB 摘流变慢、drain deadline 超时。
 - 每个 gRPC 版本保持真实 Telemetry bidi stream 与 ReceiveMessage server stream 穿越单 Pod drain；确认第一阶段 GOAWAY 后新 RPC 转移，send 终态归零后旧 Pod 才正常完成 Telemetry、以 `UNAVAILABLE/[PROXY_DRAINING] reconnect` 截止 ReceiveMessage，客户端在其他 Pod 重建 Telemetry，旧 Pod 正常终止而非 force。
 - Remoting 5.2.0/旧客户端存在时的降级路径。
-- feature off、新旧 Proxy 混跑、两阶段 bootstrap、受控 rollback、HPA 与 rollout 竞态。
+- feature off、新旧 Proxy 混跑、annotation bootstrap、受控 rollback；supervisor 在存在 live HPA 时 fail 的负例。
 - Broker 慢响应/flow control、Telemetry 长流、warmup NameServer 不可达、NetworkPolicy 开启和 provider 8082 health check。
 
 每个 `provider × strict client × event` 核心 cell 至少执行 10 轮，累计不少于 1000 万次 logical acknowledged send；payload/security/fault 扩展场景每项至少 10 轮并报告样本数。基线使用同版本、同 offered load 的事件前 15 分钟稳定窗口；事件窗从 T0 到最后受影响 Pod STOPPED 后 60 秒。
@@ -312,9 +445,10 @@ Kubernetes 场景：
 - `forced_close=0`、deadline/late-connection/transport-termination-failure 均无增量，Pod 无 SIGKILL。
 - Remoting write Future 与 gRPC send stream terminal 前 permit 不得归零；报告不宣称服务端证明客户端收包。
 - gRPC `Server.shutdown()`、active-call close、`awaitTermination` 与 EventLoop 回收的事件顺序必须可从测试探针/日志重建；`grpcOpenDrainableCalls` 在 close intent 后不得提前归零，正常矩阵中 `shutdownNow` 调用数必须为 0。
-- rollout 实测同时 Terminating 的旧 Pod 不超过 1，HPA scale-up/scale-down 在 rollout 期间均为 Disabled 且 observedGeneration 已收敛，结束后配置完全恢复。
-- 至少 1000 条独立连接时，扩容后 6 分钟内单 Pod QPS CV <= 0.15，任一 Pod 不超过集群均值 1.3 倍。
-- 重复消息和 unknown outcome 单独计数，不作为零错误条件的替代；结果报告必须明确 at-least-once 语义，并给出零失败样本的统计置信上界。
+- rollout 实测同时 Terminating 的旧 Pod 不超过 1；supervisor 启动前确认目标 workload 无 live HPA（见 §4.1）。
+- **重平衡指标使用连接数，不使用请求 QPS（复审 R1）。** 请求 QPS 受各客户端进程自身发送量分布影响，无法证明长连接是否重新分布。测量每 Pod 活跃**连接数**、transport 创建/关闭速率与**连接数 CV**，在同质化压测客户端下取值；时间窗按「一个完整 lease 周期 + grace + 余量」推导，不写死 6 分钟。请求 QPS 分布降级为观测项，不作门禁。
+- 重复消息和 unknown outcome 单独计数，不作为零错误条件的替代；结果报告必须明确 at-least-once 语义。
+- **零 observed 主动发送失败保持硬门禁，统计上界只作补充（复审 R6）。** 可额外报告在给定样本量与置信度下的失败率上界，但**不得**用 `<= 1e-6` 之类的上界偷换零失败目标。验证分层执行：deterministic unit → protocol integration → 真实客户端 E2E → 真实 NLB rollout → 长时间 soak。
 
 ### 5.3 验证命令
 
@@ -330,14 +464,14 @@ rtk pytest -q /Users/lossend/pro/rocketmq-helm/tests
 
 ## 6. 上线与回滚
 
-首次从旧 Proxy 切换存在不可消除的 bootstrap 边界：旧进程没有租约、8082 和 drain 状态，新代码无法反向使其优雅。首次发布采用一次性两阶段受控流程：
+首次从旧 Proxy 切换存在不可消除的 bootstrap 边界：旧进程没有租约、8082 和 drain 状态，新代码无法反向使其优雅。首次发布采用一次性受控流程，并**尽量压缩到一次有损 rollout**（复审 P1-8）：
 
 1. 在独立 canary release 以生命周期开启状态验证 5.0.7、5.2.1、Remoting 5.3.2、真实 provider 8082 health check 和单 Pod 删除。
-2. 低峰提前扩容主集群并确认容量余量；随后由 `prepare-hpa` Helm revision 冻结 scale-up/scale-down，并等待 observedGeneration 收敛，禁止仅 patch live HPA。
-3. 阶段 A：全量发布具备新能力的二进制，设置 `enableProxyAdminServer=true`、`enableProxyGracefulLifecycle=false`，继续使用旧 TCP probe/PreStop。该轮只承诺尽力无感；完成后逐 Pod 验证兼容态 8082，确保主集群已没有不支持 health port 的旧镜像。
-4. 阶段 B：先确认所有现存 target 的 8082 healthy，再在生产 values 显式开启 lifecycle，同时切换 HTTP probe、PreStop、预算和 NLB health check；再完成一次受监控 rollout。该轮仍属于 bootstrap，不计入严格 SLO。
+2. 低峰提前扩容主集群并确认容量余量（按 §4.1 的容量不等式，不按魔法副本数）；supervisor 前置检查确认目标 workload 无 live HPA。
+3. **一次 annotation 驱动的 bootstrap rollout（复审 P1-8）：** 不再先改 template 再单独重启制造两次有损滚动。该轮同时发布具备新能力的二进制并开启 `enableProxyAdminServer=true`，通过 annotation 驱动完成一次受监控替换；完成后逐 Pod 验证 8082 可达，确保主集群已无不支持 health port 的旧镜像。该轮属于 bootstrap，只承诺尽力无感，不计入严格 SLO。
+4. 确认所有现存 target 的 8082 healthy 后，在生产 values 显式开启 lifecycle，同时切换 HTTP probe（`/started`、`/ready`、`/ready-for-traffic`、`/live`）、PreStop、派生预算与 NLB health check。若该切换可与第 3 步合并为同一次 rollout 且渲染差异已由模板测试锁定，则合并；否则仍按 bootstrap 等级执行第二次替换。
 5. 所有 Pod 都运行 lifecycle-enabled 配置后，等待至少一个完整最大租约+grace 周期，并确认 forced/timeout/late-connection 指标为零。
-6. 才启用严格 SLO，并以不带 frozen overlay 的目标 Helm revision 恢复 HPA scale-up/scale-down；确认该 revision 只改变 HPA behavior 后恢复正常受控 rollout。
+6. 才启用严格 SLO，并恢复正常受控 rollout。
 
 出现 send SLO、连接风暴或 provider 摘流异常时，rollout supervisor 立即 pause 后续替换并保留现存 READY Pod。回退必须显式选择同时兼容二进制、probe 和 PreStop 的 Helm revision，并按相同串行 drain 流程执行；回退到无生命周期旧版本重新进入 bootstrap 等级，禁止自动 rollback。
 
@@ -345,14 +479,23 @@ rtk pytest -q /Users/lossend/pro/rocketmq-helm/tests
 
 每一步独立提交、默认开关关闭；前一步出口未满足不得开始下一步：
 
-1. **证据 spike：** 在隔离分支锁定 grpc-java 1.53.0 `Server.shutdown()` 的内建双 GOAWAY、非阻塞返回、现存 Stream 保留、`awaitTermination`/`shutdownNow` 边界，并验证包装 `ServerCall` 后 drain close 与正常 send/close 的串行竞态；同时验证 AWS/ACK 不暴露业务 8082 listener 的 health-port 能力。产出可重复测试和 provider 实测数据，任一关键假设失败则先改架构，不进入正式实现。
-2. **生命周期核心：** 先写 `DrainSession`、`ProxyLifecycleCoordinator`、`SendDrainGate` 和并发测试，再引入 `ProxyRuntime` 所有权、readiness contributors 与管理接口。出口是状态/CAS/deadline 测试全绿，feature off 行为不变。
+1. **三个证据 spike（复审 Step 1）：** 任一 spike 失败先改架构，不进入批量编码。
+   1. **gRPC**：锁定 grpc-java 1.53.0 `Server.shutdown()` 的内建双 GOAWAY、非阻塞返回、现存 Stream 保留、`awaitTermination`/`shutdownNow` 边界，并验证包装 `ServerCall` 后 drain close 与正常 send/close 的串行竞态。真实 Java Client 5.0.7/5.2.1 覆盖 shutdown 前后并发新 call、listener 拒连、in-flight call、连接重建，以及有/无空闲连接、单/多连接、不同并发度。
+   2. **Remoting**：同一 NLB 地址重连、**第二次 `GO_AWAY`**、并发、batch、5 MiB、剩余 timeout 场景；transport replay 开/关与客户端版本边界。
+   3. **Provider**：AWS、ACK、Kubernetes 的 endpoint/PreStop 并发传播与连接终止 **packet-level 抓包**，含 §4.2 表格中四条属性行为与 health-port 指向非业务 target port 的能力。
+   
+   产出必须包含按协议记录的 `migration_started`、`no_new_work_reached`、`admission_closed`、`accepted_inflight_zero`。**不允许**把 `awaitServerTermination()` 或「已发送 GOAWAY」单独当作跨协议屏障。
+2. **冻结不变量与单一预算模型（复审 Step 2）：** 定义协议级 no-new-work 条件、admission/accepted-inflight/双终态定义、provider/app/PreStop/process 的派生公式（§3.6 命名预算），并**删除文档中的第二套关闭顺序**——全文只保留 §1.1 与 §3.4 的唯一顺序。
+
+3. **关闭范围决策（复审 Step 3）：** 按 §1.2 选定 oneway 策略、Remoting `clientVersion × invocation mode` 矩阵、事务亲和性策略（§9.4），确认 ReceiptHandle/redelivery 是否进入严格门禁，并用生产流量 inventory 验证范围假设。
+
+4. **生命周期核心：** 先写 `DrainSession`、`ProxyLifecycleCoordinator`、`SendDrainGate` 和并发测试，再引入 `ProxyRuntime` 所有权、readiness contributors 与管理接口；同时修复 admin waiter 饥饿（§3.2 的 `202 + runId` 契约）、为所有 executor/worker 增加 bounded stop、并为 supervisor 提供可达且可确认的 drain result 交接（§3.7）。出口是状态/CAS/deadline 测试全绿，feature off 行为不变。
 3. **gRPC 接入：** 配置 max age/grace、tracer holder/filterContext/interceptor permit 绑定、backend/stream 双终态、late Attributes、non-unary active-call registry，以及阶段化 `initiate/close-non-send/await/force`；出口是内建双 GOAWAY 证据、Telemetry/ReceiveMessage 关闭竞态和 5.0.7/5.2.1 组件测试全部通过。
 4. **Remoting 接入：** 在 `NettyRemotingAbstract` 增加默认 NOOP 的 pre-enqueue listener 和显式 `RequestTask` context，Proxy activity 接入 tracked writer、lease 与 event-loop barrier；出口是 5.3.2 严格路径和 legacy 降级路径通过。
 5. **资源与信号：** 统一 runtime shutdown 顺序、执行器有界等待、TERM fallback，并修复 Chart、`mqproxy`、两个 `runserver.sh` 到 Java 的全链路 `exec`。
 6. **指标与门禁：** 增加低基数 metrics、PrometheusRule、drain 日志和升级脚本查询；forced/late/deadline 任一增量可以自动 pause rollout。
-7. **Helm：** 实现 schema/config、HTTP probes、PreStop、600/540 秒预算、PDB/HPA/placement/NetworkPolicy、AWS/ACK 与 standalone 降级 profile；先做 render/lint/test，不读取或覆盖用户私有环境 values。
-8. **升级与矩阵验收：** 实现 canary、两阶段 bootstrap、HPA 双向 freeze、受控 rollout/rollback，最后跑两 provider 的客户端矩阵；只有完整报告满足第 5 节才宣布严格能力可用。
+7. **Helm：** 实现 schema/config、HTTP probes（含 `/ready-for-traffic`）、PreStop、派生预算、PDB/placement/NetworkPolicy、AWS/ACK 与 standalone 降级 profile；固定 `spec.replicas` 且不渲染 HPA。先做 render/lint/test，不读取或覆盖用户私有环境 values。
+8. **升级与矩阵验收：** 实现 canary、一次 annotation bootstrap、live-HPA preflight、受控 rollout/rollback，最后跑两 provider 的客户端矩阵；只有完整报告满足第 5 节才宣布严格能力可用。
 
 ## 8. 代码级设计总览
 
@@ -521,6 +664,27 @@ public CompletableFuture<StopResult> forceStop(Throwable startupFailure);
 
 不要修改公共 `AbstractStartAndShutdown` 的语义；Broker、NameServer 等其他进程不应被本功能改变。
 
+**`ThreadPoolMonitor` 必须改为 deadline-aware（复审 P1-5）。** 当前 `ThreadPoolMonitor.shutdown()` 只调用 `shutdown()`，没有 bounded await 也没有 force stop，且原资源清单未点名修改这个类。后果有两个方向：`STOPPED` 证据会早于真实资源收尾（丢失最后的清理/观测结果）；而若简单地在 hook 中加入**无界** await，卡住的任务会直接耗尽 Pod grace。
+
+因此每个 process-static executor、listener、client、worker 与 scheduler 都必须：
+
+1. 枚举唯一 owner（不得有两处关闭同一资源，也不得无人关闭）；
+2. 执行 `shutdown() -> await(remaining) -> shutdownNow()/close()` 三段式；
+3. 所有 await **只消费同一个绝对 `StopDeadline` 的剩余时间**，任何阶段或子组件都不得重新获得完整预算；
+4. 记录首次失败后继续 best-effort 清理其余资源，不因单点失败短路；
+5. 测试覆盖重复 stop、部分 start 失败、卡死 task 与 forced terminal。
+
+#### ReceiptHandle：缺口是 bounded await 与可观测性，不是「只等自然过期」（复审 P1-2）
+
+`DefaultReceiptHandleManager.shutdown()` **已经**调用 `clearAllHandle()`，并通过 `CLEAR_GROUP` 主动执行 change-invisible-time。因此「关闭时只等待自然过期」这一判断不成立，不得作为设计前提。真实缺口是：
+
+- 收集并等待现有 clear task/Future，受统一 `StopDeadline` 约束（当前是 fire-and-forget）；
+- 超时后记录 remaining handle/group 数与 forced 原因；
+- 验证 schedule/renew/return 三个 worker 的停止顺序（其中两个当前未注册到关闭链）；
+- 用 redelivery/重复消费指标评估影响，而不是断言零影响。
+
+消费语义是否进入严格发布门禁属于范围决策，见 §1.2。
+
 Cluster strict 路径需要把 deadline 继续传入嵌套 owner，而不只等待最外层三个 executor。`DefaultMessagingProcessor`、`ClusterServiceManager` 及其子组件实现 proxy-only `DeadlineAwareShutdown.shutdown(ShutdownDeadline)` overload；原 `StartAndShutdown.shutdown()` 保留给 feature-off/其他调用方。`RemotingProtocolServer`、`ClusterServiceManager` 和 `GrpcChannelManager` 当前在构造/init 中启动的调度全部搬到 `start()`；`DefaultGrpcMessagingActivity` 成为 `GrpcChannelManager` 的明确 owner。首批必须覆盖：MessagingProcessor producer/consumer pools、ClusterServiceManager scheduler、TopicRoute/Metadata cache refresh、ReceiptHandle schedule/renew/return、HeartbeatSyncer、ClusterTransaction heartbeat、GrpcChannelManager、gRPC application 五个 pool、Remoting 六个 pool/timer、shared gRPC server executor 和 process-static `ThreadPoolMonitor`。processor 中仅引用外部 executor 的字段不重复关闭。
 
 ### 8.3 核心接口与状态表示
@@ -609,11 +773,17 @@ public interface ReadinessContributor {
 
 首批 contributor：`grpc-listener`、`remoting-listener`、`messaging-started`、`tls-context`、`nameserver-route` 和每个 `warmup-topic:<topic>`。每个 warmup topic 先调用现有 `MessagingProcessor.getTopicRouteDataForProxy(...)` 证明 NameServer 路由，再调用 `MetadataService.getTopicMessageType(...)`；Cluster 实现会通过 Broker `getTopicConfig(...)` 建立连接且不发送消息。空路由、`UNSPECIFIED`、异常或 timeout 都算失败；以固定上限指数退避重试，直到 `proxyWarmupTimeoutSeconds` 后保持 STARTING/NotReady，后续仍继续低频重试。
 
-`ReadinessBarrier` 只允许第一次 `all required success` 将 STARTING 推为 READY。READY 后：
+`ReadinessBarrier` 只允许第一次 `all required success` 将 STARTING 推为 READY。READY 后两个端点分别求值（谓词见 §3.2）：
 
-- `SHARED_DEPENDENCY` 失败只更新 snapshot/metric，readiness fail-open。
-- listener 已关闭、核心 executor 意外 terminated、runtime fatal 等 `LOCAL_FATAL` 立即 fail-close。
-- QUIESCING 之后 readiness 永远不再恢复，即使 contributor 重新成功。
+| | `/ready`（kubelet/EndpointSlice） | `/ready-for-traffic`（provider health check） |
+|---|---|---|
+| `SHARED_DEPENDENCY` 失败 | **fail-open**，只更新 snapshot/metric | **fail-close**，返回 503 |
+| `LOCAL_FATAL` | 立即 fail-close | 立即 fail-close |
+| QUIESCING 之后 | 永不恢复，即使 contributor 重新成功 | 见下方条件式 200 |
+
+`SHARED_DEPENDENCY` 的 fail-close 必须带可调阈值（连续失败次数/持续时长），避免单次抖动触发；阈值与 `D_dependency_wait`（§3.6）一致派生。
+
+`/ready-for-traffic` 在计划内 QUIESCING/DRAINING 期间是否继续返回 200，只有 §3.2 三个条件同时成立才可采用；STARTING 与 STOPPED 必须返回 503。默认实现取保守值（drain 期间即返回 503），只有在 §4.2 spike 证明 provider 不会因 unhealthy 终止既有连接后，才允许切到条件式 200 —— 该切换必须是显式配置项，不得由代码默认。
 
 admin-only bootstrap 模式不执行严格 warmup gate；两个业务 listener 已 bind 且无 local fatal 即 `/ready=200`，snapshot 明确 `lifecycleEnabled=false`。
 
@@ -792,6 +962,16 @@ auth/context validation 抛错、`executor.execute` 抛错和 `GrpcTaskRejectedE
 
 ### 9.3 Remoting 通用扩展点
 
+**必须新增的服务端实现缝（复审 P1-7）。** 当前 `NettyRemotingServer` 没有持有完整的 child `ChannelGroup`，acceptor channel 也不是可供 drain 协调器使用的长期字段，因此下列各项属于**新增实现**而非已有能力：
+
+- retained server channel（acceptor）作为长期字段；
+- child channel tracking（完整 `ChannelGroup`）；
+- 在 event loop 上按 `clientVersion × invocation mode`（sync/async/oneway）分支的 draining 标记与**可观测 barrier**；
+- 对可安全响应的请求返回 `GO_AWAY` 而**不进入业务 dispatch**，并为 oneway / 旧版本客户端提供明确替代路径（见 §1.2）；
+- freeze/close 的 deadline 行为。
+
+**hot-path 预算必须有数据（复审 P1-7）。** `remoting` 是 Broker 最热路径，本方案新增 listener 调用、`RequestTaskContext` 字段与 scoped context 安装/清理。NOOP 默认实现只保证**行为**不变，不保证**性能**不变。Task 6 出口条件必须包含：每次 send 的 gate/acquire 原子操作、ChannelGroup 遍历、并发关闭与 5 MiB 请求的基准数据；Broker send 路径 p99 回归 ≤ 1%；结果写入 `findings.md` 作为提交证据。**不得**在没有数据时断言上游 hot path 一定不能接受，也不得在没有数据时宣称开销可忽略。
+
 `remoting` 模块新增的 API 不包含 Proxy 类型：
 
 ```java
@@ -868,6 +1048,22 @@ RequestCode.SEND_MESSAGE_V2
 RequestCode.SEND_BATCH_MESSAGE
 ```
 
+#### 事务消息亲和性：必须在编码前四选一（复审 P0-3）
+
+「只豁免事务 Producer 的 lease」**不可实施**，不得再写成推荐实现。已确认事实：
+
+- `ClusterTransactionService` 只在本 Proxy 的 `ProducerManager` 仍有本地 producer group 时向 Broker 维持心跳；
+- Broker 的 transaction check 回到注册的 Proxy 后，`ProxyClientRemotingProcessor` 仍依赖该 Proxy **本地** producer channel；
+- grpc-java `maxConnectionAge` 是 **Server 全局**配置，不知道 transport 后续会承载哪些 producer group；
+- 同一 transport 可复用多种请求，当前没有事务专用 listener 或 SDK 变更。
+
+必须选定并记录一种：
+
+1. 全局关闭或显著拉长 steady-state gRPC lease，并重新定义扩容重平衡 SLO（与 §3.3 的压测结论联动）；
+2. 引入事务专用 listener/路由或其他明确的亲和性边界；
+3. 首期明确排除事务消息，并用生产流量 inventory 作为发布门禁；
+4. 修改客户端/注册协议，使 transaction check 不再依赖原 Proxy 的本地 channel。
+
 `CONSUMER_SEND_MSG_BACK`、`END_TRANSACTION`、`RECALL_MESSAGE` 和 oneway 不进入严格 gate。每个 active Channel 在 `onChannelActive` 写 270–330 秒的 monotonic lease deadline、expired flag 和 per-channel admitted-send count；这些都是单 Channel attributes，不含 opaque/request side map。随机源可注入并做边界测试。listener 在该 Channel 的 event loop 安排一次 expiry task：若届时 admitted count 为零则关闭 idle Channel，否则只写 expired flag；每个 permit 的 `completionFuture()` 将 admitted count 减至零后关闭已过期 Channel。lbCutoff 后新建的 Remoting Channel 在 `onChannelActive` 立即标记 late 并关闭；若 request 与 close 竞态，`beforeEnqueue` 仍按版本返回 GO_AWAY/legacy retry error，绝不进入 Broker。
 
 在 producer acknowledged request 的 `beforeEnqueue`：
@@ -916,12 +1112,15 @@ HTTP 语义固定为：
 |---|---|---|
 | `GET /started` | 本地初始化完成 200 | 未完成/启动 fatal 503 |
 | `GET /live` | STARTING 至 STOPPING 均 200 | fatal 或 STOPPED 503 |
-| `GET /ready` | READY 200 | 其余 503 |
+| `GET /ready` | lifecycle 允许成员资格、listener 已绑定、无 fatal 时 200（共享依赖 fail-open） | 其余 503 |
+| `GET /ready-for-traffic` | warmup 完成、listener 已绑定、**依赖健康**、无 fatal 时 200 | 依赖 fail-close、STARTING、STOPPED 均 503 |
 | `GET /state` | loopback 200 | 非 loopback 403 |
-| `POST /drain?wait=false` | 首次或重入均 202，返回同一 drainId/cutoffs | lifecycle off 409；非 loopback 403；参数非法 400 |
-| `POST /drain?wait=true&waitTimeoutSeconds=N` | 正常 DRAINED 200 | caller wait 超时 504 但 session 继续；FORCE_DRAINING 503 |
+| `POST /drain` | 首次或重入均 **202**，返回同一 drainId/cutoffs | lifecycle off 409；非 loopback 403；参数非法 400 |
+| `GET /drain/{runId}` | 200，返回 phase/terminal/forced/剩余时间 | 未知 runId 404；非 loopback 403 |
 
-方法错误返回 405 并写 `Allow`；未知 path 404。loopback 判断只使用 `HttpExchange.getRemoteAddress().getAddress().isLoopbackAddress()`，忽略所有 forwarded header。`N` 只允许 1–480；它只约束 HTTP future wait。
+方法错误返回 405 并写 `Allow`；未知 path 404。loopback 判断只使用 `HttpExchange.getRemoteAddress().getAddress().isLoopbackAddress()`，忽略所有 forwarded header。
+
+**没有任何 handler 可以阻塞（复审 P1-4）。** `?wait=true&waitTimeoutSeconds=N` 与 504 语义整体删除：admin server 固定两线程，两个并发/重入 waiter 即可让 `/live`、`/ready` 无线程可用，导致 Pod 在 drain 中被 kubelet 杀死；JDK `HttpServer` 只有 server 级 `setExecutor()`，无法按 `HttpContext` 预留线程。等待改由调用方轮询 `GET /drain/{runId}` 完成。必须设置有界队列、并发上限与单请求超时，并把「`POST /drain` flood 下 `/live` 最大延迟」列为门禁；admin executor 自身服从 `StopDeadline`。
 
 ### 10.2 配置校验落点
 
@@ -1135,23 +1334,23 @@ proxy:
     preStopWaitSeconds: 480
     terminationSafetyMarginSeconds: 30
     providerHealthPortVerified: false
+    dependencyFailureThreshold: 3
+    dependencyWaitSeconds: 0
+    readyForTrafficDuringDrain: false
   minReadySeconds: 0                 # feature-off 兼容默认；strict profile 显式设 600
   progressDeadlineSeconds: 600       # feature-off 兼容默认；strict profile 显式设 >=1800
   terminationGracePeriodSeconds: 120 # 当前兼容默认；strict profile 显式设 540
   pdb: {enabled: true, minAvailable: 1, maxUnavailable: null}
-  autoscaling:
-    enabled: false
-    minReplicas: 3
-    maxReplicas: 20
-    metrics: []
-    behavior: {}
 ```
+
+`proxy.autoscaling.*` 整组删除，`templates/proxy-hpa.yaml` 不再渲染（复审 P1-8）。
 
 schema 校验类型/枚举/单值范围，`_validation.tpl` 聚合跨字段错误并由 `templates/proxy.yaml` 顶部调用。严格模式至少校验：
 
 ```text
 lifecycle.enabled && lifecycle.admin.enabled
-replicas >= 3 或 autoscaling.minReplicas >= 3
+replicas 显式设置（不接受 HPA 托管）
+remaining_ready_capacity >= peak_required_capacity * safetyFactor   # 见 §4.1 容量不等式
 PDB minAvailable/maxUnavailable 二选一
 lbDetachTimeout
   + ceil(connectionLeaseSeconds * (1 + remotingLeaseJitterRatio))
@@ -1163,7 +1362,7 @@ preStopWaitSeconds + jvmShutdownTimeoutSeconds
   <= terminationGracePeriodSeconds
 minReadySeconds >= terminationGracePeriodSeconds + 60
 progressDeadlineSeconds >= 1800
-HPA minReplicas <= maxReplicas
+不存在 proxy.autoscaling.* 字段（存在即 fail）
 providerHealthPortVerified == true
 stable remotingAccessAddr 非空
 strict profile 的 warmupTopics 非空
@@ -1187,7 +1386,7 @@ schema 不负责 provider 能力真实性；`providerHealthPortVerified` 只能�
 `templates/proxy.yaml` 逐块修改：
 
 1. ConfigMap 将 values 映射到第 3.5 节 Java key；该 ConfigMap 是时间参数唯一配置源并继续进入现有 checksum。
-2. HPA 开启时 Deployment 不渲染 `spec.replicas`。
+2. Deployment 始终渲染 `spec.replicas`；不渲染 HPA、不留 replicas ownership 分支。
 3. 渲染 `minReadySeconds`、`progressDeadlineSeconds`、`terminationGracePeriodSeconds`，保持 `maxSurge: 1/maxUnavailable: 0`。
 4. image 改用 `rocketmq.proxy.image`。
 5. command/args 直接执行 `./mqproxy`；不再生成 `/bin/sh -ec './mqproxy ...'`。
@@ -1199,13 +1398,13 @@ schema 不负责 provider 能力真实性；`providerHealthPortVerified` 只能�
 
 无需修改 `templates/tools-configmap.yaml`：`mqproxyctl` 必须来自经过验证的镜像，不从 Chart 注入。
 
-render 测试用 `yaml.safe_load_all` 断言 feature-off/admin-only/strict 三种 manifest、HTTP path/port、PreStop 退出码、admin 不进入 Service、600/540/1800、PDB values 生效、HPA ownership、独立 image fallback 和 ConfigMap key 一致。
+render 测试用 `yaml.safe_load_all` 断言 feature-off/admin-only/strict 三种 manifest、HTTP path/port、PreStop 退出码、admin 不进入 Service、600/540/1800、PDB values 生效、`spec.replicas` 恒定渲染且无 HPA 对象、独立 image fallback 和 ConfigMap key 一致。
 
-### 12.4 HPA、NLB、NetworkPolicy 与 PrometheusRule
+### 12.4 NLB、NetworkPolicy 与 PrometheusRule
 
-**新增：**
+**删除：**
 
-- `/Users/lossend/pro/rocketmq-helm/templates/proxy-hpa.yaml`
+- `/Users/lossend/pro/rocketmq-helm/templates/proxy-hpa.yaml` 不新增（复审 P1-8）；若仓库已存在则删除，并由 §12.2 的负例校验保证 `proxy.autoscaling.*` 不再出现。
 
 **修改：**
 
@@ -1214,9 +1413,7 @@ render 测试用 `yaml.safe_load_all` 断言 feature-off/admin-only/strict 三�
 - `/Users/lossend/pro/rocketmq-helm/templates/monitoring.yaml`
 - `/Users/lossend/pro/rocketmq-helm/tests/test_proxy_graceful_lifecycle_chart.py`
 
-HPA 使用 `autoscaling/v2`，scale-down 默认最多 `Pods=1/periodSeconds=600`，stabilization window 至少 600 秒。metrics 由 values 显式传入，Chart 不猜 CPU/QPS 目标。
-
-NLB 保留 gRPC listener，可选渲染稳定 Remoting listener；health check 单独指向 Pod 8082 `/ready`，绝不创建业务 8082 listener。AWS/ACK values 显式锁定 target type、cross-zone、externalTrafficPolicy、health interval/threshold 和 450 秒 deregistration/connection drain。provider 不支持独立 health port 时 strict validation 失败。
+NLB 保留 gRPC listener，可选渲染稳定 Remoting listener；health check 单独指向 Pod 8082 **`/ready-for-traffic`**，绝不创建业务 8082 listener。AWS/ACK values 显式锁定 target type、cross-zone、externalTrafficPolicy、health interval/threshold、450 秒 deregistration/connection drain，以及 §4.2 表格的两条连接终止属性——`deregistration_delay.connection_termination.enabled=false` 与 `target_health_state.unhealthy.connection_termination.enabled=false`（后者 AWS 默认为 `true`，必须显式覆盖）。provider 不支持独立 health port 时 strict validation 失败。
 
 `networkpolicy.yaml` 修正当前错误 selector，Proxy policy 选择 `app.kubernetes.io/component=proxy`；业务、metrics、admin health 分端口/来源配置。即使 CIDR 放行 8082，远端 `/state`/POST 仍由应用拒绝。
 
@@ -1273,18 +1470,16 @@ Deployment 增加 direct command、admin container port、三种 HTTP probe、Pr
 
 `proxy_rollout.py` 集中实现：
 
-1. `helm template/lint/schema` 并从 manifest 读取 image/预算/replica/HPA/PDB。
+1. `helm template/lint/schema` 并从 manifest 读取 image/预算/replica/PDB。
 2. `kubectl exec <pod> -- ./mqproxyctl status` 从 loopback 读取状态；不远程访问 `/state`。
 3. 拒绝存在 deletionTimestamp、非 READY、已有 drain、NLB target 不健康或 provider evidence 不符的集群。
-4. 比较 live/current-release/target HPA。严格模式禁止在主 image/config rollout 中直接做 HPA absent→enabled，或同时改变 min/max/metrics/behavior；发现差异时先执行 `prepare-hpa`。
-5. `prepare-hpa` 以当前 release values/工作负载为基线，只引入目标 HPA ownership/spec，并生成最后优先级的 `hpa-frozen.yaml`：scaleUp/scaleDown `selectPolicy: Disabled`。它执行一次 Helm upgrade，manifest diff gate 只允许 HPA 与 Deployment `replicas` ownership 变化，禁止 Pod template/image/checksum/config 改变；等待 HPA `observedGeneration` 和 Deployment desired replicas 稳定。已有同 spec HPA 也通过该步骤冻结，只是无需改变 metrics/min/max。
-6. 主 upgrade 使用目标 chart/values **加同一个 frozen overlay**，所以 release manifest 自身保持双向 Disabled，Helm 不会把冻结覆盖；执行不带 `--atomic` 的 `helm upgrade --wait`，timeout 下限按 replica/minReady/grace/启动余量计算。
-7. 持续断言最多一个旧 Pod Terminating、下一 Pod 删除前上一 Pod 已 DRAINED/消失；违约立即 `kubectl rollout pause` 并停止后续动作。
-8. forced/deadline/late/termination-failure 任一指标增量、send SLO 或 NLB 异常同样 pause，不自动反向 rollout；失败时 release 继续保留 frozen HPA，便于人工处置。
-9. 成功且观察窗结束后再以目标 chart/values、**不带 frozen overlay** 执行第二次 Helm upgrade；manifest diff gate 只允许 HPA freeze annotation/behavior 恢复为最终目标，等待 observedGeneration。脚本崩溃后 `restore-hpa` 也必须走 Helm revision，不能直接 patch live object。
-10. manual scale-down 每次只改 1 replica，join 当前 drain/删除后才进行下一次。
+4. **断言目标 workload 无 live HPA**（`kubectl get hpa` 按 scaleTargetRef 匹配）。检测到即 fail 并退出，不尝试冻结或接管——固定 replicas 是本方案「最多一个旧 Pod Terminating」串行 drain 约束的前提（复审 P1-8）。
+5. **单次** upgrade：以目标 chart/values 执行不带 `--atomic` 的 `helm upgrade --wait`，timeout 下限按 replica/minReady/grace/启动余量计算。不再有 prepare/main/restore 三段事务与 frozen overlay。
+6. 持续断言最多一个旧 Pod Terminating、下一 Pod 删除前上一 Pod 已 DRAINED/消失；违约立即 `kubectl rollout pause` 并停止后续动作。
+7. rollout 判据以 §3.7 选定的持久 drain result 交接为主、指标为辅；forced 按 §4.4 的分级策略处理（`accepted_sends > 0` pause，`== 0` warn 继续）。send SLO 或 NLB 异常同样 pause，不自动反向 rollout。交接读写失败、missing/stale series、query timeout 一律 fail-closed。
+8. manual scale-down 每次只改 1 replica，join 当前 drain/删除后才进行下一次。
 
-supervisor 为每次事务保存 current revision、target values hash、frozen overlay、prepare/main/restore revision 与 HPA snapshot；重入时依据 release revision 恢复而非猜测阶段。三个现有 upgrade 脚本只保留环境解析/确认并调用共享 supervisor，不能各自复制一版 HPA/drain 逻辑。controlled rollback 是 supervisor 独立子命令，复用同一 Helm-managed 冻结和单 Pod gate。
+supervisor 为每次事务保存 current revision、target values hash 与 upgrade revision；重入时依据 release revision 恢复而非猜测阶段。三个现有 upgrade 脚本只保留环境解析/确认并调用共享 supervisor，不能各自复制一版 drain 逻辑。controlled rollback 是 supervisor 独立子命令，复用同一单 Pod gate。
 
 ## 13. Helm/发布 TDD 任务与提交边界
 
@@ -1312,7 +1507,7 @@ rtk helm template rocketmq-data . --namespace rocketmq
 拆成两个提交：
 
 1. `feat(chart): wire proxy graceful lifecycle`
-2. `feat(chart): add proxy hpa and nlb drain guards`
+2. `feat(chart): add proxy nlb drain guards`
 
 ### Task 12：Standalone 降级接入
 
@@ -1328,9 +1523,9 @@ rtk helm lint proxy-sg-standalone \
 
 **提交：** `feat(standalone): add degraded proxy lifecycle support`
 
-### Task 13：rollout/HPA supervisor
+### Task 13：rollout supervisor
 
-所有 kubectl/helm/docker/metrics 调用先做 adapter + fake 输出测试；覆盖 HPA absent→enabled、已有 HPA min/max/metrics/behavior diff、`prepare-hpa` 只允许 HPA/replicas ownership diff、主 upgrade 的 frozen overlay 最后优先、restore revision 只改 HPA、freeze 两方向、observedGeneration、pause-on-second-terminating、脚本崩溃按 revision 恢复、timeout 公式、无 `--atomic`、受控 rollback 和逐 1 缩容。增加负例证明“先 live patch HPA、再普通 Helm upgrade”被计划器拒绝。
+所有 kubectl/helm/docker/metrics 调用先做 adapter + fake 输出测试；覆盖 **检测到 live HPA 即 fail** 的负例、单次 upgrade 路径、pause-on-second-terminating、脚本崩溃按 revision 恢复、timeout 公式、无 `--atomic`、受控 rollback 和逐 1 缩容。另需覆盖 drain result 交接：读写失败/missing/stale/query timeout 全部 fail-closed，以及 forced 分级（`accepted_sends > 0` pause、`== 0` warn 继续）。
 
 ```bash
 rtk pytest -q tests/test_proxy_rollout.py tests/test_upgrade_proxy_lifecycle.py \
@@ -1343,7 +1538,9 @@ rtk pytest -q tests/test_proxy_rollout.py tests/test_upgrade_proxy_lifecycle.py 
 
 先在 AWS/ACK 隔离 release 证明：8082 不作为 listener 仍可作 target health port；readiness 失败至最后新连接 p999 ≤60 秒；450 秒 deregistration 与 Proxy 时钟并行。证据未通过时不得提交 `providerHealthPortVerified=true`。
 
-测试 values 独立提交：`test(chart): exercise proxy lifecycle on provider test profiles`。完成 canary 与两阶段 bootstrap 后，生产 values/Chart version 单独提交：`chore(prod): enable graceful proxy lifecycle`，确保一键回退只撤生产 enablement，不撤底层能力。
+先在 AWS/ACK 隔离 release 还必须证明 §4.2 表格的两条连接终止属性实际生效：deregistration draining 期间既有连接不被 RST；target 被判 unhealthy 时既有连接不被 RST。另需实测 draining 期间健康检查是否仍在评估、评估出 unhealthy 后是否仍终止连接——该行为文档未定义，只能抓包确认，结论直接决定 §8.4 的 `/ready-for-traffic` 是否可用条件式 200。
+
+测试 values 独立提交：`test(chart): exercise proxy lifecycle on provider test profiles`。完成 canary 与 annotation bootstrap 后，生产 values/Chart version 单独提交：`chore(prod): enable graceful proxy lifecycle`，确保一键回退只撤生产 enablement，不撤底层能力。
 
 ### Task 15：全量验证与格式化
 
