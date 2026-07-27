@@ -161,7 +161,9 @@ public class GrpcMessagingApplication extends MessagingServiceGrpc.MessagingServ
                 .pipe(new AuthenticationPipeline(authConfig, messagingProcessor));
         }
         pipeline = pipeline.pipe(new ContextInitPipeline());
-        return new GrpcMessagingApplication(new DefaultGrpcMessagingActivity(messagingProcessor), pipeline);
+        GrpcMessagingActivity activity = new org.apache.rocketmq.proxy.lifecycle.grpc.SendLifecycleMessagingActivity(
+            new DefaultGrpcMessagingActivity(messagingProcessor));
+        return new GrpcMessagingApplication(activity, pipeline);
     }
 
     protected Status flowLimitStatus() {
@@ -180,6 +182,7 @@ public class GrpcMessagingApplication extends MessagingServiceGrpc.MessagingServ
         } else {
             log.error("[BUG]grpc request pipe is not been executed");
         }
+        bindSendLifecycle(context);
         executor.execute(new GrpcTask<>(runnable, context, request, responseObserver, statusResponseCreator.apply(flowLimitStatus())));
     }
 
@@ -243,25 +246,12 @@ public class GrpcMessagingApplication extends MessagingServiceGrpc.MessagingServ
     public void sendMessage(SendMessageRequest request, StreamObserver<SendMessageResponse> responseObserver) {
         Function<Status, SendMessageResponse> statusResponseCreator = status -> SendMessageResponse.newBuilder().setStatus(status).build();
         ProxyContext context = createContext();
-        bindSendLifecycle(context);
         try {
             this.addExecutor(this.producerThreadPoolExecutor,
                 context,
                 request,
-                () -> {
-                    SendLifecycleContext lifecycle = context.getSendLifecycleContext();
-                    if (lifecycle != null && !lifecycle.backendStarted()) {
-                        // cancel/reject already terminated this send before dispatch; never call the Broker.
-                        return;
-                    }
-                    grpcMessagingActivity.sendMessage(context, request)
-                        .whenComplete((response, throwable) -> {
-                            if (lifecycle != null) {
-                                lifecycle.backendTerminal(throwable);
-                            }
-                            writeResponse(context, request, response, responseObserver, throwable, statusResponseCreator);
-                        });
-                },
+                () -> grpcMessagingActivity.sendMessage(context, request)
+                    .whenComplete((response, throwable) -> writeResponse(context, request, response, responseObserver, throwable, statusResponseCreator)),
                 responseObserver,
                 statusResponseCreator);
         } catch (Throwable t) {
