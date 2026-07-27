@@ -23,11 +23,13 @@ import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.common.utils.StartAndShutdown;
 import org.apache.rocketmq.logging.org.slf4j.Logger;
 import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
+import org.apache.rocketmq.proxy.lifecycle.ShutdownDeadline;
 import org.apache.rocketmq.proxy.service.cert.TlsCertificateManager;
 
 import java.io.IOException;
 import java.security.cert.CertificateException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class GrpcServer implements StartAndShutdown {
     private static final Logger log = LoggerFactory.getLogger(LoggerName.PROXY_LOGGER_NAME);
@@ -40,6 +42,9 @@ public class GrpcServer implements StartAndShutdown {
 
     private final TlsCertificateManager tlsCertificateManager;
     @VisibleForTesting final GrpcTlsReloadHandler tlsReloadHandler;
+
+    private final AtomicBoolean serverDrainStarted = new AtomicBoolean(false);
+    private final AtomicBoolean forceStarted = new AtomicBoolean(false);
 
     protected GrpcServer(Server server, long timeout, TimeUnit unit,
         TlsCertificateManager tlsCertificateManager) throws Exception {
@@ -58,18 +63,53 @@ public class GrpcServer implements StartAndShutdown {
         log.info("grpc server start successfully.");
     }
 
+    /**
+     * Feature-off compatibility path. Builds one legacy deadline from the fixed
+     * shutdown timeout and delegates to the phased lifecycle instead of the old
+     * ignore-the-boolean chain, so it no longer swallows a non-terminated server.
+     */
     public void shutdown() {
+        ShutdownDeadline legacy = ShutdownDeadline.afterNanos(
+            System.nanoTime(), unit.toNanos(timeout), System::nanoTime);
         try {
-            // Unregister the TLS context reload handler
-            tlsCertificateManager.unregisterReloadListener(this.tlsReloadHandler);
-
-            this.server.shutdown().awaitTermination(timeout, unit);
-
-            log.info("grpc server shutdown successfully.");
-        } catch (Exception e) {
-            e.printStackTrace();
-            log.error("Failed to shutdown grpc server", e);
+            initiateServerDrain();
+            if (!awaitServerTermination(legacy)) {
+                forceServerShutdown();
+                awaitServerTermination(legacy);
+            }
+        } catch (InterruptedException e) {
+            forceServerShutdown();
+            Thread.currentThread().interrupt();
+        } finally {
+            unregisterTlsListener();
+            log.info("grpc server shutdown finished.");
         }
+    }
+
+    /** Once-only, non-blocking ordered shutdown; triggers grpc-java's built-in double GOAWAY. */
+    public void initiateServerDrain() {
+        if (serverDrainStarted.compareAndSet(false, true)) {
+            server.shutdown();
+        }
+    }
+
+    /** Awaits termination within the deadline's remaining time; returns the raw boolean, never swallows interrupts. */
+    public boolean awaitServerTermination(ShutdownDeadline deadline) throws InterruptedException {
+        long remainingNanos = deadline.remainingNanos();
+        return remainingNanos > 0
+            ? server.awaitTermination(remainingNanos, TimeUnit.NANOSECONDS)
+            : server.isTerminated();
+    }
+
+    /** Once-only forced cancellation of remaining streams. */
+    public void forceServerShutdown() {
+        if (forceStarted.compareAndSet(false, true)) {
+            server.shutdownNow();
+        }
+    }
+
+    private void unregisterTlsListener() {
+        tlsCertificateManager.unregisterReloadListener(this.tlsReloadHandler);
     }
 
     @VisibleForTesting
