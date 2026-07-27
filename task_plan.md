@@ -17,7 +17,7 @@ Produce and persist a decision-complete, server-managed design for graceful Prox
 
 ## Current Phase
 
-Complete
+Phase 8: Detail the Code-Level Implementation Plan
 
 ## Phases
 
@@ -73,6 +73,16 @@ Complete
 - [x] Verify document consistency, preserve the original plan, and update planning records.
 - **Status:** complete
 
+### Phase 8: Detail the Code-Level Implementation Plan
+
+- [x] Map the approved design to exact RocketMQ and Helm files, constructors, lifecycle owners, and call sites.
+- [x] Define implementation-ready Java interfaces, state representations, method contracts, and protocol adapters.
+- [x] Break implementation into TDD-sized tasks with commands, expected failures, pass criteria, and commit boundaries.
+- [x] Add Helm/template/script file-level tasks without touching user-private values or runtime code.
+- [x] Adversarially review the detailed plan for API compatibility, concurrency races, and incomplete paths.
+- [x] Verify the expanded plan, preserve the original plan, and update planning records.
+- **Status:** complete
+
 ## Errors Encountered
 
 | Error | Attempt | Resolution |
@@ -82,3 +92,5 @@ Complete
 | `rtk test -s` was not proxied as the shell builtin | 1 | Verify non-empty files with `rtk wc -c` instead. |
 | A stale-text regex used invalid escaped full-width parentheses | 1 | Switched the check to fixed-string `rg -F` patterns. |
 | A read-only reviewer created an unrequested duplicate design document | 1 | Removed the duplicate and retained only the reviewed canonical plan under `docs/plans/`. |
+| File discovery included nonexistent `distribution/src/main` | 1 | Removed that path and continued with the real `distribution/bin` and Docker filesystem locations. |
+| RocketMQ Git rejected the sibling Helm repository as an absolute pathspec | 1 | Switched final Helm verification to `git -C /Users/lossend/pro/rocketmq-helm ...`. |

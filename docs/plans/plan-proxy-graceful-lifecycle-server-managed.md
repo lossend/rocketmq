@@ -181,12 +181,25 @@ admin 开启但 lifecycle 关闭时，三个 health GET 使用兼容就绪语义
 
 permit 的 backend 状态使用 `NOT_STARTED -> STARTED -> TERMINAL` 或 `NOT_STARTED -> SKIPPED` 单调 CAS。只有确定 handler 未 dispatch Broker 时才能写 SKIPPED；一旦 STARTED，cancel/close 必须等待真实 Future terminal。
 
-**待关闭的顺序冲突（复审 P0-1）。** 本节与 §9.2 当前写的是「先 `closeAdmission()`，再 `initiateServerDrain()` 发 GOAWAY」；而 §1.1 的规范顺序是「先分协议迁移 → 到达经验证的 no-new-work 边界 → 才关闭该协议的 admission」。两者方向相反，全文只能保留一套，必须由 §7 Step 1 的 gRPC spike 数据裁定后统一改写：
+#### 唯一关闭顺序（复审 P0-1、Step 2）
 
-- 若 spike 证明 `Server.shutdown()` 的双 GOAWAY 本身即构成 gRPC 的 no-new-work 边界，则采用 §1.1 顺序，`closeAdmission()` 移到 `awaitServerTermination` 观察到 no-new-work 之后；
-- 若 GOAWAY 之后仍可能有新 stream 进入业务（strict client 竞态），则必须先关 gate，但此时**不能**再声称「不主动拒绝合法请求」，须按 §1.1 四选一显式放宽目标。
+全文只有一套关闭顺序，即 §1.1 的「先迁移 → 到达经验证的 no-new-work 边界 → 才关闭 admission」。每个协议独立走以下四个可观测里程碑，唯一的变量是第 2 步的谓词，由 §7 Step 1 的 spike 填入：
 
-在裁定前，下面的描述是**待修订**内容，不作为规范：在 QUIESCING/MIGRATING 阶段 gate 保持开放；进入 DRAINING 的线性化动作就是 `closeAdmission()`，随后立即冻结两个协议的新 intake。同步校验失败、未 dispatch、executor reject 等没有 Broker Future 的路径必须显式写入 synthetic backend terminal，不能靠 finally 猜测完成。
+| 里程碑 | 语义 | 作用域 |
+|---|---|---|
+| `migration_started` | 向该协议存量连接发起迁移：gRPC 一次性 `initiateServerDrain()` 触发内建双 GOAWAY；Remoting 按 `clientVersion × invocation mode` 返回 GO_AWAY 或关闭 idle channel | 单协议 |
+| `no_new_work_reached` | 该协议已不再向业务分发新请求的**经验证**条件 + `freezeRequestIntake()` 类的 intake 冻结完成 | 单协议 |
+| `admission_closed` | 共享 `SendDrainGate.closeAdmission()`，由**最后**到达 `no_new_work_reached` 的协议触发，全程只调用一次 | 全局，一次 |
+| `accepted_inflight_zero` | 已 accepted 的 send 双终态归零 | 单协议观测、共享 gate 判零 |
+
+因此 QUIESCING/MIGRATING 全程 gate 保持开放；`closeAdmission()` 不再是「进入 DRAINING 的第一个动作」，而是两个协议都已证明 no-new-work 之后的收口动作。协议迁移彼此独立并发，不得让一个协议等待另一个协议的 gate 状态才开始迁移。
+
+第 2 步的谓词是**配置化 predicate**，不是文档假设。spike 只能得出两种结论，二者都落到同一顺序，不产生第二套流程：
+
+- 若双 GOAWAY（或 Remoting 的 GO_AWAY + intake freeze）本身即构成 no-new-work 边界，`no_new_work_reached` 直接由该证据满足；
+- 若之后仍可能有新 stream/请求进入业务（strict client 竞态），则 predicate 退化为「migration 已发起 + 有界 quiet 窗口内未观察到新业务分发」，并且**必须**按 §1.1 四选一显式放宽目标并记录：此时不能再声称「不主动拒绝仍可能合法到达的请求」。quiet 窗口长度是配置项，受同一 effective deadline 约束，超时即按 late 处理并计入指标，不得无界等待。
+
+同步校验失败、未 dispatch、executor reject 等没有 Broker Future 的路径必须显式写入 synthetic backend terminal，不能靠 finally 猜测完成。
 
 **Remoting 实现：**
 
@@ -204,7 +217,7 @@ permit 的 backend 状态使用 `NOT_STARTED -> STARTED -> TERMINAL` 或 `NOT_ST
 - `GrpcMessagingApplication.sendMessage` 必须先 CAS `NOT_STARTED -> STARTED` 成功才可调用 Broker，`CompletableFuture` 完成后置 TERMINAL；若 ACL/同步校验/cancel 在 dispatch 前结束 RPC，wrapped call/listener 或 `streamClosed` CAS 为 SKIPPED，后到的业务入口因 STARTED CAS 失败而禁止 dispatch。`ServerStreamTracer.streamClosed` 是唯一 canonical protocol terminal；`ServerCall.close` 只记录 response-close intent，cancel/deadline 只记录原因，均不得把已 STARTED 的 backend 提前终止。
 - `ServerTransportFilter.transportReady` 只把建连时间和 late 标记写进 transport Attributes，interceptor 从 `ServerCall.getAttributes()` 拒绝 late transport 的 send；不得把 transport filter 当成可关闭 channel 的 API，也不得由 `transportTerminated` 直接释放 holder/permit。
 - 原始 `io.grpc.Server`、TLS reload listener 和 builder 创建的 boss/worker EventLoopGroup 只能由 `GrpcServer` 持有；`GrpcDrainAdapter` 不得持有或直接操作这些对象，只能调用 `GrpcServer` 的阶段化生命周期接口。严格路径禁止再调用现有固定 `grpcShutdownTimeSeconds` 的一体式 `shutdown()`。
-- **顺序待裁定（见 §3.4 的顺序冲突说明）：** 当前描述为「进入 DRAINING 后先关 gate，再调用一次 `GrpcServer.initiateServerDrain()`」，与 §1.1 的「先迁移 → 到达 no-new-work → 再关 admission」相反。§7 Step 1 的 gRPC spike 裁定后本条必须与 §3.4 同步改写，不得两处各留一套。`initiateServerDrain()` 只 CAS 幂等调用非阻塞的 `Server.shutdown()` 并立即返回。grpc-java 1.53.0 随后按连接发送 `GOAWAY(lastStreamId=MAX, NO_ERROR) -> PING -> PING_ACK 或 10 秒兜底 -> GOAWAY(lastStreamCreated, NO_ERROR)`，Proxy 不重复实现 GOAWAY。
+- **顺序遵循本节「唯一关闭顺序」表：** 进入 DRAINING 时先对 gRPC 调用一次 `GrpcServer.initiateServerDrain()`（`migration_started`），到达 spike 验证的 `no_new_work_reached` 后才由最后一个协议触发共享 `closeAdmission()`（`admission_closed`），不得在迁移前关 gate。`initiateServerDrain()` 只 CAS 幂等调用非阻塞的 `Server.shutdown()` 并立即返回。grpc-java 1.53.0 随后按连接发送 `GOAWAY(lastStreamId=MAX, NO_ERROR) -> PING -> PING_ACK 或 10 秒兜底 -> GOAWAY(lastStreamCreated, NO_ERROR)`，Proxy 不重复实现 GOAWAY。`no_new_work_reached` 的 predicate 由 §7 Step 1 spike 填入：若双 GOAWAY 即构成边界则直接满足，否则退化为有界 quiet 窗口并按 §1.1 四选一放宽目标。
 - 新增 `GrpcActiveCallRegistry` 和 `GrpcActiveCallInterceptor`，在 `next.startCall` 前登记所有非 unary RPC，因此尚未发送第一条 SETTINGS 的 Telemetry 也已被覆盖。registry 保存包装后的 `GrpcActiveCall`，包装 call 的 `sendHeaders/sendMessage/close` 使用同一互斥区和 once-only close-intent；wrapped listener 只在 `onComplete/onCancel` 时发布 canonical terminal、移除 registry 并递减 `grpcOpenDrainableCalls`。`ServerCall.close()` 返回、应用 observer 的 `onError/onCompleted` 或发出 GOAWAY 都不能直接把 call 计为 terminal。
 - accepted send 的 backend/protocol 双终态归零后，`GrpcActiveCallRegistry.closeAll(GrpcDrainStatusPolicy)` 主动结束非 unary RPC：Telemetry 使用 `Status.OK` 正常 completion，使 5.0.7/5.2.1 走无错误日志的 1 秒 observer renewal；ReceiveMessage/PullMessage 及未来未知 streaming RPC 默认使用 `Status.UNAVAILABLE.withDescription("[PROXY_DRAINING] reconnect")`，防止把被截断的业务流伪装成成功。两类 close 都单独计数、不能混入 logical send 错误；close 与正常 response/cancel 的竞态必须串行且幂等。Proxy 组件测试锁定 wire status，客户端矩阵锁定两个正式版本的真实 renewal。随后才用同一个 effective deadline 调用 `GrpcServer.awaitServerTermination(remaining)`；返回 `false` 或中断必须增加 forced 指标、调用一次 `forceServerShutdown()`，并返回 forced `DrainResult`。
 - `ServerCall.close`/`streamClosed` 不是 socket flush 或客户端收包证明。最后一个 send stream terminal 后仍保留有界 transport grace，并以 `Server.awaitTermination` 与客户端侧零观测错误共同验收。
@@ -754,10 +767,12 @@ coordinator 的 DRAINING 段必须是 fan-out/fan-in，禁止先完整等待一�
 1. T0 进入 QUIESCING 并同步撤 readiness，两个 adapter 同时收到 quiesce 通知，gate 仍开放。
 2. 固定 lbCutoff 进入 MIGRATING，开始拒绝/统计 late transport；继续等待存量 lease，任何连接不改 session cutoff。
 3. business transport 已归零可提前进入 DRAINING，否则到 migrationCutoff 强制进入。
-4. 只调用一次共享 `sendDrainGate.closeAdmission()`；随后立即并发调用 gRPC adapter 的 `stopAcceptingNewRpcs()`（内部只委托 `GrpcServer.initiateServerDrain()`）与 Remoting `freezeRequestIntake()`，先全部发出再 await。此处的 gRPC 调用非阻塞并触发 grpc-java 内建双 GOAWAY，不等待 PING ACK 或 transport termination。
-5. intake barrier 完成后并发等待共享 `gate.drainedFuture()`、`grpcOpenSendRpcs==0` 与 `remotingPendingWrites==0`；任一协议不得因等待共享 gate 而阻止另一协议执行 freeze/close。
-6. send 终态全部完成后，并发关闭 Remoting business channels，并调用 `GrpcActiveCallRegistry.closeAll(GrpcDrainStatusPolicy)` 按 RPC 类型向 gRPC 非 unary call 发出一次 close intent；等待 `grpcOpenDrainableCalls==0` 后用剩余 effective deadline 调用 `GrpcServer.awaitServerTermination()`。close intent、GOAWAY、`ServerCall.close()` 返回都不是 terminal，必须等 wrapped listener/transport 的真实终态。
-7. 所有条件成功才转 DRAINED；任一 phase future 异常或 effective deadline 超时 CAS 到 FORCE_DRAINING，同时触发两个协议 force close。force close 最多使用 `min(preStopDeadline, stop override if present)-now`，不得关闭 admin/metrics/共享 JVM owner；无论结果都以 causes 完成 forced `drainFuture`。coordinator 本身停在 DRAINED/FORCE_DRAINING；只有 `ProxyRuntime.shutdown()` 可继续推进 STOPPING。
+4. **migration_started**：并发向两个协议发起迁移——gRPC adapter 的 `stopAcceptingNewRpcs()`（内部只委托 `GrpcServer.initiateServerDrain()`，非阻塞并触发 grpc-java 内建双 GOAWAY，不等待 PING ACK 或 transport termination）与 Remoting `freezeRequestIntake()`。此时 gate 仍开放，先全部发出再各自 await。
+5. **no_new_work_reached**：每个协议独立到达 §3.4「唯一关闭顺序」表验证的 no-new-work 谓词并完成 intake barrier。谓词由 §7 Step 1 spike 填入；退化为有界 quiet 窗口时受同一 effective deadline 约束。两个协议并发推进，任一协议不得因等待另一协议才开始/完成迁移。
+6. **admission_closed**：由**最后**到达 no-new-work 的协议触发唯一一次共享 `sendDrainGate.closeAdmission()`；此前 gate 始终开放，不得提前关闭。
+7. **accepted_inflight_zero**：admission 关闭后并发等待共享 `gate.drainedFuture()`、`grpcOpenSendRpcs==0` 与 `remotingPendingWrites==0`；任一协议不得因等待共享 gate 而阻止另一协议收尾。
+8. send 终态全部完成后，并发关闭 Remoting business channels，并调用 `GrpcActiveCallRegistry.closeAll(GrpcDrainStatusPolicy)` 按 RPC 类型向 gRPC 非 unary call 发出一次 close intent；等待 `grpcOpenDrainableCalls==0` 后用剩余 effective deadline 调用 `GrpcServer.awaitServerTermination()`。close intent、GOAWAY、`ServerCall.close()` 返回都不是 terminal，必须等 wrapped listener/transport 的真实终态。
+9. 所有条件成功才转 DRAINED；任一 phase future 异常或 effective deadline 超时 CAS 到 FORCE_DRAINING，同时触发两个协议 force close。force close 最多使用 `min(preStopDeadline, stop override if present)-now`，不得关闭 admin/metrics/共享 JVM owner；无论结果都以 causes 完成 forced `drainFuture`。coordinator 本身停在 DRAINED/FORCE_DRAINING；只有 `ProxyRuntime.shutdown()` 可继续推进 STOPPING。
 
 ### 8.4 Readiness 实现
 
@@ -954,8 +969,8 @@ auth/context validation 抛错、`executor.execute` 抛错和 `GrpcTaskRejectedE
 `GrpcDrainAdapter`：
 
 - QUIESCING/MIGRATING 只改变 coordinator 观察状态，已有 transport 继续服务。
-- 到 DRAINING 时先由 coordinator `gate.closeAdmission()`，再由 adapter 调用 `grpcServer.initiateServerDrain()` 停止新 RPC；该调用只触发内建双 GOAWAY并立即返回。
-- 先等 `gate.drainedFuture` 与 `grpcOpenSendRpcs==0`；只有 acknowledged send 的 backend/protocol 都 terminal 后，才调用 `activeCallRegistry.closeAll(drainStatusPolicy)`，避免 non-send close 路径扰动尚未完成的 send。
+- 遵循 §3.4/§8.3 的唯一顺序：进入 DRAINING 时 adapter 先调用 `grpcServer.initiateServerDrain()`（`migration_started`）停止新 RPC，该调用只触发内建双 GOAWAY 并立即返回；此时 gate 仍开放。达到 spike 验证的 `no_new_work_reached` 谓词后，coordinator 才在两个协议都就绪时触发唯一一次共享 `gate.closeAdmission()`，adapter 不得自行提前关 gate。
+- admission 关闭后等 `gate.drainedFuture` 与 `grpcOpenSendRpcs==0`；只有 acknowledged send 的 backend/protocol 都 terminal 后，才调用 `activeCallRegistry.closeAll(drainStatusPolicy)`，避免 non-send close 路径扰动尚未完成的 send。
 - 再等 `grpcOpenDrainableCalls==0`，然后以同一 effective deadline 调用 `grpcServer.awaitServerTermination()` 并等待 transport filter 的 terminated barrier。两者都完成且保留有界 grace 才返回正常 `DrainResult`。
 - `awaitServerTermination` 返回 false、被中断，active-call registry 未归零或 transport barrier 超时，都记录具体 force cause，调用 once-only `grpcServer.forceServerShutdown()` 并返回 forced `DrainResult`；force 后只在 effective deadline 的剩余时间内做 best-effort await，不重置预算。捕获 `InterruptedException` 后不立即 re-interrupt；当前 DrainRun/StopRun orchestration task 在自己线程内记住 `interrupted`，完成自己的 force/cleanup/result future 后在最外层 `finally` 恢复并退出。若 adapter 在独立 executor task 中运行，则由该 task 恢复自己的 flag，stop coordinator 只接收 cause/result，绝不替它恢复中断。
 - `stopAcceptingNewRpcs()` 与 `force(ShutdownDeadline effectiveDeadline)` 均以 CAS 返回同一 future；direct TERM 传 StopRun deadline，普通 drain 才传 session 的 force budget，adapter 不得自行取 30/480 秒默认值。
