@@ -19,6 +19,8 @@ package org.apache.rocketmq.proxy.grpc;
 import io.grpc.BindableService;
 import io.grpc.ServerInterceptor;
 import io.grpc.ServerServiceDefinition;
+import io.grpc.ServerStreamTracer;
+import io.grpc.ServerTransportFilter;
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
 import io.grpc.netty.shaded.io.netty.channel.epoll.EpollEventLoopGroup;
 import io.grpc.netty.shaded.io.netty.channel.epoll.EpollServerSocketChannel;
@@ -114,6 +116,26 @@ public class GrpcServerBuilder {
             .intercept(new GlobalExceptionInterceptor())
             .intercept(new ContextInterceptor())
             .intercept(new HeaderInterceptor());
+        return this;
+    }
+
+    /**
+     * Installs the graceful-lifecycle wiring when enabled: connection max-age (so
+     * long-lived streams rotate), the send stream tracer, the send-permit and
+     * active-call interceptors, and the transport lifecycle filter. Interceptors
+     * are applied outermost-first; the send interceptor reads the tracer holder
+     * from the Context and the active-call interceptor wraps every non-unary call.
+     */
+    public GrpcServerBuilder configLifecycle(ServerStreamTracer.Factory sendTracerFactory,
+        ServerInterceptor sendInterceptor, ServerInterceptor activeCallInterceptor,
+        ServerTransportFilter transportFilter, long connectionAgeSeconds, long connectionAgeGraceSeconds) {
+        this.serverBuilder
+            .maxConnectionAge(connectionAgeSeconds, TimeUnit.SECONDS)
+            .maxConnectionAgeGrace(connectionAgeGraceSeconds, TimeUnit.SECONDS)
+            .addStreamTracerFactory(sendTracerFactory)
+            .addTransportFilter(transportFilter)
+            .intercept(activeCallInterceptor)
+            .intercept(sendInterceptor);
         return this;
     }
 }
