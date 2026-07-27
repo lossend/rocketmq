@@ -17,6 +17,10 @@
 
 package org.apache.rocketmq.proxy.grpc.v2;
 
+import org.apache.rocketmq.proxy.lifecycle.SendLifecycleContext;
+import org.apache.rocketmq.proxy.lifecycle.SkipReason;
+import org.apache.rocketmq.proxy.lifecycle.grpc.GrpcSendLifecycleHolder;
+import org.apache.rocketmq.proxy.lifecycle.grpc.GrpcSendStreamTracerFactory;
 import apache.rocketmq.v2.AckMessageRequest;
 import apache.rocketmq.v2.AckMessageResponse;
 import apache.rocketmq.v2.ChangeInvisibleDurationRequest;
@@ -176,7 +180,7 @@ public class GrpcMessagingApplication extends MessagingServiceGrpc.MessagingServ
         } else {
             log.error("[BUG]grpc request pipe is not been executed");
         }
-        executor.submit(new GrpcTask<>(runnable, context, request, responseObserver, statusResponseCreator.apply(flowLimitStatus())));
+        executor.execute(new GrpcTask<>(runnable, context, request, responseObserver, statusResponseCreator.apply(flowLimitStatus())));
     }
 
     protected <V, T> void writeResponse(ProxyContext context, V request, T response, StreamObserver<T> responseObserver,
@@ -239,16 +243,44 @@ public class GrpcMessagingApplication extends MessagingServiceGrpc.MessagingServ
     public void sendMessage(SendMessageRequest request, StreamObserver<SendMessageResponse> responseObserver) {
         Function<Status, SendMessageResponse> statusResponseCreator = status -> SendMessageResponse.newBuilder().setStatus(status).build();
         ProxyContext context = createContext();
+        bindSendLifecycle(context);
         try {
             this.addExecutor(this.producerThreadPoolExecutor,
                 context,
                 request,
-                () -> grpcMessagingActivity.sendMessage(context, request)
-                    .whenComplete((response, throwable) -> writeResponse(context, request, response, responseObserver, throwable, statusResponseCreator)),
+                () -> {
+                    SendLifecycleContext lifecycle = context.getSendLifecycleContext();
+                    if (lifecycle != null && !lifecycle.backendStarted()) {
+                        // cancel/reject already terminated this send before dispatch; never call the Broker.
+                        return;
+                    }
+                    grpcMessagingActivity.sendMessage(context, request)
+                        .whenComplete((response, throwable) -> {
+                            if (lifecycle != null) {
+                                lifecycle.backendTerminal(throwable);
+                            }
+                            writeResponse(context, request, response, responseObserver, throwable, statusResponseCreator);
+                        });
+                },
                 responseObserver,
                 statusResponseCreator);
         } catch (Throwable t) {
+            markSendSkipped(context);
             writeResponse(context, request, null, responseObserver, t, statusResponseCreator);
+        }
+    }
+
+    private void bindSendLifecycle(ProxyContext context) {
+        GrpcSendLifecycleHolder holder = GrpcSendStreamTracerFactory.HOLDER_KEY.get();
+        if (holder != null && holder.hasPermit()) {
+            context.setSendLifecycleContext(holder.permit());
+        }
+    }
+
+    private void markSendSkipped(ProxyContext context) {
+        SendLifecycleContext lifecycle = context.getSendLifecycleContext();
+        if (lifecycle != null) {
+            lifecycle.tryBackendSkipped(SkipReason.SYNC_VALIDATION);
         }
     }
 
@@ -501,6 +533,7 @@ public class GrpcMessagingApplication extends MessagingServiceGrpc.MessagingServ
             if (r instanceof GrpcTask) {
                 try {
                     GrpcTask grpcTask = (GrpcTask) r;
+                    markSendSkipped(grpcTask.context);
                     writeResponse(grpcTask.context, grpcTask.request, grpcTask.executeRejectResponse, grpcTask.streamObserver, null, null);
                 } catch (Throwable t) {
                     log.warn("write rejected error response failed", t);

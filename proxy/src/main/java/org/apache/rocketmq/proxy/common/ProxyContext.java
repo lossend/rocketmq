@@ -50,6 +50,16 @@ public class ProxyContext {
         return (T) this.value.get(key);
     }
 
+    public ProxyContext setSendLifecycleContext(
+        org.apache.rocketmq.proxy.lifecycle.SendLifecycleContext sendLifecycleContext) {
+        this.withVal(ContextVariable.SEND_LIFECYCLE_CONTEXT, sendLifecycleContext);
+        return this;
+    }
+
+    public org.apache.rocketmq.proxy.lifecycle.SendLifecycleContext getSendLifecycleContext() {
+        return this.getVal(ContextVariable.SEND_LIFECYCLE_CONTEXT);
+    }
+
     public ProxyContext setLocalAddress(String localAddress) {
         this.withVal(ContextVariable.LOCAL_ADDRESS, localAddress);
         return this;
