@@ -20,6 +20,7 @@ package org.apache.rocketmq.proxy.config;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
@@ -106,6 +107,25 @@ public class ProxyConfig implements ConfigFile {
      * Note: Setting this limit too low may cause send/consume failures (e.g., backpressure or rejected calls).
      */
     private int grpcMaxConcurrentCallsPerConnection = Integer.MAX_VALUE;
+
+    /**
+     * configuration for graceful lifecycle (disabled by default for compatibility)
+     */
+    private boolean enableProxyAdminServer = false;
+    private boolean enableProxyGracefulLifecycle = false;
+    private String proxyAdminBindAddress = "0.0.0.0";
+    private int proxyAdminPort = 8082;
+    private boolean proxyGrpcConnectionLeaseEnabled = true;
+    private int proxyConnectionLeaseSeconds = 300;
+    private int proxyConnectionLeaseGraceSeconds = 30;
+    private double proxyRemotingLeaseJitterRatio = 0.10;
+    private int proxyLbDetachQuietSeconds = 20;
+    private int proxyLbDetachTimeoutSeconds = 60;
+    private int proxySendDrainTimeoutSeconds = 30;
+    private int proxyWarmupTimeoutSeconds = 60;
+    private int proxyPreStopWaitSeconds = 480;
+    private int proxyJvmShutdownTimeoutSeconds = 30;
+
     private String brokerConfigPath = ConfigurationManager.getProxyHome() + "/conf/broker.conf";
     /**
      * gRPC max message size
@@ -1599,5 +1619,178 @@ public class ProxyConfig implements ConfigFile {
 
     public void setGrpcMaxConcurrentCallsPerConnection(int grpcMaxConcurrentCallsPerConnection) {
         this.grpcMaxConcurrentCallsPerConnection = grpcMaxConcurrentCallsPerConnection;
+    }
+
+    public boolean isEnableProxyAdminServer() {
+        return enableProxyAdminServer;
+    }
+
+    public void setEnableProxyAdminServer(boolean enableProxyAdminServer) {
+        this.enableProxyAdminServer = enableProxyAdminServer;
+    }
+
+    public boolean isEnableProxyGracefulLifecycle() {
+        return enableProxyGracefulLifecycle;
+    }
+
+    public void setEnableProxyGracefulLifecycle(boolean enableProxyGracefulLifecycle) {
+        this.enableProxyGracefulLifecycle = enableProxyGracefulLifecycle;
+    }
+
+    public String getProxyAdminBindAddress() {
+        return proxyAdminBindAddress;
+    }
+
+    public void setProxyAdminBindAddress(String proxyAdminBindAddress) {
+        this.proxyAdminBindAddress = proxyAdminBindAddress;
+    }
+
+    public int getProxyAdminPort() {
+        return proxyAdminPort;
+    }
+
+    public void setProxyAdminPort(int proxyAdminPort) {
+        this.proxyAdminPort = proxyAdminPort;
+    }
+
+    public boolean isProxyGrpcConnectionLeaseEnabled() {
+        return proxyGrpcConnectionLeaseEnabled;
+    }
+
+    public void setProxyGrpcConnectionLeaseEnabled(boolean proxyGrpcConnectionLeaseEnabled) {
+        this.proxyGrpcConnectionLeaseEnabled = proxyGrpcConnectionLeaseEnabled;
+    }
+
+    public int getProxyConnectionLeaseSeconds() {
+        return proxyConnectionLeaseSeconds;
+    }
+
+    public void setProxyConnectionLeaseSeconds(int proxyConnectionLeaseSeconds) {
+        this.proxyConnectionLeaseSeconds = proxyConnectionLeaseSeconds;
+    }
+
+    public int getProxyConnectionLeaseGraceSeconds() {
+        return proxyConnectionLeaseGraceSeconds;
+    }
+
+    public void setProxyConnectionLeaseGraceSeconds(int proxyConnectionLeaseGraceSeconds) {
+        this.proxyConnectionLeaseGraceSeconds = proxyConnectionLeaseGraceSeconds;
+    }
+
+    public double getProxyRemotingLeaseJitterRatio() {
+        return proxyRemotingLeaseJitterRatio;
+    }
+
+    public void setProxyRemotingLeaseJitterRatio(double proxyRemotingLeaseJitterRatio) {
+        this.proxyRemotingLeaseJitterRatio = proxyRemotingLeaseJitterRatio;
+    }
+
+    public int getProxyLbDetachQuietSeconds() {
+        return proxyLbDetachQuietSeconds;
+    }
+
+    public void setProxyLbDetachQuietSeconds(int proxyLbDetachQuietSeconds) {
+        this.proxyLbDetachQuietSeconds = proxyLbDetachQuietSeconds;
+    }
+
+    public int getProxyLbDetachTimeoutSeconds() {
+        return proxyLbDetachTimeoutSeconds;
+    }
+
+    public void setProxyLbDetachTimeoutSeconds(int proxyLbDetachTimeoutSeconds) {
+        this.proxyLbDetachTimeoutSeconds = proxyLbDetachTimeoutSeconds;
+    }
+
+    public int getProxySendDrainTimeoutSeconds() {
+        return proxySendDrainTimeoutSeconds;
+    }
+
+    public void setProxySendDrainTimeoutSeconds(int proxySendDrainTimeoutSeconds) {
+        this.proxySendDrainTimeoutSeconds = proxySendDrainTimeoutSeconds;
+    }
+
+    public int getProxyWarmupTimeoutSeconds() {
+        return proxyWarmupTimeoutSeconds;
+    }
+
+    public void setProxyWarmupTimeoutSeconds(int proxyWarmupTimeoutSeconds) {
+        this.proxyWarmupTimeoutSeconds = proxyWarmupTimeoutSeconds;
+    }
+
+    public int getProxyPreStopWaitSeconds() {
+        return proxyPreStopWaitSeconds;
+    }
+
+    public void setProxyPreStopWaitSeconds(int proxyPreStopWaitSeconds) {
+        this.proxyPreStopWaitSeconds = proxyPreStopWaitSeconds;
+    }
+
+    public int getProxyJvmShutdownTimeoutSeconds() {
+        return proxyJvmShutdownTimeoutSeconds;
+    }
+
+    public void setProxyJvmShutdownTimeoutSeconds(int proxyJvmShutdownTimeoutSeconds) {
+        this.proxyJvmShutdownTimeoutSeconds = proxyJvmShutdownTimeoutSeconds;
+    }
+
+    /**
+     * Validate the graceful-lifecycle configuration as a single boundary. Aggregates
+     * every invalid field/relationship into one exception so operators can fix all of
+     * them at once. When the feature is disabled, validation is skipped entirely so
+     * legacy deployments are unaffected.
+     */
+    public void validateGracefulLifecycle() {
+        if (!enableProxyGracefulLifecycle) {
+            return;
+        }
+        List<String> errors = new ArrayList<>();
+        if (!enableProxyAdminServer) {
+            errors.add("enableProxyAdminServer must be true when enableProxyGracefulLifecycle is enabled");
+        }
+        if (!ProxyMode.isClusterMode(proxyMode)) {
+            errors.add("enableProxyGracefulLifecycle is only supported in cluster mode");
+        }
+        if (!proxyGrpcConnectionLeaseEnabled) {
+            errors.add("proxyGrpcConnectionLeaseEnabled must be true in the strict profile");
+        }
+        if (proxyAdminPort < 1024 || proxyAdminPort > 65535) {
+            errors.add("proxyAdminPort must be within [1024, 65535]");
+        }
+        if (grpcServerPort != null && proxyAdminPort == grpcServerPort
+            || proxyAdminPort == remotingListenPort
+            || proxyAdminPort == metricsPromExporterPort) {
+            errors.add("proxyAdminPort conflict: must differ from gRPC, Remoting and metrics ports");
+        }
+        if (proxyConnectionLeaseSeconds < 60 || proxyConnectionLeaseSeconds > 3600) {
+            errors.add("proxyConnectionLeaseSeconds must be within [60, 3600]");
+        }
+        if (proxyConnectionLeaseGraceSeconds < 1 || proxyConnectionLeaseGraceSeconds > proxyConnectionLeaseSeconds) {
+            errors.add("proxyConnectionLeaseGraceSeconds must be within [1, proxyConnectionLeaseSeconds]");
+        }
+        if (proxyRemotingLeaseJitterRatio < 0 || proxyRemotingLeaseJitterRatio > 0.50) {
+            errors.add("proxyRemotingLeaseJitterRatio must be within [0, 0.50]");
+        }
+        if (proxySendDrainTimeoutSeconds < 1 || proxySendDrainTimeoutSeconds > 120) {
+            errors.add("proxySendDrainTimeoutSeconds must be within [1, 120]");
+        }
+        if (proxyWarmupTimeoutSeconds < 1 || proxyWarmupTimeoutSeconds > 600) {
+            errors.add("proxyWarmupTimeoutSeconds must be within [1, 600]");
+        }
+        if (proxyPreStopWaitSeconds < 1 || proxyPreStopWaitSeconds > 3600) {
+            errors.add("proxyPreStopWaitSeconds must be within [1, 3600]");
+        }
+        if (proxyJvmShutdownTimeoutSeconds < 5 || proxyJvmShutdownTimeoutSeconds > 120) {
+            errors.add("proxyJvmShutdownTimeoutSeconds must be within [5, 120]");
+        }
+        long maxLeaseSeconds = (long) Math.ceil(proxyConnectionLeaseSeconds * (1.0 + proxyRemotingLeaseJitterRatio));
+        long hardDeadlineSeconds = (long) proxyLbDetachTimeoutSeconds + maxLeaseSeconds
+            + proxyConnectionLeaseGraceSeconds + proxySendDrainTimeoutSeconds;
+        if (hardDeadlineSeconds > proxyPreStopWaitSeconds) {
+            errors.add("derived drain hard deadline (" + hardDeadlineSeconds
+                + "s) must not exceed proxyPreStopWaitSeconds (" + proxyPreStopWaitSeconds + "s)");
+        }
+        if (!errors.isEmpty()) {
+            throw new IllegalArgumentException("Invalid graceful lifecycle configuration: " + errors);
+        }
     }
 }
