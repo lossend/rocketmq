@@ -96,4 +96,27 @@ public class GrpcServerShutdownTest {
         verify(server).shutdown();
         verify(server).shutdownNow();
     }
+
+    @Test
+    @DisplayName("shutdownOwnedResources terminates gracefully without forcing when the server stops in time")
+    public void ownedResourcesGracefulNoForce() throws Exception {
+        Server server = mock(Server.class);
+        when(server.awaitTermination(anyLong(), any(TimeUnit.class))).thenReturn(true);
+        GrpcServer grpc = newServer(server);
+        grpc.shutdownOwnedResources(deadline(TimeUnit.SECONDS.toNanos(5)));
+        verify(server).shutdown();
+        verify(server, never()).shutdownNow();
+    }
+
+    @Test
+    @DisplayName("shutdownOwnedResources forces a stubborn server and returns instead of blocking")
+    public void ownedResourcesForcesStubbornServer() throws Exception {
+        Server server = mock(Server.class);
+        when(server.awaitTermination(anyLong(), any(TimeUnit.class))).thenReturn(false);
+        when(server.isTerminated()).thenReturn(false);
+        GrpcServer grpc = newServer(server);
+        grpc.shutdownOwnedResources(deadline(TimeUnit.SECONDS.toNanos(5)));
+        verify(server).shutdown();
+        verify(server).shutdownNow();
+    }
 }

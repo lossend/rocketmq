@@ -109,6 +109,31 @@ public class GrpcServer implements StartAndShutdown,
         }
     }
 
+    /**
+     * Bounded, deadline-aware teardown used by the strict lifecycle STOPPING phase.
+     * Consumes only the remaining time of the shared {@link ShutdownDeadline}; if the
+     * server does not terminate gracefully it is forced, then awaited once more within
+     * whatever budget is left. A server that still refuses to terminate is logged as
+     * {@code server_not_terminated} rather than blocking the hook. The TLS listener is
+     * always unregistered.
+     */
+    public void shutdownOwnedResources(ShutdownDeadline stopDeadline) {
+        try {
+            initiateServerDrain();
+            if (!awaitServerTermination(stopDeadline)) {
+                forceServerShutdown();
+                if (!awaitServerTermination(stopDeadline)) {
+                    log.warn("grpc server_not_terminated within stop deadline");
+                }
+            }
+        } catch (InterruptedException e) {
+            forceServerShutdown();
+            Thread.currentThread().interrupt();
+        } finally {
+            unregisterTlsListener();
+        }
+    }
+
     private void unregisterTlsListener() {
         tlsCertificateManager.unregisterReloadListener(this.tlsReloadHandler);
     }
