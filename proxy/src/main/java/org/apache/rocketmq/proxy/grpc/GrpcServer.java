@@ -31,7 +31,8 @@ import java.security.cert.CertificateException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-public class GrpcServer implements StartAndShutdown {
+public class GrpcServer implements StartAndShutdown,
+    org.apache.rocketmq.proxy.lifecycle.grpc.GrpcDrainAdapter.PhasedGrpcServer {
     private static final Logger log = LoggerFactory.getLogger(LoggerName.PROXY_LOGGER_NAME);
 
     private final Server server;

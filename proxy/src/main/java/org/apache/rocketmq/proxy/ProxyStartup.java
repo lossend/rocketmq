@@ -39,6 +39,12 @@ import org.apache.rocketmq.proxy.config.ConfigurationManager;
 import org.apache.rocketmq.proxy.config.ProxyConfig;
 import org.apache.rocketmq.proxy.grpc.GrpcServer;
 import org.apache.rocketmq.proxy.grpc.GrpcServerBuilder;
+import org.apache.rocketmq.proxy.lifecycle.DrainTrigger;
+import org.apache.rocketmq.proxy.lifecycle.ExecutorLifecycleScheduler;
+import org.apache.rocketmq.proxy.lifecycle.ProxyGracefulLifecycleWiring;
+import org.apache.rocketmq.proxy.lifecycle.ProxyLifecycleCoordinator;
+import org.apache.rocketmq.proxy.lifecycle.admin.CoordinatorAdminHandlers;
+import org.apache.rocketmq.proxy.lifecycle.admin.ProxyAdminServer;
 import org.apache.rocketmq.proxy.grpc.v2.GrpcMessagingApplication;
 import org.apache.rocketmq.proxy.metrics.ProxyMetricsManager;
 import org.apache.rocketmq.proxy.processor.DefaultMessagingProcessor;
@@ -81,28 +87,57 @@ public class ProxyStartup {
             TlsCertificateManager tlsCertificateManager = new TlsCertificateManager();
             PROXY_START_AND_SHUTDOWN.appendStartAndShutdown(tlsCertificateManager);
 
+            ProxyConfig proxyConfig = ConfigurationManager.getProxyConfig();
+            boolean lifecycleEnabled = proxyConfig.isEnableProxyGracefulLifecycle();
+            ProxyGracefulLifecycleWiring lifecycleWiring = lifecycleEnabled ? new ProxyGracefulLifecycleWiring() : null;
+
             // create grpcServer
-            GrpcServer grpcServer = GrpcServerBuilder.newBuilder(executor,
-                    ConfigurationManager.getProxyConfig().getGrpcServerPort(), tlsCertificateManager)
+            GrpcServerBuilder grpcServerBuilder = GrpcServerBuilder.newBuilder(executor,
+                    proxyConfig.getGrpcServerPort(), tlsCertificateManager)
                 .addService(createServiceProcessor(messagingProcessor))
                 .addService(ChannelzService.newInstance(100))
                 .addService(ProtoReflectionService.newInstance())
                 .configInterceptor()
-                .shutdownTime(ConfigurationManager.getProxyConfig().getGrpcShutdownTimeSeconds(), TimeUnit.SECONDS)
-                .build();
+                .shutdownTime(proxyConfig.getGrpcShutdownTimeSeconds(), TimeUnit.SECONDS);
+            if (lifecycleWiring != null) {
+                grpcServerBuilder.configLifecycle(
+                    lifecycleWiring.tracerFactory(),
+                    lifecycleWiring.sendInterceptor(),
+                    lifecycleWiring.activeCallInterceptor(),
+                    lifecycleWiring.transportFilter(),
+                    proxyConfig.getProxyConnectionLeaseSeconds(),
+                    proxyConfig.getProxyConnectionLeaseGraceSeconds());
+            }
+            GrpcServer grpcServer = grpcServerBuilder.build();
             PROXY_START_AND_SHUTDOWN.appendStartAndShutdown(grpcServer);
 
             RemotingProtocolServer remotingServer = new RemotingProtocolServer(messagingProcessor, tlsCertificateManager);
             PROXY_START_AND_SHUTDOWN.appendStartAndShutdown(remotingServer);
 
+            ProxyAdminServer adminServer = null;
+            ProxyLifecycleCoordinator coordinator = null;
+            if (lifecycleWiring != null) {
+                adminServer = startAdminServer(lifecycleWiring, grpcServer, proxyConfig);
+                coordinator = lifecycleWiring.coordinator();
+            }
+
             // start servers one by one.
             PROXY_START_AND_SHUTDOWN.start();
 
+            final ProxyAdminServer adminServerRef = adminServer;
+            final ProxyLifecycleCoordinator coordinatorRef = coordinator;
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 log.info("try to shutdown server");
                 try {
+                    if (coordinatorRef != null) {
+                        // Drain accepted sends before tearing the protocol servers down.
+                        coordinatorRef.beginDrain(DrainTrigger.SIGTERM_FALLBACK).drainFuture().join();
+                    }
                     PROXY_START_AND_SHUTDOWN.preShutdown();
                     PROXY_START_AND_SHUTDOWN.shutdown();
+                    if (adminServerRef != null) {
+                        adminServerRef.stop(0);
+                    }
                 } catch (Exception e) {
                     log.error("err when shutdown rocketmq-proxy", e);
                 }
@@ -206,6 +241,30 @@ public class ProxyStartup {
         }
         PROXY_START_AND_SHUTDOWN.appendStartAndShutdown(messagingProcessor);
         return messagingProcessor;
+    }
+
+    private static ProxyAdminServer startAdminServer(ProxyGracefulLifecycleWiring wiring,
+        GrpcServer grpcServer, ProxyConfig config) throws Exception {
+        java.util.concurrent.ScheduledExecutorService lifecycleExecutor =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(
+                r -> new Thread(r, "ProxyLifecycleScheduler"));
+        PROXY_START_AND_SHUTDOWN.appendShutdown(lifecycleExecutor::shutdown);
+        ProxyLifecycleCoordinator coordinator = wiring.createCoordinator(
+            grpcServer, config, new ExecutorLifecycleScheduler(lifecycleExecutor));
+
+        java.util.concurrent.ThreadPoolExecutor adminExecutor = new java.util.concurrent.ThreadPoolExecutor(
+            2, 2, 0L, TimeUnit.MILLISECONDS,
+            new java.util.concurrent.ArrayBlockingQueue<>(64),
+            r -> new Thread(r, "ProxyAdminHttp"),
+            new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
+        PROXY_START_AND_SHUTDOWN.appendShutdown(adminExecutor::shutdown);
+
+        ProxyAdminServer adminServer = new ProxyAdminServer(config.getProxyAdminBindAddress(),
+            config.getProxyAdminPort(), 0, new CoordinatorAdminHandlers(coordinator, adminExecutor));
+        adminServer.start();
+        log.info("proxy admin server started on {}:{}", config.getProxyAdminBindAddress(),
+            config.getProxyAdminPort());
+        return adminServer;
     }
 
     private static GrpcMessagingApplication createServiceProcessor(MessagingProcessor messagingProcessor) {

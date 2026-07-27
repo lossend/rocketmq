@@ -187,6 +187,12 @@ public final class ProxyLifecycleCoordinator implements ProxyLifecycle {
         return trigger.name().toLowerCase() + "-" + Long.toUnsignedString(now);
     }
 
+    /** Active lb cutoff in nanos, or 0 when no drain is running (nothing is late yet). */
+    public long activeLbCutoffNanos() {
+        DrainRun run = drainRunRef.get();
+        return run == null ? 0L : run.session().lbCutoffNanos();
+    }
+
     boolean isForced() {
         return state.get() == ProxyLifecycleState.FORCE_DRAINING;
     }
