@@ -142,6 +142,11 @@ public class ProxyStartup {
                             log.error("proxy drain exceeded {}s bound; proceeding with forced shutdown",
                                 drainJoinTimeoutSeconds);
                         }
+                        // Tear down the gRPC server within a single shared stop deadline.
+                        ShutdownDeadline stopDeadline = ShutdownDeadline.afterNanos(System.nanoTime(),
+                            TimeUnit.SECONDS.toNanos(proxyConfig.getProxyJvmShutdownTimeoutSeconds()),
+                            System::nanoTime);
+                        grpcServer.shutdownOwnedResources(stopDeadline);
                     }
                     PROXY_START_AND_SHUTDOWN.preShutdown();
                     PROXY_START_AND_SHUTDOWN.shutdown();
