@@ -126,12 +126,22 @@ public class ProxyStartup {
 
             final ProxyAdminServer adminServerRef = adminServer;
             final ProxyLifecycleCoordinator coordinatorRef = coordinator;
+            // Absolute cap so a wedged drain never holds the hook open until SIGKILL.
+            final long drainJoinTimeoutSeconds =
+                (long) proxyConfig.getProxyPreStopWaitSeconds() + proxyConfig.getProxyJvmShutdownTimeoutSeconds();
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 log.info("try to shutdown server");
                 try {
                     if (coordinatorRef != null) {
-                        // Drain accepted sends before tearing the protocol servers down.
-                        coordinatorRef.beginDrain(DrainTrigger.SIGTERM_FALLBACK).drainFuture().join();
+                        // Drain accepted sends before tearing the protocol servers down,
+                        // bounded so the hook cannot block indefinitely.
+                        try {
+                            coordinatorRef.beginDrain(DrainTrigger.SIGTERM_FALLBACK).drainFuture()
+                                .get(drainJoinTimeoutSeconds, TimeUnit.SECONDS);
+                        } catch (java.util.concurrent.TimeoutException timeout) {
+                            log.error("proxy drain exceeded {}s bound; proceeding with forced shutdown",
+                                drainJoinTimeoutSeconds);
+                        }
                     }
                     PROXY_START_AND_SHUTDOWN.preShutdown();
                     PROXY_START_AND_SHUTDOWN.shutdown();
