@@ -61,7 +61,7 @@ public final class CoordinatorAdminHandlers implements ProxyAdminServer.ProxyAdm
 
     @Override
     public ProxyAdminResponse readyForTraffic() {
-        return lifecycle.isReady() ? up("READY") : down("NOT_READY");
+        return lifecycle.isReadyForTraffic() ? up("READY") : down("NOT_READY");
     }
 
     @Override

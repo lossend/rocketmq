@@ -18,10 +18,16 @@
 package org.apache.rocketmq.proxy.lifecycle;
 
 import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.LongSupplier;
+import org.apache.rocketmq.common.constant.LoggerName;
+import org.apache.rocketmq.logging.org.slf4j.Logger;
+import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
 import org.apache.rocketmq.proxy.config.ProxyConfig;
 import org.apache.rocketmq.proxy.lifecycle.grpc.GrpcActiveCallInterceptor;
 import org.apache.rocketmq.proxy.lifecycle.grpc.GrpcActiveCallRegistry;
@@ -40,6 +46,14 @@ import org.apache.rocketmq.proxy.lifecycle.grpc.GrpcTransportLifecycleFilter;
  */
 public final class ProxyGracefulLifecycleWiring {
 
+    private static final Logger log = LoggerFactory.getLogger(LoggerName.PROXY_LOGGER_NAME);
+
+    // No dedicated config yet; a small default tolerates transient shared-dependency
+    // blips for /ready-for-traffic without holding warmup open indefinitely.
+    private static final int DEFAULT_DEPENDENCY_FAILURE_THRESHOLD = 3;
+    // Fixed retry cadence for the warmup barrier while it has not yet completed.
+    private static final long WARMUP_RETRY_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(1);
+
     private final SendDrainGate gate = new SendDrainGate();
     private final ProxyLifecycleMetrics metrics = new ProxyLifecycleMetrics();
     private final AtomicLong openSendRpcs = new AtomicLong();
@@ -51,6 +65,10 @@ public final class ProxyGracefulLifecycleWiring {
     private final GrpcSendLifecycleInterceptor sendInterceptor;
     private final GrpcActiveCallInterceptor activeCallInterceptor;
     private final GrpcTransportLifecycleFilter transportFilter;
+
+    // Captured at createCoordinator so startWarmup can drive the barrier on the same
+    // single-threaded lifecycle scheduler used for drain timers.
+    private volatile LifecycleScheduler scheduler;
 
     public ProxyGracefulLifecycleWiring() {
         this.tracerFactory = new GrpcSendStreamTracerFactory(openSendRpcs);
@@ -103,6 +121,7 @@ public final class ProxyGracefulLifecycleWiring {
      */
     public ProxyLifecycleCoordinator createCoordinator(GrpcDrainAdapter.PhasedGrpcServer grpcServer,
         ProxyConfig config, LifecycleScheduler scheduler, Executor terminationExecutor) {
+        this.scheduler = scheduler;
         GrpcDrainAdapter adapter = new GrpcDrainAdapter(grpcServer, activeCallRegistry, drainStatusPolicy,
             terminationExecutor);
         ProxyLifecycleCoordinator coordinator = new ProxyLifecycleCoordinator(
@@ -125,5 +144,75 @@ public final class ProxyGracefulLifecycleWiring {
             config.getProxyLbDetachQuietSeconds(), metrics);
         coordinatorRef.set(coordinator);
         return coordinator;
+    }
+
+    /**
+     * Installs a warmup barrier over the given contributors and drives it on the
+     * lifecycle scheduler until every contributor passes once, at which point
+     * {@code onReady} runs (publishing READY). The barrier also backs the
+     * coordinator's {@code isReadyForTraffic()} predicate.
+     *
+     * <p>The scheduler exposes only one-shot delays, so each tick re-schedules the
+     * next while the barrier has not completed. On warmup-timeout the loop keeps
+     * retrying (the pod stays STARTING/NotReady) and only escalates the log level;
+     * it never exits the process or marks fatal. K8s rollout timeout is the outer
+     * guard.
+     *
+     * @param contributors readiness contributors evaluated as a one-time barrier
+     * @param config       supplies the warmup timeout budget
+     * @param scheduler    lifecycle scheduler driving the retry loop
+     * @param onReady      published exactly once when the barrier completes
+     */
+    public void startWarmup(List<ReadinessContributor> contributors, ProxyConfig config, Runnable onReady) {
+        LifecycleScheduler active = scheduler;
+        if (active == null) {
+            throw new IllegalStateException("startWarmup requires createCoordinator to run first");
+        }
+        startWarmup(contributors, config, active, onReady);
+    }
+
+    /**
+     * Same as {@link #startWarmup(List, ProxyConfig, Runnable)} but with an explicit
+     * scheduler; primarily for tests that drive the loop synchronously.
+     *
+     * @param contributors readiness contributors evaluated as a one-time barrier
+     * @param config       supplies the warmup timeout budget
+     * @param scheduler    lifecycle scheduler driving the retry loop
+     * @param onReady      published exactly once when the barrier completes
+     */
+    public void startWarmup(List<ReadinessContributor> contributors, ProxyConfig config,
+        LifecycleScheduler scheduler, Runnable onReady) {
+        ReadinessBarrier barrier = new ReadinessBarrier(contributors, DEFAULT_DEPENDENCY_FAILURE_THRESHOLD);
+        ProxyLifecycleCoordinator coordinator = coordinatorRef.get();
+        if (coordinator != null) {
+            coordinator.setReadinessBarrier(barrier);
+        }
+        long deadlineNanos = System.nanoTime()
+            + TimeUnit.SECONDS.toNanos(config.getProxyWarmupTimeoutSeconds());
+        driveWarmupTick(barrier, scheduler, onReady, System::nanoTime, deadlineNanos);
+    }
+
+    private void driveWarmupTick(ReadinessBarrier barrier, LifecycleScheduler scheduler,
+        Runnable onReady, LongSupplier nanoClock, long deadlineNanos) {
+        boolean completed;
+        try {
+            completed = barrier.tryCompleteWarmup();
+        } catch (Exception e) {
+            completed = false;
+            log.warn("warmup barrier evaluation threw; will retry", e);
+        }
+        if (completed) {
+            log.info("warmup barrier completed; publishing readiness");
+            onReady.run();
+            return;
+        }
+        if (nanoClock.getAsLong() - deadlineNanos >= 0L) {
+            log.warn("warmup barrier still incomplete past proxyWarmupTimeoutSeconds; "
+                + "staying NotReady and retrying");
+        } else {
+            log.info("warmup barrier incomplete; retrying");
+        }
+        scheduler.schedule(() -> driveWarmupTick(barrier, scheduler, onReady, nanoClock, deadlineNanos),
+            WARMUP_RETRY_INTERVAL_NANOS);
     }
 }

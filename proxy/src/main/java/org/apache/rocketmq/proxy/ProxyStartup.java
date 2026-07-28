@@ -27,11 +27,15 @@ import org.apache.commons.cli.Options;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.broker.BrokerStartup;
+import org.apache.rocketmq.client.common.NameserverAccessConfig;
+import org.apache.rocketmq.client.impl.mqclient.DoNothingClientRemotingProcessor;
+import org.apache.rocketmq.client.impl.mqclient.MQClientAPIFactory;
 import org.apache.rocketmq.common.MixAll;
 import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.common.thread.ThreadPoolMonitor;
 import org.apache.rocketmq.common.utils.AbstractStartAndShutdown;
 import org.apache.rocketmq.common.utils.StartAndShutdown;
+import org.apache.rocketmq.common.utils.ThreadUtils;
 import org.apache.rocketmq.logging.org.slf4j.Logger;
 import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
 import org.apache.rocketmq.proxy.config.Configuration;
@@ -44,8 +48,10 @@ import org.apache.rocketmq.proxy.lifecycle.ExecutorLifecycleScheduler;
 import org.apache.rocketmq.proxy.lifecycle.ProxyGracefulLifecycleWiring;
 import org.apache.rocketmq.proxy.lifecycle.ProxyLifecycleCoordinator;
 import org.apache.rocketmq.proxy.lifecycle.ShutdownDeadline;
+import org.apache.rocketmq.proxy.lifecycle.ReadinessContributor;
 import org.apache.rocketmq.proxy.lifecycle.admin.CoordinatorAdminHandlers;
 import org.apache.rocketmq.proxy.lifecycle.admin.ProxyAdminServer;
+import org.apache.rocketmq.proxy.lifecycle.readiness.ProxyReadinessContributors;
 import org.apache.rocketmq.proxy.grpc.v2.GrpcMessagingApplication;
 import org.apache.rocketmq.proxy.metrics.ProxyMetricsManager;
 import org.apache.rocketmq.proxy.processor.DefaultMessagingProcessor;
@@ -59,6 +65,7 @@ import java.util.Date;
 import java.util.List;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 
 public class ProxyStartup {
     private static final Logger log = LoggerFactory.getLogger(LoggerName.PROXY_LOGGER_NAME);
@@ -123,8 +130,13 @@ public class ProxyStartup {
                 coordinator = lifecycleWiring.coordinator();
             }
 
-            // Start servers one by one, then publish READY as one assembly step.
-            startAndSignalReady(PROXY_START_AND_SHUTDOWN, coordinator);
+            // Start servers one by one, then gate READY behind the warmup barrier.
+            final ProxyGracefulLifecycleWiring wiringRef = lifecycleWiring;
+            final ProxyConfig configRef = proxyConfig;
+            final ProxyLifecycleCoordinator readyCoordinator = coordinator;
+            startAndSignalReady(PROXY_START_AND_SHUTDOWN, coordinator,
+                () -> wiringRef.startWarmup(buildWarmupContributors(configRef), configRef,
+                    readyCoordinator::onStartupComplete));
 
             final ProxyAdminServer adminServerRef = adminServer;
             final ProxyLifecycleCoordinator coordinatorRef = coordinator;
@@ -296,11 +308,108 @@ public class ProxyStartup {
         return adminServer;
     }
 
+    /**
+     * Builds the core-subset warmup contributors. The listener/processor signals are
+     * true by the time warmup runs (their {@code start()} has returned), so they act
+     * as extension points; the only genuinely asynchronous signal is NameServer
+     * reachability, probed through a dedicated lightweight client. Returns an empty
+     * list when NameServer is not configured (e.g. local mode), so warmup completes
+     * immediately and READY is not held back.
+     *
+     * @param config proxy configuration supplying NameServer access and probe timeout
+     * @return the ordered contributor list for the warmup barrier
+     */
+    private static List<ReadinessContributor> buildWarmupContributors(ProxyConfig config) {
+        if (StringUtils.isBlank(config.getNamesrvAddr()) && StringUtils.isBlank(config.getNamesrvDomain())) {
+            log.warn("no NameServer configured; warmup barrier uses local signals only");
+            return java.util.Collections.emptyList();
+        }
+        NameserverAccessConfig nameserverAccessConfig = new NameserverAccessConfig(config.getNamesrvAddr(),
+            config.getNamesrvDomain(), config.getNamesrvDomainSubgroup());
+        java.util.concurrent.ScheduledExecutorService probeScheduler =
+            ThreadUtils.newScheduledThreadPool(1, r -> new Thread(r, "ProxyWarmupProbe"));
+        MQClientAPIFactory probeFactory = new MQClientAPIFactory(nameserverAccessConfig,
+            "ProxyWarmupProbe_", 1, new DoNothingClientRemotingProcessor(null), null, probeScheduler);
+        try {
+            probeFactory.start();
+        } catch (Exception e) {
+            probeScheduler.shutdownNow();
+            throw new RuntimeException("failed to start warmup NameServer probe client", e);
+        }
+        PROXY_START_AND_SHUTDOWN.appendShutdown(() -> {
+            probeFactory.shutdown();
+            probeScheduler.shutdownNow();
+        });
+        long probeTimeoutMillis = TimeUnit.SECONDS.toMillis(3);
+        BooleanSupplier nameServerProbe = () -> {
+            try {
+                probeFactory.getClient().getBrokerClusterInfo(probeTimeoutMillis);
+                return true;
+            } catch (Exception e) {
+                log.info("warmup NameServer probe failed: {}", e.getMessage());
+                return false;
+            }
+        };
+        List<String> warmupTopics = parseWarmupTopics(config.getProxyWarmupTopics());
+        if (warmupTopics.isEmpty()) {
+            return ProxyReadinessContributors.coreSubset(() -> true, () -> true, () -> true, nameServerProbe);
+        }
+        java.util.function.Function<String, List<String>> brokerAddrLookup =
+            topic -> lookupBrokerAddrs(probeFactory, topic, probeTimeoutMillis);
+        java.util.function.Predicate<String> brokerProbe =
+            addr -> probeBroker(probeFactory, addr, probeTimeoutMillis);
+        return ProxyReadinessContributors.coreSubset(() -> true, () -> true, () -> true, nameServerProbe,
+            warmupTopics, brokerAddrLookup, brokerProbe);
+    }
+
+    private static List<String> parseWarmupTopics(String csv) {
+        if (StringUtils.isBlank(csv)) {
+            return java.util.Collections.emptyList();
+        }
+        List<String> topics = new java.util.ArrayList<>();
+        for (String token : csv.split(",")) {
+            String topic = token.trim();
+            if (!topic.isEmpty()) {
+                topics.add(topic);
+            }
+        }
+        return topics;
+    }
+
+    private static List<String> lookupBrokerAddrs(MQClientAPIFactory factory, String topic, long timeoutMillis) {
+        List<String> addrs = new java.util.ArrayList<>();
+        try {
+            org.apache.rocketmq.remoting.protocol.route.TopicRouteData route =
+                factory.getClient().getTopicRouteInfoFromNameServer(topic, timeoutMillis);
+            if (route != null && route.getBrokerDatas() != null) {
+                for (org.apache.rocketmq.remoting.protocol.route.BrokerData broker : route.getBrokerDatas()) {
+                    String addr = broker.selectBrokerAddr();
+                    if (addr != null) {
+                        addrs.add(addr);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.info("warmup route lookup for topic {} failed: {}", topic, e.getMessage());
+        }
+        return addrs;
+    }
+
+    private static boolean probeBroker(MQClientAPIFactory factory, String addr, long timeoutMillis) {
+        try {
+            factory.getClient().getBrokerRuntimeInfo(addr, timeoutMillis);
+            return true;
+        } catch (Exception e) {
+            log.info("warmup broker probe {} failed: {}", addr, e.getMessage());
+            return false;
+        }
+    }
+
     static void startAndSignalReady(StartAndShutdown startup,
-        ProxyLifecycleCoordinator coordinator) throws Exception {
+        ProxyLifecycleCoordinator coordinator, Runnable readySignal) throws Exception {
         startup.start();
         if (coordinator != null) {
-            coordinator.onStartupComplete();
+            readySignal.run();
         }
     }
 

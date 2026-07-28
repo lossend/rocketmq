@@ -76,6 +76,11 @@ public final class ProxyLifecycleCoordinator implements ProxyLifecycle {
     private volatile LifecycleScheduler.ScheduledHandle lbTimer;
     private volatile LifecycleScheduler.ScheduledHandle hardDeadlineTimer;
 
+    // Provider-health barrier backing isReadyForTraffic(). Null until warmup wiring
+    // installs it; when null the traffic predicate falls back to isReady() so an
+    // unwired coordinator never regresses.
+    private volatile ReadinessBarrier readinessBarrier;
+
     // Optional lb-detach quiet-window observation. Diagnostic only: it never shortens
     // the wait, because a locally idle listener does not prove the provider has
     // deregistered this target. Its purpose is to supply real data for calibrating
@@ -250,6 +255,25 @@ public final class ProxyLifecycleCoordinator implements ProxyLifecycle {
     public boolean isReady() {
         ProxyLifecycleState s = state.get();
         return fatalRef.get() == null && s == ProxyLifecycleState.READY;
+    }
+
+    /**
+     * Installs the provider-health barrier that backs {@link #isReadyForTraffic()}.
+     * Called once by the warmup wiring before READY is published.
+     *
+     * @param barrier the readiness barrier evaluating shared-dependency health
+     */
+    public void setReadinessBarrier(ReadinessBarrier barrier) {
+        this.readinessBarrier = barrier;
+    }
+
+    @Override
+    public boolean isReadyForTraffic() {
+        if (fatalRef.get() != null || state.get() != ProxyLifecycleState.READY) {
+            return false;
+        }
+        ReadinessBarrier barrier = readinessBarrier;
+        return barrier == null || barrier.isReadyForTraffic();
     }
 
     @Override

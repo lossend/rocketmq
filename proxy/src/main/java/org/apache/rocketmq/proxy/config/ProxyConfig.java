@@ -124,6 +124,11 @@ public class ProxyConfig implements ConfigFile {
     private int proxyLbDetachTimeoutSeconds = 60;
     private int proxySendDrainTimeoutSeconds = 30;
     private int proxyWarmupTimeoutSeconds = 60;
+    /**
+     * Comma-separated topics whose route and broker reachability are prewarmed before
+     * publishing READY. Empty (default) keeps warmup to the NameServer probe only.
+     */
+    private String proxyWarmupTopics = "";
     private int proxyPreStopWaitSeconds = 480;
     private int proxyJvmShutdownTimeoutSeconds = 30;
 
@@ -1724,6 +1729,14 @@ public class ProxyConfig implements ConfigFile {
 
     public void setProxyWarmupTimeoutSeconds(int proxyWarmupTimeoutSeconds) {
         this.proxyWarmupTimeoutSeconds = proxyWarmupTimeoutSeconds;
+    }
+
+    public String getProxyWarmupTopics() {
+        return proxyWarmupTopics;
+    }
+
+    public void setProxyWarmupTopics(String proxyWarmupTopics) {
+        this.proxyWarmupTopics = proxyWarmupTopics;
     }
 
     public int getProxyPreStopWaitSeconds() {

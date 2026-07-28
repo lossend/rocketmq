@@ -48,7 +48,7 @@ public class ProxyStartupLifecycleTest {
             }
         };
 
-        ProxyStartup.startAndSignalReady(startup, coordinator);
+        ProxyStartup.startAndSignalReady(startup, coordinator, coordinator::onStartupComplete);
 
         assertThat(componentStarted).isTrue();
         assertThat(coordinator.state()).isEqualTo(ProxyLifecycleState.READY);
@@ -72,7 +72,8 @@ public class ProxyStartupLifecycleTest {
             }
         };
 
-        assertThatThrownBy(() -> ProxyStartup.startAndSignalReady(startup, coordinator))
+        assertThatThrownBy(() -> ProxyStartup.startAndSignalReady(startup, coordinator,
+            coordinator::onStartupComplete))
             .isSameAs(failure);
         assertThat(coordinator.state()).isEqualTo(ProxyLifecycleState.STARTING);
         assertThat(coordinator.isStarted()).isFalse();

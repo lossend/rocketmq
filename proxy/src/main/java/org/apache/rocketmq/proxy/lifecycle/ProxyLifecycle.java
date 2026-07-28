@@ -33,5 +33,7 @@ public interface ProxyLifecycle {
 
     boolean isReady();
 
+    boolean isReadyForTraffic();
+
     void markFatal(String component, Throwable cause);
 }
