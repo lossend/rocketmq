@@ -228,6 +228,22 @@ public void initiateServerDrain() {
 
 也正因为双 GOAWAY 一发出就构成了 no-new-work 边界,`startMigration()` 里紧跟着 `noNewWork.complete(null)` —— 这就是为什么 gRPC-only 实现下 `orchestrate` 的 `allNoNewWork` 会立刻完成,不需要等 `migrationCutoff`。
 
+### 常见疑问:migration 已经 `shutdown()` 了,DRAINING 还关闸不是冗余吗?
+
+不冗余。三件事分处三层,谁也替代不了谁:
+
+| 层 | 手段 | 作用对象 | 性质 | 能挡住漏网 send 吗 | 知道 Broker 写完没 |
+|---|---|---|---|---|---|
+| 传输层 | `server.shutdown()`(边②) | TCP 连接 / HTTP2 流 | **异步、建议式**(靠客户端处理 GOAWAY) | 挡不住 GOAWAY 窗口内到达的 | 不知道,只看流是否关闭 |
+| 准入层 | `gate.closeAdmission()`(边③) | 每次 SendMessage RPC | **同步、线性化**(关闸后 `tryAcquire` 立即返回 empty) | 能,interceptor 直接 `UNAVAILABLE` 拒掉 | —— |
+| 记账层 | `SendPermit` 双终态 | 已准入的单次 send | backend + protocol 两终态 AND | —— | 知道,靠 backend 终态 |
+
+关键在于 `initiateServerDrain()` 调的是 `io.grpc.Server.shutdown()` 而非 `shutdownNow()`。`shutdown()` 只做两件事:不再接受**新连接**、对现存连接发 GOAWAY。GOAWAY 是异步的、对客户端是"建议",不是一道瞬时硬墙——**现存连接上已在飞、以及客户端处理完 GOAWAY 之前又发来的 SendMessage,仍会正常派发到 handler**。也就是说 `shutdown()` 之后存在一个 **GOAWAY 窗口**,期间老连接上的 send 照样到达拦截器。
+
+这正是设计上刻意把 migration 和 draining 分成两步的原因:MIGRATING 阶段**故意让老连接继续正常收发**,给客户端和 LB 时间把连接迁走,窗口内落到本 Pod 的 send 必须照常准入、照常打到 Broker——这才是"优雅"迁移。等到 no-new-work + lbCutoff 都满足、确定不会再有正常新业务之后,才在边③把准入层这道硬墙立起来(`closeAdmission`),挡下 GOAWAY 窗口里仍在漏进来的 send。若 migration 一开始就关闸,迁移窗口里的合法 send 会被误拒。
+
+进一步说,边④的 `awaitServerTermination`(等**传输层**所有 HTTP2 流关闭)也替代不了边③的 `gate.drainedFuture()`(等**应用层**每张 permit 双终态)。二者不等价:一个 send 的 HTTP2 流可以已经关闭(protocol terminal),但发往 Broker 的写还在飞(backend 未 terminal)。所以必须**先**等闸门计数归零(③)**再**等 server 终止(④),否则可能在 Broker 写入尚未落地时就放行进程停止。SendPermit 的双终态存在,就是为了给出这个准确的排空时机。
+
 ### 边④的落地:`awaitTerminated(deadline)`(`GrpcDrainAdapter.java:80-99`)
 
 ```java
