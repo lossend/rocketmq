@@ -259,7 +259,6 @@ public class GrpcMessagingApplication extends MessagingServiceGrpc.MessagingServ
                 responseObserver,
                 statusResponseCreator);
         } catch (Throwable t) {
-            markSendSkipped(context);
             writeResponse(context, request, null, responseObserver, t, statusResponseCreator);
         }
     }
