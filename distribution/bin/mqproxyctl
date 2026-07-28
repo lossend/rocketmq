@@ -1,0 +1,155 @@
+#!/bin/sh
+
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# mqproxyctl - local control CLI for the Proxy graceful lifecycle admin server.
+#
+# Subcommands:
+#   drain [--wait] [--timeout <seconds>]   trigger a drain (POST /drain), optionally poll to terminal
+#   status                                 print /state
+#   version [--output json]                print image capability/build metadata
+#
+# The admin server binds loopback only; this CLI always talks to 127.0.0.1.
+# Configure the port via PROXY_ADMIN_PORT (default 8082).
+
+set -eu
+
+ADMIN_HOST="127.0.0.1"
+ADMIN_PORT="${PROXY_ADMIN_PORT:-8082}"
+BASE_URL="http://${ADMIN_HOST}:${ADMIN_PORT}"
+CURL="${CURL:-curl}"
+
+# API/build metadata surfaced by `version --output json`. Kept in sync with the
+# image capability contract (admin + drain over the loopback endpoint).
+API_VERSION="v1"
+BUILD_VERSION="${ROCKETMQ_VERSION:-unknown}"
+
+usage() {
+  echo "usage: mqproxyctl <drain|status|version> [options]" >&2
+  echo "  drain [--wait] [--timeout <seconds>]" >&2
+  echo "  status" >&2
+  echo "  version [--output json]" >&2
+}
+
+# Emits the HTTP status code on stdout and writes the response body to $BODY_FILE.
+# Never fails the script on a non-2xx code; the caller inspects the code.
+http() {
+  method="$1"
+  path="$2"
+  "$CURL" -sS -o "$BODY_FILE" -w '%{http_code}' -X "$method" "${BASE_URL}${path}" 2>/dev/null
+}
+
+cmd_drain() {
+  wait_for_terminal=0
+  timeout_seconds=480
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --wait) wait_for_terminal=1 ;;
+      --timeout) shift; timeout_seconds="$1" ;;
+      --timeout=*) timeout_seconds="${1#--timeout=}" ;;
+      *) echo "mqproxyctl drain: unknown option $1" >&2; return 2 ;;
+    esac
+    shift
+  done
+
+  code=$(http POST "/drain")
+  body=$(cat "$BODY_FILE" 2>/dev/null || true)
+  echo "$body"
+  # 200/202 are success; everything else is a hard failure surfaced to PreStop.
+  case "$code" in
+    200|202) ;;
+    409) echo "mqproxyctl drain: lifecycle disabled (409)" >&2; return 3 ;;
+    503) echo "mqproxyctl drain: unavailable (503)" >&2; return 4 ;;
+    504) echo "mqproxyctl drain: timeout (504)" >&2; return 5 ;;
+    *) echo "mqproxyctl drain: unexpected status $code" >&2; return 1 ;;
+  esac
+
+  if [ "$wait_for_terminal" -eq 0 ]; then
+    return 0
+  fi
+
+  # CLI-side polling: the admin handlers never block, so /drain/{runId} is polled
+  # here until the coordinator reports a terminal state or the CLI timeout elapses.
+  run_id=$(printf '%s' "$body" | sed -n 's/.*"runId":"\{0,1\}\([^",}]*\)"\{0,1\}.*/\1/p')
+  if [ -z "$run_id" ]; then
+    echo "mqproxyctl drain: no runId in 202 response" >&2
+    return 1
+  fi
+
+  elapsed=0
+  while [ "$elapsed" -lt "$timeout_seconds" ]; do
+    scode=$(http GET "/drain/${run_id}")
+    sbody=$(cat "$BODY_FILE" 2>/dev/null || true)
+    case "$sbody" in
+      *'"state":"DRAINED"'*|*'"state":"FORCE_DRAINING"'*|*'"state":"STOPPED"'*)
+        echo "$sbody"
+        return 0 ;;
+    esac
+    sleep 2
+    elapsed=$((elapsed + 2))
+  done
+  echo "mqproxyctl drain: wait timed out after ${timeout_seconds}s" >&2
+  return 5
+}
+
+cmd_status() {
+  code=$(http GET "/state")
+  cat "$BODY_FILE" 2>/dev/null || true
+  case "$code" in
+    200) return 0 ;;
+    403) echo "mqproxyctl status: forbidden (403)" >&2; return 3 ;;
+    *) echo "mqproxyctl status: unexpected status $code" >&2; return 1 ;;
+  esac
+}
+
+cmd_version() {
+  output="text"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --output) shift; output="$1" ;;
+      --output=*) output="${1#--output=}" ;;
+      *) echo "mqproxyctl version: unknown option $1" >&2; return 2 ;;
+    esac
+    shift
+  done
+  if [ "$output" = "json" ]; then
+    printf '{"apiVersion":"%s","adminCapable":true,"drainCapable":true,"buildVersion":"%s"}\n' \
+      "$API_VERSION" "$BUILD_VERSION"
+  else
+    echo "apiVersion=${API_VERSION} adminCapable=true drainCapable=true buildVersion=${BUILD_VERSION}"
+  fi
+  return 0
+}
+
+main() {
+  if [ $# -lt 1 ]; then
+    usage
+    return 2
+  fi
+  BODY_FILE=$(mktemp 2>/dev/null || echo "/tmp/mqproxyctl.$$")
+  trap 'rm -f "$BODY_FILE"' EXIT
+  subcommand="$1"
+  shift
+  case "$subcommand" in
+    drain) cmd_drain "$@" ;;
+    status) cmd_status "$@" ;;
+    version) cmd_version "$@" ;;
+    -h|--help|help) usage; return 0 ;;
+    *) echo "mqproxyctl: unknown subcommand $subcommand" >&2; usage; return 2 ;;
+  esac
+}
+
+main "$@"

@@ -71,6 +71,7 @@ RUN groupadd -g ${gid} ${group} \
     && useradd -l -u ${uid} -g ${gid} -m -s /bin/bash ${user} \
     && apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        curl \
         less \
         openssl \
         which \

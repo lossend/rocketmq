@@ -104,4 +104,4 @@ JAVA_OPT="${JAVA_OPT} -XX:-UseLargePages"
 JAVA_OPT="${JAVA_OPT} ${JAVA_OPT_EXT}"
 JAVA_OPT="${JAVA_OPT} -cp ${CLASSPATH}"
 
-"$JAVA" ${JAVA_OPT} $@
+exec "$JAVA" ${JAVA_OPT} $@
