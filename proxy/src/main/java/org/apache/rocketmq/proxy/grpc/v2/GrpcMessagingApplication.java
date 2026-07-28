@@ -17,10 +17,6 @@
 
 package org.apache.rocketmq.proxy.grpc.v2;
 
-import org.apache.rocketmq.proxy.lifecycle.SendLifecycleContext;
-import org.apache.rocketmq.proxy.lifecycle.SkipReason;
-import org.apache.rocketmq.proxy.lifecycle.grpc.GrpcSendLifecycleHolder;
-import org.apache.rocketmq.proxy.lifecycle.grpc.GrpcSendStreamTracerFactory;
 import apache.rocketmq.v2.AckMessageRequest;
 import apache.rocketmq.v2.AckMessageResponse;
 import apache.rocketmq.v2.ChangeInvisibleDurationRequest;
@@ -52,11 +48,6 @@ import apache.rocketmq.v2.TelemetryCommand;
 import com.google.protobuf.GeneratedMessageV3;
 import io.grpc.Context;
 import io.grpc.stub.StreamObserver;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.RejectedExecutionHandler;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
-import java.util.function.Function;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.rocketmq.auth.config.AuthConfig;
 import org.apache.rocketmq.common.constant.GrpcConstants;
@@ -75,7 +66,18 @@ import org.apache.rocketmq.proxy.grpc.pipeline.RequestPipeline;
 import org.apache.rocketmq.proxy.grpc.v2.common.GrpcProxyException;
 import org.apache.rocketmq.proxy.grpc.v2.common.ResponseBuilder;
 import org.apache.rocketmq.proxy.grpc.v2.common.ResponseWriter;
+import org.apache.rocketmq.common.future.FutureTaskExt;
+import org.apache.rocketmq.proxy.lifecycle.SendLifecycleContext;
+import org.apache.rocketmq.proxy.lifecycle.SkipReason;
+import org.apache.rocketmq.proxy.lifecycle.grpc.SendLifecycleBindPipeline;
+import org.apache.rocketmq.proxy.lifecycle.grpc.SendLifecycleMessagingActivity;
 import org.apache.rocketmq.proxy.processor.MessagingProcessor;
+
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionHandler;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
 public class GrpcMessagingApplication extends MessagingServiceGrpc.MessagingServiceImplBase implements StartAndShutdown {
     private final static Logger log = LoggerFactory.getLogger(LoggerName.PROXY_LOGGER_NAME);
@@ -160,8 +162,11 @@ public class GrpcMessagingApplication extends MessagingServiceGrpc.MessagingServ
                 .pipe(new AuthorizationPipeline(authConfig, messagingProcessor))
                 .pipe(new AuthenticationPipeline(authConfig, messagingProcessor));
         }
+        // Runs after ContextInitPipeline: copies the send permit off the gRPC Context
+        // while still on the service thread. Inert when the lifecycle is disabled.
+        pipeline = pipeline.pipe(new SendLifecycleBindPipeline());
         pipeline = pipeline.pipe(new ContextInitPipeline());
-        GrpcMessagingActivity activity = new org.apache.rocketmq.proxy.lifecycle.grpc.SendLifecycleMessagingActivity(
+        GrpcMessagingActivity activity = new SendLifecycleMessagingActivity(
             new DefaultGrpcMessagingActivity(messagingProcessor));
         return new GrpcMessagingApplication(activity, pipeline);
     }
@@ -182,8 +187,7 @@ public class GrpcMessagingApplication extends MessagingServiceGrpc.MessagingServ
         } else {
             log.error("[BUG]grpc request pipe is not been executed");
         }
-        bindSendLifecycle(context);
-        executor.execute(new GrpcTask<>(runnable, context, request, responseObserver, statusResponseCreator.apply(flowLimitStatus())));
+        executor.submit(new GrpcTask<>(runnable, context, request, responseObserver, statusResponseCreator.apply(flowLimitStatus())));
     }
 
     protected <V, T> void writeResponse(ProxyContext context, V request, T response, StreamObserver<T> responseObserver,
@@ -257,13 +261,6 @@ public class GrpcMessagingApplication extends MessagingServiceGrpc.MessagingServ
         } catch (Throwable t) {
             markSendSkipped(context);
             writeResponse(context, request, null, responseObserver, t, statusResponseCreator);
-        }
-    }
-
-    private void bindSendLifecycle(ProxyContext context) {
-        GrpcSendLifecycleHolder holder = GrpcSendStreamTracerFactory.HOLDER_KEY.get();
-        if (holder != null && holder.hasPermit()) {
-            context.setSendLifecycleContext(holder.permit());
         }
     }
 
@@ -520,9 +517,9 @@ public class GrpcMessagingApplication extends MessagingServiceGrpc.MessagingServ
 
         @Override
         public void rejectedExecution(Runnable r, ThreadPoolExecutor executor) {
-            if (r instanceof GrpcTask) {
+            GrpcTask grpcTask = castGrpcTask(r);
+            if (grpcTask != null) {
                 try {
-                    GrpcTask grpcTask = (GrpcTask) r;
                     markSendSkipped(grpcTask.context);
                     writeResponse(grpcTask.context, grpcTask.request, grpcTask.executeRejectResponse, grpcTask.streamObserver, null, null);
                 } catch (Throwable t) {
@@ -530,5 +527,28 @@ public class GrpcMessagingApplication extends MessagingServiceGrpc.MessagingServ
                 }
             }
         }
+    }
+
+    /**
+     * Resolves the original {@link GrpcTask} from a rejected runnable. {@code submit}
+     * on a {@link FutureTaskExtThreadPoolExecutor} wraps the task in a
+     * {@link FutureTaskExt}, so a bare {@code instanceof GrpcTask} check never
+     * matches; unwrap it the same way the Remoting server does.
+     */
+    private GrpcTask castGrpcTask(final Runnable runnable) {
+        try {
+            if (runnable instanceof GrpcTask) {
+                return (GrpcTask) runnable;
+            }
+            if (runnable instanceof FutureTaskExt) {
+                Runnable inner = ((FutureTaskExt<?>) runnable).getRunnable();
+                if (inner instanceof GrpcTask) {
+                    return (GrpcTask) inner;
+                }
+            }
+        } catch (Throwable t) {
+            log.error("castGrpcTask exception. class:{}", runnable.getClass().getName(), t);
+        }
+        return null;
     }
 }
