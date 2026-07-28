@@ -1,0 +1,178 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 1220" width="960" height="1220" data-generator="fireworks-tech-graph" data-schema-version="1" data-text-metrics="heuristic-v1" data-style-id="1" data-visual-theme="Flat Icon" data-diagram-type="state-machine" data-motion-scene="" data-semantic-profile="generic" data-semantic-valid="true" data-quality-profile="standard" data-max-bends-per-edge="12" data-max-total-bends="100" data-max-route-stretch="5.0" data-max-bridged-crossings="8" data-min-node-gap="0.0" data-min-container-gutter="0.0" data-min-label-clearance="2.0" data-min-segment-length="0.0">
+  <defs>
+    <marker id="arrowA" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#7c3aed"/>
+    </marker>
+    <marker id="arrowB" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#10b981"/>
+    </marker>
+    <marker id="arrowC" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#2563eb"/>
+    </marker>
+    <marker id="arrowE" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#f97316"/>
+    </marker>
+    <marker id="arrowF" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#7c3aed"/>
+    </marker>
+    <marker id="arrowG" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#ef4444"/>
+    </marker>
+    <marker id="arrowH" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#6b7280"/>
+    </marker>
+    <filter id="shadowSoft" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#0f172a" flood-opacity="0.12"/>
+    </filter>
+    <filter id="shadowGlass" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#020617" flood-opacity="0.28"/>
+    </filter>
+    <style>
+    text { font-family: 'Helvetica Neue', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', 'Microsoft JhengHei', 'SimHei', sans-serif; }
+    .title { font-size: 30px; font-weight: 700; fill: #111827; }
+    .subtitle { font-size: 14px; font-weight: 500; fill: #6b7280; }
+    .section { font-size: 13px; font-weight: 700; fill: #2563eb; letter-spacing: 1.4px; }
+    .section-sub { font-size: 12px; font-weight: 500; fill: #94a3b8; }
+    .node-title { font-weight: 700; fill: #111827; }
+    .node-sub { font-size: 12px; font-weight: 500; fill: #6b7280; }
+    .node-type { font-size: 12px; font-weight: 700; fill: #9ca3af; letter-spacing: 0.08em; }
+    .arrow-label { font-size: 12px; font-weight: 600; fill: #6b7280; }
+    .legend { font-size: 12px; font-weight: 500; fill: #6b7280; }
+    .footnote { font-size: 12px; font-weight: 500; fill: #94a3b8; }
+    .metric-label { font-size: 8.5px; font-weight: 700; fill: #94a3b8; text-transform: uppercase; }
+    .metric-value { font-size: 9.5px; font-weight: 700; fill: #111827; }
+    </style>
+  </defs>
+  <rect data-graph-role="background" width="960.0" height="1220.0" fill="#ffffff"/>
+  <text x="480.0" y="56" text-anchor="middle" class="title">ProxyLifecycleState</text>
+  <text x="480.0" y="82" text-anchor="middle" class="subtitle">spec §3.1 · monotonic lifecycle: normal drain path and forced path merge only at STOPPING</text>
+  <path id="f6" data-graph-role="edge" data-edge-id="f6" data-source="force" data-target="stopping" data-edge-kind="flow" data-topic-id="" data-flow="feedback" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="3" data-route-stretch="1.0" data-bridges="" d="M 655,696 L 655,730 L 420,730 L 420,900 L 310,900" fill="none" stroke="#ef4444" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowG)"/>
+  <path id="a0" data-graph-role="edge" data-edge-id="a0" data-source="init" data-target="starting" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="2" data-route-stretch="1.0" data-bridges="" d="M 214,134 L 214,136 L 215,136 L 215,160" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="a1" data-graph-role="edge" data-edge-id="a1" data-source="starting" data-target="ready" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 215,224 L 215,278" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="a2" data-graph-role="edge" data-edge-id="a2" data-source="ready" data-target="quiescing" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 215,342 L 215,396" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="a3" data-graph-role="edge" data-edge-id="a3" data-source="quiescing" data-target="migrating" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 215,460 L 215,514" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="a4" data-graph-role="edge" data-edge-id="a4" data-source="migrating" data-target="draining" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 215,578 L 215,632" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="a5" data-graph-role="edge" data-edge-id="a5" data-source="draining" data-target="drained" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 215,696 L 215,750" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="a6" data-graph-role="edge" data-edge-id="a6" data-source="drained" data-target="stopping" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 215,814 L 215,868" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="a7" data-graph-role="edge" data-edge-id="a7" data-source="stopping" data-target="stopped" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 215,932 L 215,986" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="f1" data-graph-role="edge" data-edge-id="f1" data-source="starting" data-target="force" data-edge-kind="flow" data-topic-id="" data-flow="feedback" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="2" data-route-stretch="1.0" data-bridges="" d="M 310,192 L 334,192 L 334,392 L 560,392" fill="none" stroke="#ef4444" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowG)"/>
+  <path id="f2-bridge-mask" data-graph-role="bridge-mask" data-owner="f2" d="M 310,310 L 329,310 A 5 5 0 0 0 339,310 L 368.24,310 L 368.24,387 A 5 5 0 0 1 368.24,397 L 368.24,410 L 560,410" fill="none" stroke="#ffffff" stroke-width="6.9" stroke-linecap="round" stroke-linejoin="round"/>
+  <path id="f2" data-graph-role="edge" data-edge-id="f2" data-source="ready" data-target="force" data-edge-kind="flow" data-topic-id="" data-flow="feedback" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="2" data-route-stretch="1.0" data-bridges="334,310;368.24,392" d="M 310,310 L 329,310 A 5 5 0 0 0 339,310 L 368.24,310 L 368.24,387 A 5 5 0 0 1 368.24,397 L 368.24,410 L 560,410" fill="none" stroke="#ef4444" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowG)"/>
+  <path id="f3" data-graph-role="edge" data-edge-id="f3" data-source="quiescing" data-target="force" data-edge-kind="flow" data-topic-id="" data-flow="feedback" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 310,428 L 560,428" fill="none" stroke="#ef4444" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowG)"/>
+  <path id="f4" data-graph-role="edge" data-edge-id="f4" data-source="migrating" data-target="force" data-edge-kind="flow" data-topic-id="" data-flow="feedback" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="2" data-route-stretch="1.0" data-bridges="" d="M 310,546 L 334,546 L 334,446 L 560,446" fill="none" stroke="#ef4444" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowG)"/>
+  <path id="f5" data-graph-role="edge" data-edge-id="f5" data-source="draining" data-target="force" data-edge-kind="flow" data-topic-id="" data-flow="feedback" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="2" data-route-stretch="1.0" data-bridges="" d="M 310,664 L 368.24,664 L 368.24,464 L 560,464" fill="none" stroke="#ef4444" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowG)"/>
+  <g id="node-init" data-graph-role="node" data-node-id="init" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="204,112,226,134">
+  <rect x="204.0" y="112.0" width="22.0" height="22.0" rx="11.0" fill="#111827" stroke="#111827" stroke-width="1.8"/>
+  <text x="215.0" y="123.0" text-anchor="middle" class="node-title" font-size="12.0"></text>
+  </g>
+  <g id="node-starting" data-graph-role="node" data-node-id="starting" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="120,160,310,224">
+  <rect x="120.0" y="160.0" width="190.0" height="64.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
+  <text x="215.0" y="192.0" text-anchor="middle" class="node-title" font-size="18.0">STARTING</text>
+  <text x="215.0" y="214.0" text-anchor="middle" class="node-sub">warmup barrier</text>
+  </g>
+  <g id="node-ready" data-graph-role="node" data-node-id="ready" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="120,278,310,342">
+  <rect x="120.0" y="278.0" width="190.0" height="64.0" rx="10.0" fill="#ecfdf5" stroke="#10b981" stroke-width="1.8"/>
+  <text x="215.0" y="310.0" text-anchor="middle" class="node-title" font-size="18.0">READY</text>
+  <text x="215.0" y="332.0" text-anchor="middle" class="node-sub">serving traffic</text>
+  </g>
+  <g id="node-quiescing" data-graph-role="node" data-node-id="quiescing" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="120,396,310,460">
+  <rect x="120.0" y="396.0" width="190.0" height="64.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
+  <text x="215.0" y="428.0" text-anchor="middle" class="node-title" font-size="18.0">QUIESCING</text>
+  <text x="215.0" y="450.0" text-anchor="middle" class="node-sub">readiness fails</text>
+  </g>
+  <g id="node-migrating" data-graph-role="node" data-node-id="migrating" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="120,514,310,578">
+  <rect x="120.0" y="514.0" width="190.0" height="64.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
+  <text x="215.0" y="546.0" text-anchor="middle" class="node-title" font-size="18.0">MIGRATING</text>
+  <text x="215.0" y="568.0" text-anchor="middle" class="node-sub">lb detached</text>
+  </g>
+  <g id="node-draining" data-graph-role="node" data-node-id="draining" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="120,632,310,696">
+  <rect x="120.0" y="632.0" width="190.0" height="64.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
+  <text x="215.0" y="664.0" text-anchor="middle" class="node-title" font-size="18.0">DRAINING</text>
+  <text x="215.0" y="686.0" text-anchor="middle" class="node-sub">admission closed</text>
+  </g>
+  <g id="node-drained" data-graph-role="node" data-node-id="drained" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="120,750,310,814">
+  <rect x="120.0" y="750.0" width="190.0" height="64.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
+  <text x="215.0" y="782.0" text-anchor="middle" class="node-title" font-size="18.0">DRAINED</text>
+  <text x="215.0" y="804.0" text-anchor="middle" class="node-sub">inflight = 0</text>
+  </g>
+  <g id="node-stopping" data-graph-role="node" data-node-id="stopping" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="120,868,310,932">
+  <rect x="120.0" y="868.0" width="190.0" height="64.0" rx="10.0" fill="#f5f3ff" stroke="#8b5cf6" stroke-width="1.8"/>
+  <text x="215.0" y="900.0" text-anchor="middle" class="node-title" font-size="18.0">STOPPING</text>
+  <text x="215.0" y="922.0" text-anchor="middle" class="node-sub">resource teardown</text>
+  </g>
+  <g id="node-stopped" data-graph-role="node" data-node-id="stopped" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="120,986,310,1050">
+  <rect x="120.0" y="986.0" width="190.0" height="64.0" rx="10.0" fill="#f1f5f9" stroke="#64748b" stroke-width="1.8"/>
+  <text x="215.0" y="1018.0" text-anchor="middle" class="node-title" font-size="18.0">STOPPED</text>
+  <text x="215.0" y="1040.0" text-anchor="middle" class="node-sub">process exit</text>
+  </g>
+  <g id="node-force" data-graph-role="node" data-node-id="force" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="560,160,750,696">
+  <rect x="560.0" y="160.0" width="190.0" height="536.0" rx="10.0" fill="#fef2f2" stroke="#ef4444" stroke-width="1.8"/>
+  <text x="655.0" y="428.0" text-anchor="middle" class="node-title" font-size="18.0">FORCE_DRAINING</text>
+  <text x="655.0" y="450.0" text-anchor="middle" class="node-sub">any state on deadline exceeded</text>
+  </g>
+  <g id="node-note1" data-graph-role="node" data-node-id="note1" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="480,744,940,828">
+  <rect x="480.0" y="744.0" width="460.0" height="84.0" rx="10.0" fill="#fef9c3" stroke="#eab308" stroke-width="1.8"/>
+  <text x="710.0" y="786.0" text-anchor="middle" class="node-title" font-size="18.0">DRAINED: PreStop / POST /drain waiter</text>
+  <text x="710.0" y="808.0" text-anchor="middle" class="node-sub">returns here or at FORCE_DRAINING — never drives STOPPING</text>
+  </g>
+  <g id="node-note2" data-graph-role="node" data-node-id="note2" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="480,844,940,928">
+  <rect x="480.0" y="844.0" width="460.0" height="84.0" rx="10.0" fill="#fef9c3" stroke="#eab308" stroke-width="1.8"/>
+  <text x="710.0" y="886.0" text-anchor="middle" class="node-title" font-size="17.01">STOPPING: only SIGTERM hook or startup closer</text>
+  <text x="710.0" y="908.0" text-anchor="middle" class="node-sub">may advance past DRAINED / FORCE_DRAINING</text>
+  </g>
+  <g id="node-note3" data-graph-role="node" data-node-id="note3" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="480,944,940,1028">
+  <rect x="480.0" y="944.0" width="460.0" height="84.0" rx="10.0" fill="#fef9c3" stroke="#eab308" stroke-width="1.8"/>
+  <text x="710.0" y="986.0" text-anchor="middle" class="node-title" font-size="18.0">QUIESCING: all transitions are monotonic</text>
+  <text x="710.0" y="1008.0" text-anchor="middle" class="node-sub">normal and forced paths never merge before STOPPING</text>
+  </g>
+  <g id="a1-label" data-graph-role="label" data-owner="a1" data-graph-bounds="49.44,237,212,257">
+  <rect x="49.44" y="237.0" width="162.56" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
+  <text x="130.72" y="251.0" text-anchor="middle" class="arrow-label">warmup barrier complete</text>
+  </g>
+  <g id="a2-label" data-graph-role="label" data-owner="a2" data-graph-bounds="75.12,355,212,375">
+  <rect x="75.12" y="355.0" width="136.88" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
+  <text x="143.56" y="369.0" text-anchor="middle" class="arrow-label">beginDrain(trigger)</text>
+  </g>
+  <g id="a3-label" data-graph-role="label" data-owner="a3" data-graph-bounds="92.4,473,212,493">
+  <rect x="92.4" y="473.0" width="119.60000000000001" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
+  <text x="152.2" y="487.0" text-anchor="middle" class="arrow-label">lbCutoff reached</text>
+  </g>
+  <g id="a4-label" data-graph-role="label" data-owner="a4" data-graph-bounds="46.8,591,212,611">
+  <rect x="46.8" y="591.0" width="165.2" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
+  <text x="129.4" y="605.0" text-anchor="middle" class="arrow-label">migrationCutoff reached</text>
+  </g>
+  <g id="a5-label" data-graph-role="label" data-owner="a5" data-graph-bounds="59.52,709,212,729">
+  <rect x="59.52" y="709.0" width="152.48000000000002" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
+  <text x="135.76" y="723.0" text-anchor="middle" class="arrow-label">accepted inflight zero</text>
+  </g>
+  <g id="a6-label" data-graph-role="label" data-owner="a6" data-graph-bounds="64.32,827,212,847">
+  <rect x="64.32" y="827.0" width="147.68" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
+  <text x="138.16" y="841.0" text-anchor="middle" class="arrow-label">SIGTERM / shutdown()</text>
+  </g>
+  <g id="a7-label" data-graph-role="label" data-owner="a7" data-graph-bounds="85.44,945,212,965">
+  <rect x="85.44" y="945.0" width="126.56" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
+  <text x="148.72" y="959.0" text-anchor="middle" class="arrow-label">teardown complete</text>
+  </g>
+  <g id="f1-label" data-graph-role="label" data-owner="f1" data-graph-bounds="392.24,361,501.76,381">
+  <rect x="392.24" y="361.0" width="109.52000000000001" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
+  <text x="447.0" y="375.0" text-anchor="middle" class="arrow-label">startup failure</text>
+  </g>
+  <g id="f5-label" data-graph-role="label" data-owner="f5" data-graph-bounds="371.24,550,466.84,570">
+  <rect x="371.24" y="550.0" width="95.60000000000001" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
+  <text x="419.04" y="564.0" text-anchor="middle" class="arrow-label">hard deadline</text>
+  </g>
+  <g id="f6-label" data-graph-role="label" data-owner="f6" data-graph-bounds="475.54,703,599.46,723">
+  <rect x="475.54" y="703.0" width="123.92" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
+  <text x="537.5" y="717.0" text-anchor="middle" class="arrow-label">forced close done</text>
+  </g>
+  <g id="legend" data-graph-role="legend">
+    <rect id="legend-zone" data-graph-role="reserved" data-reserved-kind="legend" x="110" y="1086" width="446.4" height="46" rx="10" fill="none" stroke="none"/>
+    <line data-graph-role="decoration" x1="120.0" y1="1100.0" x2="150.0" y2="1100.0" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
+    <text data-graph-role="decoration" x="160.0" y="1104.0" class="legend">normal drain path</text>
+    <line data-graph-role="decoration" x1="294.8" y1="1100.0" x2="324.8" y2="1100.0" stroke="#ef4444" stroke-width="2.4" marker-end="url(#arrowG)"/>
+    <text data-graph-role="decoration" x="334.8" y="1104.0" class="legend">forced path (deadline exceeded)</text>
+  </g>
+  <g id="footer" data-graph-role="reserved" data-graph-bounds="120,1168,491,1184">
+  <text x="120.0" y="1180.0" class="footnote">RocketMQ Proxy graceful lifecycle · state machine 1/6</text>
+  </g>
+</svg>

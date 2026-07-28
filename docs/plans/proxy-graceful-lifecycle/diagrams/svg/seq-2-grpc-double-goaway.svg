@@ -1,0 +1,141 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1563 1422" width="1563" height="1422">
+  <defs>
+    <marker id="ar-req" markerWidth="9" markerHeight="7" refX="8.5" refY="3.5" orient="auto">
+      <polygon points="0 0, 9 3.5, 0 7" fill="#2563eb"/>
+    </marker>
+    <marker id="ar-ret" markerWidth="9" markerHeight="7" refX="8.5" refY="3.5" orient="auto">
+      <polygon points="0 0, 9 3.5, 0 7" fill="#9333ea"/>
+    </marker>
+    <marker id="ar-self" markerWidth="9" markerHeight="7" refX="8.5" refY="3.5" orient="auto">
+      <polygon points="0 0, 9 3.5, 0 7" fill="#9ca3af"/>
+    </marker>
+  </defs>
+  <style>
+    text { font-family: 'Helvetica Neue', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif; }
+  </style>
+  <rect width="1563" height="1422" fill="#ffffff"/>
+  <text x="30" y="40" font-size="20" font-weight="700" fill="#111827">gRPC double-GOAWAY drain</text>
+  <text x="30" y="62" font-size="12.5" fill="#6b7280">spec §9.2 + §3.4  ·  two GOAWAY frames fence the highest stream id the server actually accepted</text>
+  <line x1="30" y1="74" x2="1533" y2="74" stroke="#e5e7eb" stroke-width="1"/>
+  <rect x="24" y="1081" width="1515" height="235" rx="6" fill="none" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="6,4"/>
+  <line x1="162.0" y1="146" x2="162.0" y2="1342" stroke="#cbd5e1" stroke-width="1.4" stroke-dasharray="5,4"/>
+  <line x1="442.0" y1="146" x2="442.0" y2="1342" stroke="#cbd5e1" stroke-width="1.4" stroke-dasharray="5,4"/>
+  <line x1="712.0" y1="146" x2="712.0" y2="1342" stroke="#cbd5e1" stroke-width="1.4" stroke-dasharray="5,4"/>
+  <line x1="912.0" y1="146" x2="912.0" y2="1342" stroke="#cbd5e1" stroke-width="1.4" stroke-dasharray="5,4"/>
+  <line x1="1092.0" y1="146" x2="1092.0" y2="1342" stroke="#cbd5e1" stroke-width="1.4" stroke-dasharray="5,4"/>
+  <line x1="1422.0" y1="146" x2="1422.0" y2="1342" stroke="#cbd5e1" stroke-width="1.4" stroke-dasharray="5,4"/>
+  <line x1="24" y1="1179" x2="1539" y2="1179" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="6,4"/>
+  <rect x="34" y="1181" width="175.46500000000006" height="18" rx="4" fill="#ffffff" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="121.73250000000003" y="1193.5" font-size="11" font-weight="600" text-anchor="middle" fill="#475569">else  timeout / interrupted</text>
+  <rect x="24" y="1081" width="152.25500000000005" height="19" rx="4" fill="#e2e8f0" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="100.12750000000003" y="1094.5" font-size="11" font-weight="600" text-anchor="middle" fill="#475569">alt  terminated in time</text>
+  <line x1="166.0" y1="208" x2="442.0" y2="208" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="228.37375" y="174" width="147.2525" height="30" fill="#ffffff"/>
+  <text x="302.0" y="186" font-size="11.5" text-anchor="middle" fill="#334155">enter DRAINING</text>
+  <text x="302.0" y="199" font-size="11.5" text-anchor="middle" fill="#334155">stopAcceptingNewRpcs()</text>
+  <line x1="446.0" y1="243" x2="712.0" y2="243" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="512.97625" y="222" width="128.04749999999999" height="17" fill="#ffffff"/>
+  <text x="577.0" y="234" font-size="11.5" text-anchor="middle" fill="#334155">initiateServerDrain()</text>
+  <line x1="716.0" y1="291" x2="912.0" y2="291" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="722.245" y="257" width="179.51000000000005" height="30" fill="#ffffff"/>
+  <text x="812.0" y="269" font-size="11.5" text-anchor="middle" fill="#334155">shutdown()</text>
+  <text x="812.0" y="282" font-size="11.5" text-anchor="middle" fill="#334155">(once-only CAS, non-blocking)</text>
+  <line x1="916.0" y1="326" x2="1422.0" y2="326" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="1047.02875" y="305" width="239.94250000000005" height="17" fill="#ffffff"/>
+  <text x="1167.0" y="317" font-size="11.5" text-anchor="middle" fill="#334155">GOAWAY(lastStreamId=MAX, NO_ERROR)</text>
+  <rect x="1323.0" y="342" width="198.0" height="44" rx="6" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.2"/>
+  <rect x="1323.0" y="342" width="3.5" height="44" rx="1.5" fill="#9ca3af"/>
+  <text x="1424.0" y="361" font-size="12.0" text-anchor="middle" fill="#374151">stop creating new streams</text>
+  <text x="1424.0" y="376" font-size="12.0" text-anchor="middle" fill="#374151">on this transport</text>
+  <line x1="916.0" y1="421" x2="1422.0" y2="421" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="1108.15125" y="400" width="117.6975" height="17" fill="#ffffff"/>
+  <text x="1167.0" y="412" font-size="11.5" text-anchor="middle" fill="#334155">PING(0x97ACEF001)</text>
+  <line x1="1418.0" y1="456" x2="912.0" y2="456" stroke="#9333ea" stroke-width="1.6" stroke-dasharray="6,4" marker-end="url(#ar-ret)"/>
+  <rect x="1134.31375" y="435" width="65.3725" height="17" fill="#ffffff"/>
+  <text x="1167.0" y="447" font-size="11.5" text-anchor="middle" fill="#334155">PING_ACK</text>
+  <rect x="1087.35875" y="472" width="159.28249999999997" height="21" rx="4" fill="#fef9c3" stroke="#fde68a" stroke-width="1"/>
+  <text x="1097.35875" y="485" font-size="10.5" fill="#92400e">or 10s fallback if no ACK</text>
+  <line x1="916.0" y1="522" x2="1422.0" y2="522" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="1044.95875" y="501" width="244.08250000000012" height="17" fill="#ffffff"/>
+  <text x="1167.0" y="513" font-size="11.5" text-anchor="middle" fill="#334155">GOAWAY(lastStreamCreated, NO_ERROR)</text>
+  <rect x="994.3812499999999" y="538" width="345.2375000000001" height="21" rx="4" fill="#fef9c3" stroke="#fde68a" stroke-width="1"/>
+  <text x="1004.3812499999999" y="551" font-size="10.5" fill="#92400e">freezes the highest stream id the server actually accepted</text>
+  <rect x="344.44" y="569" width="195.12" height="44" rx="6" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.2"/>
+  <rect x="344.44" y="569" width="3.5" height="44" rx="1.5" fill="#9ca3af"/>
+  <text x="444.0" y="588" font-size="12.0" text-anchor="middle" fill="#374151">wait no_new_work_reached</text>
+  <text x="444.0" y="603" font-size="12.0" text-anchor="middle" fill="#374151">(this protocol's evidence)</text>
+  <rect x="12.090000000000032" y="629" width="299.81999999999994" height="44" rx="6" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.2"/>
+  <rect x="12.090000000000032" y="629" width="3.5" height="44" rx="1.5" fill="#9ca3af"/>
+  <text x="164.0" y="648" font-size="12.0" text-anchor="middle" fill="#374151">last protocol reaches no_new_work_reached</text>
+  <text x="164.0" y="663" font-size="12.0" text-anchor="middle" fill="#374151">-&gt; SendDrainGate.closeAdmission()</text>
+  <rect x="339.49" y="689" width="205.01999999999998" height="29" rx="6" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.2"/>
+  <rect x="339.49" y="689" width="3.5" height="29" rx="1.5" fill="#9ca3af"/>
+  <text x="444.0" y="708" font-size="12.0" text-anchor="middle" fill="#374151">wait grpcOpenSendRpcs == 0</text>
+  <line x1="446.0" y1="753" x2="1092.0" y2="753" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="672.3575" y="732" width="189.28500000000005" height="17" fill="#ffffff"/>
+  <text x="767.0" y="744" font-size="11.5" text-anchor="middle" fill="#334155">closeAll(GrpcDrainStatusPolicy)</text>
+  <line x1="1096.0" y1="788" x2="1422.0" y2="788" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="1098.245" y="767" width="317.51000000000005" height="17" fill="#ffffff"/>
+  <text x="1257.0" y="779" font-size="11.5" text-anchor="middle" fill="#334155">Telemetry stream -&gt; Status.OK (normal completion)</text>
+  <line x1="1096.0" y1="836" x2="1422.0" y2="836" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="1110.11875" y="802" width="293.76250000000005" height="30" fill="#ffffff"/>
+  <text x="1257.0" y="814" font-size="11.5" text-anchor="middle" fill="#334155">ReceiveMessage / other streaming</text>
+  <text x="1257.0" y="827" font-size="11.5" text-anchor="middle" fill="#334155">-&gt; UNAVAILABLE "[PROXY_DRAINING] reconnect"</text>
+  <rect x="1306.92" y="852" width="230.15999999999997" height="44" rx="6" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.2"/>
+  <rect x="1306.92" y="852" width="3.5" height="44" rx="1.5" fill="#9ca3af"/>
+  <text x="1424.0" y="871" font-size="12.0" text-anchor="middle" fill="#374151">Telemetry: 1s observer renewal,</text>
+  <text x="1424.0" y="886" font-size="12.0" text-anchor="middle" fill="#374151">resend Settings (no error log)</text>
+  <rect x="1292.43" y="912" width="259.13999999999993" height="44" rx="6" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.2"/>
+  <rect x="1292.43" y="912" width="3.5" height="44" rx="1.5" fill="#9ca3af"/>
+  <text x="1424.0" y="931" font-size="12.0" text-anchor="middle" fill="#374151">ReceiveMessage: reconnect elsewhere</text>
+  <text x="1424.0" y="946" font-size="12.0" text-anchor="middle" fill="#374151">via stable NLB address</text>
+  <line x1="446.0" y1="991" x2="1092.0" y2="991" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="664.73875" y="970" width="204.5225000000001" height="17" fill="#ffffff"/>
+  <text x="767.0" y="982" font-size="11.5" text-anchor="middle" fill="#334155">wait grpcOpenDrainableCalls == 0</text>
+  <line x1="446.0" y1="1026" x2="712.0" y2="1026" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="448.8349999999999" y="1005" width="256.33000000000015" height="17" fill="#ffffff"/>
+  <text x="577.0" y="1017" font-size="11.5" text-anchor="middle" fill="#334155">awaitServerTermination(effectiveDeadline)</text>
+  <line x1="716.0" y1="1061" x2="912.0" y2="1061" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="725.925" y="1040" width="172.15000000000003" height="17" fill="#ffffff"/>
+  <text x="812.0" y="1052" font-size="11.5" text-anchor="middle" fill="#334155">awaitTermination(remaining)</text>
+  <line x1="708.0" y1="1124" x2="442.0" y2="1124" stroke="#9333ea" stroke-width="1.6" stroke-dasharray="6,4" marker-end="url(#ar-ret)"/>
+  <rect x="559.465" y="1103" width="35.07" height="17" fill="#ffffff"/>
+  <text x="577.0" y="1115" font-size="11.5" text-anchor="middle" fill="#334155">true</text>
+  <line x1="438.0" y1="1159" x2="162.0" y2="1159" stroke="#9333ea" stroke-width="1.6" stroke-dasharray="6,4" marker-end="url(#ar-ret)"/>
+  <rect x="241.57" y="1138" width="120.85999999999999" height="17" fill="#ffffff"/>
+  <text x="302.0" y="1150" font-size="11.5" text-anchor="middle" fill="#334155">normal DrainResult</text>
+  <line x1="716.0" y1="1222" x2="912.0" y2="1222" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="731.24375" y="1201" width="161.51250000000002" height="17" fill="#ffffff"/>
+  <text x="812.0" y="1213" font-size="11.5" text-anchor="middle" fill="#334155">shutdownNow() (once-only)</text>
+  <line x1="708.0" y1="1257" x2="442.0" y2="1257" stroke="#9333ea" stroke-width="1.6" stroke-dasharray="6,4" marker-end="url(#ar-ret)"/>
+  <rect x="516.94375" y="1236" width="120.11249999999998" height="17" fill="#ffffff"/>
+  <text x="577.0" y="1248" font-size="11.5" text-anchor="middle" fill="#334155">forced=true, cause</text>
+  <line x1="438.0" y1="1292" x2="162.0" y2="1292" stroke="#9333ea" stroke-width="1.6" stroke-dasharray="6,4" marker-end="url(#ar-ret)"/>
+  <rect x="241.9725" y="1271" width="120.05499999999999" height="17" fill="#ffffff"/>
+  <text x="302.0" y="1283" font-size="11.5" text-anchor="middle" fill="#334155">forced DrainResult</text>
+  <rect x="92.0" y="92" width="140" height="54" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="162.0" y="115.5" font-size="13.0" font-weight="600" text-anchor="middle" fill="#111827">ProxyLifecycle</text>
+  <text x="162.0" y="132.5" font-size="11.5" font-weight="400" text-anchor="middle" fill="#6b7280">Coordinator</text>
+  <rect x="369.5" y="92" width="145" height="54" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="442.0" y="124.0" font-size="13.0" font-weight="600" text-anchor="middle" fill="#111827">GrpcDrainAdapter</text>
+  <rect x="642.0" y="92" width="140" height="54" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="712.0" y="124.0" font-size="13.0" font-weight="600" text-anchor="middle" fill="#111827">GrpcServer</text>
+  <rect x="839.5" y="92" width="145" height="54" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="912.0" y="115.5" font-size="13.0" font-weight="600" text-anchor="middle" fill="#111827">io.grpc.Server</text>
+  <text x="912.0" y="132.5" font-size="11.5" font-weight="400" text-anchor="middle" fill="#6b7280">grpc-java built-in</text>
+  <rect x="1022.0" y="92" width="140" height="54" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="1092.0" y="115.5" font-size="13.0" font-weight="600" text-anchor="middle" fill="#111827">GrpcActiveCall</text>
+  <text x="1092.0" y="132.5" font-size="11.5" font-weight="400" text-anchor="middle" fill="#6b7280">Registry</text>
+  <rect x="1338.0" y="92" width="168" height="54" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="1422.0" y="115.5" font-size="13.0" font-weight="600" text-anchor="middle" fill="#111827">Client</text>
+  <text x="1422.0" y="132.5" font-size="11.5" font-weight="400" text-anchor="middle" fill="#6b7280">5.0.7 / 5.2.1 / 5.3.2+</text>
+  <line x1="30" y1="1354" x2="1533" y2="1354" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="30" y1="1376" x2="58" y2="1376" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <text x="66" y="1380" font-size="11" fill="#6b7280">request / forward call</text>
+  <line x1="226.07500000000002" y1="1376" x2="254.07500000000002" y2="1376" stroke="#9333ea" stroke-width="1.6" stroke-dasharray="6,4" marker-end="url(#ar-ret)"/>
+  <text x="262.07500000000005" y="1380" font-size="11" fill="#6b7280">response / return</text>
+  <rect x="393.99" y="1370" width="26" height="13" rx="3" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.1"/>
+  <text x="429.99" y="1380" font-size="11" fill="#6b7280">internal step</text>
+  <rect x="532.755" y="1370" width="26" height="13" rx="3" fill="#fef9c3" stroke="#eab308" stroke-width="1.1"/>
+  <text x="568.755" y="1380" font-size="11" fill="#6b7280">note / constraint</text>
+</svg>

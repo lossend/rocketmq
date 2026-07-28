@@ -1,0 +1,136 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1300 1250" width="1300" height="1250" data-generator="fireworks-tech-graph" data-schema-version="1" data-text-metrics="heuristic-v1" data-style-id="1" data-visual-theme="Flat Icon" data-diagram-type="flowchart" data-motion-scene="" data-semantic-profile="generic" data-semantic-valid="true" data-quality-profile="standard" data-max-bends-per-edge="12" data-max-total-bends="100" data-max-route-stretch="5.0" data-max-bridged-crossings="8" data-min-node-gap="0.0" data-min-container-gutter="0.0" data-min-label-clearance="2.0" data-min-segment-length="0.0">
+  <defs>
+    <marker id="arrowA" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#7c3aed"/>
+    </marker>
+    <marker id="arrowB" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#10b981"/>
+    </marker>
+    <marker id="arrowC" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#2563eb"/>
+    </marker>
+    <marker id="arrowE" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#f97316"/>
+    </marker>
+    <marker id="arrowF" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#7c3aed"/>
+    </marker>
+    <marker id="arrowG" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#ef4444"/>
+    </marker>
+    <marker id="arrowH" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#6b7280"/>
+    </marker>
+    <filter id="shadowSoft" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#0f172a" flood-opacity="0.12"/>
+    </filter>
+    <filter id="shadowGlass" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#020617" flood-opacity="0.28"/>
+    </filter>
+    <style>
+    text { font-family: 'Helvetica Neue', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', 'Microsoft JhengHei', 'SimHei', sans-serif; }
+    .title { font-size: 30px; font-weight: 700; fill: #111827; }
+    .subtitle { font-size: 14px; font-weight: 500; fill: #6b7280; }
+    .section { font-size: 13px; font-weight: 700; fill: #2563eb; letter-spacing: 1.4px; }
+    .section-sub { font-size: 12px; font-weight: 500; fill: #94a3b8; }
+    .node-title { font-weight: 700; fill: #111827; }
+    .node-sub { font-size: 12px; font-weight: 500; fill: #6b7280; }
+    .node-type { font-size: 12px; font-weight: 700; fill: #9ca3af; letter-spacing: 0.08em; }
+    .arrow-label { font-size: 12px; font-weight: 600; fill: #6b7280; }
+    .legend { font-size: 12px; font-weight: 500; fill: #6b7280; }
+    .footnote { font-size: 12px; font-weight: 500; fill: #94a3b8; }
+    .metric-label { font-size: 8.5px; font-weight: 700; fill: #94a3b8; text-transform: uppercase; }
+    .metric-value { font-size: 9.5px; font-weight: 700; fill: #111827; }
+    </style>
+  </defs>
+  <rect data-graph-role="background" width="1300.0" height="1250.0" fill="#ffffff"/>
+  <text x="650.0" y="56" text-anchor="middle" class="title">Rollout / rollback flow</text>
+  <text x="650.0" y="82" text-anchor="middle" class="subtitle">Proxy graceful lifecycle · spec §6 — two hard gates: 8082 health, then zero metric regression</text>
+  <path id="e0" data-graph-role="edge" data-edge-id="e0" data-source="canary" data-target="prescale" data-edge-kind="flow" data-topic-id="" data-flow="" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 350,200 L 350,232" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e1" data-graph-role="edge" data-edge-id="e1" data-source="prescale" data-target="boot" data-edge-kind="flow" data-topic-id="" data-flow="" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 350,308 L 350,338" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e2" data-graph-role="edge" data-edge-id="e2" data-source="boot" data-target="verify" data-edge-kind="flow" data-topic-id="" data-flow="" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 350,414 L 350,444" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e3" data-graph-role="edge" data-edge-id="e3" data-source="verify" data-target="d1" data-edge-kind="flow" data-topic-id="" data-flow="" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 350,512 L 350,550" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e4" data-graph-role="edge" data-edge-id="e4" data-source="d1" data-target="stop" data-edge-kind="flow" data-topic-id="" data-flow="" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 630,586 L 720,586" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e5" data-graph-role="edge" data-edge-id="e5" data-source="d1" data-target="enable" data-edge-kind="flow" data-topic-id="" data-flow="" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 350,622 L 350,662" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e6" data-graph-role="edge" data-edge-id="e6" data-source="enable" data-target="wait" data-edge-kind="flow" data-topic-id="" data-flow="" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 350,738 L 350,772" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e7" data-graph-role="edge" data-edge-id="e7" data-source="wait" data-target="d2" data-edge-kind="flow" data-topic-id="" data-flow="" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 350,840 L 350,878" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e8" data-graph-role="edge" data-edge-id="e8" data-source="d2" data-target="slo" data-edge-kind="flow" data-topic-id="" data-flow="" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 350,954 L 350,994" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e9" data-graph-role="edge" data-edge-id="e9" data-source="d2" data-target="pause" data-edge-kind="flow" data-topic-id="" data-flow="" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="2" data-route-stretch="1.0" data-bridges="" d="M 630,916 L 654,916 L 654,1030 L 720,1030" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <g id="node-canary" data-graph-role="node" data-node-id="canary" data-semantic-role="node" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="70,120,630,200">
+  <rect x="70.0" y="120.0" width="560.0" height="80.0" rx="10.0" fill="#dcfce7" stroke="#16a34a" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="350.0" y="160.0" text-anchor="middle" class="node-title" font-size="18.0">Canary release with lifecycle enabled</text>
+  <text x="350.0" y="182.0" text-anchor="middle" class="node-sub">real 5.0.7 / 5.2.1 / 5.3.2 clients, real provider 8082 health check, single Pod delete verified</text>
+  </g>
+  <g id="node-prescale" data-graph-role="node" data-node-id="prescale" data-semantic-role="node" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="70,232,630,308">
+  <rect x="70.0" y="232.0" width="560.0" height="76.0" rx="10.0" fill="#eff6ff" stroke="#2563eb" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="350.0" y="270.0" text-anchor="middle" class="node-title" font-size="18.0">Pre-scale main cluster</text>
+  <text x="350.0" y="292.0" text-anchor="middle" class="node-sub">capacity inequality, not a magic replica count, and confirm no live HPA</text>
+  </g>
+  <g id="node-boot" data-graph-role="node" data-node-id="boot" data-semantic-role="node" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="70,338,630,414">
+  <rect x="70.0" y="338.0" width="560.0" height="76.0" rx="10.0" fill="#eff6ff" stroke="#2563eb" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="350.0" y="376.0" text-anchor="middle" class="node-title" font-size="18.0">One annotation-driven bootstrap rollout</text>
+  <text x="350.0" y="398.0" text-anchor="middle" class="node-sub">binary + enableProxyAdminServer=true, compressed into a single lossy rollout</text>
+  </g>
+  <g id="node-verify" data-graph-role="node" data-node-id="verify" data-semantic-role="node" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="70,444,630,512">
+  <rect x="70.0" y="444.0" width="560.0" height="68.0" rx="10.0" fill="#eff6ff" stroke="#2563eb" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="350.0" y="478.0" text-anchor="middle" class="node-title" font-size="18.0">Verify 8082 reachable on every existing target</text>
+  </g>
+  <g id="node-d1" data-graph-role="node" data-node-id="d1" data-semantic-role="node" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="70,550,630,622">
+  <rect x="70.0" y="550.0" width="560.0" height="72.0" rx="10.0" fill="#fef9c3" stroke="#d97706" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="350.0" y="586.0" text-anchor="middle" class="node-title" font-size="18.0">All targets healthy on 8082?</text>
+  </g>
+  <g id="node-stop" data-graph-role="node" data-node-id="stop" data-semantic-role="node" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="720,550,1240,622">
+  <rect x="720.0" y="550.0" width="520.0" height="72.0" rx="10.0" fill="#fee2e2" stroke="#dc2626" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="980.0" y="586.0" text-anchor="middle" class="node-title" font-size="18.0">Stop — do not proceed to strict enablement</text>
+  <text x="980.0" y="608.0" text-anchor="middle" class="node-sub">fix 8082 exposure first</text>
+  </g>
+  <g id="node-enable" data-graph-role="node" data-node-id="enable" data-semantic-role="node" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="70,662,630,738">
+  <rect x="70.0" y="662.0" width="560.0" height="76.0" rx="10.0" fill="#eff6ff" stroke="#2563eb" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="350.0" y="700.0" text-anchor="middle" class="node-title" font-size="18.0">Explicitly enable lifecycle=true in production values</text>
+  <text x="350.0" y="722.0" text-anchor="middle" class="node-sub">switch HTTP probes / PreStop / derived budgets / NLB health check</text>
+  </g>
+  <g id="node-wait" data-graph-role="node" data-node-id="wait" data-semantic-role="node" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="70,772,630,840">
+  <rect x="70.0" y="772.0" width="560.0" height="68.0" rx="10.0" fill="#eff6ff" stroke="#2563eb" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="350.0" y="806.0" text-anchor="middle" class="node-title" font-size="18.0">Wait at least one full max-lease + grace cycle</text>
+  </g>
+  <g id="node-d2" data-graph-role="node" data-node-id="d2" data-semantic-role="node" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="70,878,630,954">
+  <rect x="70.0" y="878.0" width="560.0" height="76.0" rx="10.0" fill="#fef9c3" stroke="#d97706" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="350.0" y="916.0" text-anchor="middle" class="node-title" font-size="15.08">Forced / timeout / late-connection metrics show zero increase?</text>
+  </g>
+  <g id="node-slo" data-graph-role="node" data-node-id="slo" data-semantic-role="node" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="70,994,630,1062">
+  <rect x="70.0" y="994.0" width="560.0" height="68.0" rx="10.0" fill="#dcfce7" stroke="#16a34a" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="350.0" y="1028.0" text-anchor="middle" class="node-title" font-size="18.0">Enable strict SLO</text>
+  <text x="350.0" y="1050.0" text-anchor="middle" class="node-sub">resume normal controlled rollout</text>
+  </g>
+  <g id="node-pause" data-graph-role="node" data-node-id="pause" data-semantic-role="node" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="720,994,1240,1066">
+  <rect x="720.0" y="994.0" width="520.0" height="72.0" rx="10.0" fill="#fff7ed" stroke="#ea580c" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="980.0" y="1030.0" text-anchor="middle" class="node-title" font-size="18.0">Pause rollout, keep existing READY Pods</text>
+  <text x="980.0" y="1052.0" text-anchor="middle" class="node-sub">investigate before retry</text>
+  </g>
+  <g id="node-n1" data-graph-role="node" data-node-id="n1" data-semantic-role="node" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="70,1120,630,1192">
+  <rect x="70.0" y="1120.0" width="560.0" height="72.0" rx="10.0" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="350.0" y="1156.0" text-anchor="middle" class="node-title" font-size="15.14">On any send-SLO, connection-storm, or provider-detach anomaly</text>
+  <text x="350.0" y="1178.0" text-anchor="middle" class="node-sub">pause immediately and keep READY Pods</text>
+  </g>
+  <g id="node-n2" data-graph-role="node" data-node-id="n2" data-semantic-role="node" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="720,1120,1240,1192">
+  <rect x="720.0" y="1120.0" width="520.0" height="72.0" rx="10.0" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.8" filter="url(#shadowSoft)"/>
+  <text x="980.0" y="1156.0" text-anchor="middle" class="node-title" font-size="13.66">Roll back only to a binary+probe+PreStop compatible Helm revision</text>
+  <text x="980.0" y="1178.0" text-anchor="middle" class="node-sub">never auto-rollback</text>
+  </g>
+  <g id="e4-label" data-graph-role="label" data-owner="e4" data-graph-bounds="657,555,693,575">
+  <rect x="657.0" y="555.0" width="36.0" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
+  <text x="675.0" y="569.0" text-anchor="middle" class="arrow-label">no</text>
+  </g>
+  <g id="e5-label" data-graph-role="label" data-owner="e5" data-graph-bounds="310,628,346,648">
+  <rect x="310.0" y="628.0" width="36.0" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
+  <text x="328.0" y="642.0" text-anchor="middle" class="arrow-label">yes</text>
+  </g>
+  <g id="e8-label" data-graph-role="label" data-owner="e8" data-graph-bounds="310,960,346,980">
+  <rect x="310.0" y="960.0" width="36.0" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
+  <text x="328.0" y="974.0" text-anchor="middle" class="arrow-label">yes</text>
+  </g>
+  <g id="e9-label" data-graph-role="label" data-owner="e9" data-graph-bounds="614,959,650,979">
+  <rect x="614.0" y="959.0" width="36.0" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
+  <text x="632.0" y="973.0" text-anchor="middle" class="arrow-label">no</text>
+  </g>
+</svg>

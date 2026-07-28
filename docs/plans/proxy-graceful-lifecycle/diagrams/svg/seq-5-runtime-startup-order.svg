@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1276 1219" width="1276" height="1219">
+  <defs>
+    <marker id="ar-req" markerWidth="9" markerHeight="7" refX="8.5" refY="3.5" orient="auto">
+      <polygon points="0 0, 9 3.5, 0 7" fill="#2563eb"/>
+    </marker>
+    <marker id="ar-ret" markerWidth="9" markerHeight="7" refX="8.5" refY="3.5" orient="auto">
+      <polygon points="0 0, 9 3.5, 0 7" fill="#9333ea"/>
+    </marker>
+    <marker id="ar-self" markerWidth="9" markerHeight="7" refX="8.5" refY="3.5" orient="auto">
+      <polygon points="0 0, 9 3.5, 0 7" fill="#9ca3af"/>
+    </marker>
+  </defs>
+  <style>
+    text { font-family: 'Helvetica Neue', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif; }
+  </style>
+  <rect width="1276" height="1219" fill="#ffffff"/>
+  <text x="30" y="40" font-size="20" font-weight="700" fill="#111827">Runtime construction and startup order</text>
+  <text x="30" y="62" font-size="12.5" fill="#6b7280">spec §8.2  ·  ConstructionScope owns every leaf so a mid-build failure rolls back in reverse order</text>
+  <line x1="30" y1="74" x2="1246" y2="74" stroke="#e5e7eb" stroke-width="1"/>
+  <rect x="24" y="513" width="1228" height="368" rx="6" fill="none" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="6,4"/>
+  <line x1="146.5" y1="129" x2="146.5" y2="1139" stroke="#cbd5e1" stroke-width="1.4" stroke-dasharray="5,4"/>
+  <line x1="336.5" y1="129" x2="336.5" y2="1139" stroke="#cbd5e1" stroke-width="1.4" stroke-dasharray="5,4"/>
+  <line x1="716.5" y1="129" x2="716.5" y2="1139" stroke="#cbd5e1" stroke-width="1.4" stroke-dasharray="5,4"/>
+  <line x1="1056.5" y1="129" x2="1056.5" y2="1139" stroke="#cbd5e1" stroke-width="1.4" stroke-dasharray="5,4"/>
+  <line x1="24" y1="731" x2="1252" y2="731" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="6,4"/>
+  <rect x="34" y="733" width="151.54000000000005" height="18" rx="4" fill="#ffffff" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="109.77000000000002" y="745.5" font-size="11" font-weight="600" text-anchor="middle" fill="#475569">else  all leaves succeed</text>
+  <rect x="24" y="513" width="211.43500000000006" height="19" rx="4" fill="#e2e8f0" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="129.71750000000003" y="526.5" font-size="11" font-weight="600" text-anchor="middle" fill="#475569">alt  any leaf construction throws</text>
+  <rect x="30.07000000000002" y="159" width="232.85999999999996" height="29" rx="6" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.2"/>
+  <rect x="30.07000000000002" y="159" width="3.5" height="29" rx="1.5" fill="#9ca3af"/>
+  <text x="148.5" y="178" font-size="12.0" text-anchor="middle" fill="#374151">parseCommandLineArgument(args)</text>
+  <rect x="41.89" y="204" width="209.22" height="44" rx="6" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.2"/>
+  <rect x="41.89" y="204" width="3.5" height="44" rx="1.5" fill="#9ca3af"/>
+  <text x="148.5" y="223" font-size="12.0" text-anchor="middle" fill="#374151">initConfiguration(argument)</text>
+  <text x="148.5" y="238" font-size="12.0" text-anchor="middle" fill="#374151">-&gt; validateGracefulLifecycle()</text>
+  <line x1="150.5" y1="283" x2="336.5" y2="283" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="214.1325" y="262" width="54.73499999999999" height="17" fill="#ffffff"/>
+  <text x="241.5" y="274" font-size="11.5" text-anchor="middle" fill="#334155">create()</text>
+  <line x1="340.5" y1="318" x2="716.5" y2="318" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="450.40125" y="297" width="152.1975" height="17" fill="#ffffff"/>
+  <text x="526.5" y="309" font-size="11.5" text-anchor="middle" fill="#334155">new ConstructionScope()</text>
+  <line x1="340.5" y1="353" x2="716.5" y2="353" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="388.6749999999999" y="332" width="275.6500000000002" height="17" fill="#ffffff"/>
+  <text x="526.5" y="344" font-size="11.5" text-anchor="middle" fill="#334155">own("server-executor", newServerExecutor())</text>
+  <line x1="340.5" y1="388" x2="716.5" y2="388" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="343.5375" y="367" width="365.92499999999995" height="17" fill="#ffffff"/>
+  <text x="526.5" y="379" font-size="11.5" text-anchor="middle" fill="#334155">own("messaging-processor", buildMessagingProcessorSafely())</text>
+  <line x1="340.5" y1="423" x2="716.5" y2="423" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="348.16625" y="402" width="356.66749999999996" height="17" fill="#ffffff"/>
+  <text x="526.5" y="414" font-size="11.5" text-anchor="middle" fill="#334155">own("grpc-server-bundle", buildGrpcServerSafely(executor))</text>
+  <line x1="340.5" y1="458" x2="716.5" y2="458" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="359.20625" y="437" width="334.5875" height="17" fill="#ffffff"/>
+  <text x="526.5" y="449" font-size="11.5" text-anchor="middle" fill="#334155">own("remoting-server", buildRemotingSafely(processor))</text>
+  <line x1="340.5" y1="493" x2="716.5" y2="493" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="424.325" y="472" width="204.35000000000002" height="17" fill="#ffffff"/>
+  <text x="526.5" y="484" font-size="11.5" text-anchor="middle" fill="#334155">own("admin-server", buildAdmin())</text>
+  <rect x="610.48" y="537" width="212.04" height="44" rx="6" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.2"/>
+  <rect x="610.48" y="537" width="3.5" height="44" rx="1.5" fill="#9ca3af"/>
+  <text x="718.5" y="556" font-size="12.0" text-anchor="middle" fill="#374151">rollback already-owned leaves</text>
+  <text x="718.5" y="571" font-size="12.0" text-anchor="middle" fill="#374151">in reverse order</text>
+  <line x1="712.5" y1="616" x2="336.5" y2="616" stroke="#9333ea" stroke-width="1.6" stroke-dasharray="6,4" marker-end="url(#ar-ret)"/>
+  <rect x="369.41249999999997" y="595" width="314.17500000000007" height="17" fill="#ffffff"/>
+  <text x="526.5" y="607" font-size="11.5" text-anchor="middle" fill="#334155">rethrow with rollback close failures as suppressed</text>
+  <line x1="332.5" y1="651" x2="146.5" y2="651" stroke="#9333ea" stroke-width="1.6" stroke-dasharray="6,4" marker-end="url(#ar-ret)"/>
+  <rect x="152.89499999999998" y="630" width="177.21" height="17" fill="#ffffff"/>
+  <text x="241.5" y="642" font-size="11.5" text-anchor="middle" fill="#334155">exception (runtime still null)</text>
+  <rect x="38.17" y="667" width="216.66" height="44" rx="6" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.2"/>
+  <rect x="38.17" y="667" width="3.5" height="44" rx="1.5" fill="#9ca3af"/>
+  <text x="148.5" y="686" font-size="12.0" text-anchor="middle" fill="#374151">forceStop(startupFailure).join()</text>
+  <text x="148.5" y="701" font-size="12.0" text-anchor="middle" fill="#374151">System.exit(1)</text>
+  <line x1="340.5" y1="774" x2="1056.5" y2="774" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="611.5175" y="753" width="169.965" height="17" fill="#ffffff"/>
+  <text x="696.5" y="765" font-size="11.5" text-anchor="middle" fill="#334155">new ProxyRuntime(leaves...)</text>
+  <line x1="340.5" y1="822" x2="716.5" y2="822" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="370.76374999999996" y="788" width="311.4725000000001" height="30" fill="#ffffff"/>
+  <text x="526.5" y="800" font-size="11.5" text-anchor="middle" fill="#334155">commit()</text>
+  <text x="526.5" y="813" font-size="11.5" text-anchor="middle" fill="#334155">(ownership transferred, scope won't close on exit)</text>
+  <line x1="332.5" y1="857" x2="146.5" y2="857" stroke="#9333ea" stroke-width="1.6" stroke-dasharray="6,4" marker-end="url(#ar-ret)"/>
+  <rect x="187.30875" y="836" width="108.3825" height="17" fill="#ffffff"/>
+  <text x="241.5" y="848" font-size="11.5" text-anchor="middle" fill="#334155">runtime instance</text>
+  <rect x="12.130000000000052" y="897" width="268.7399999999999" height="44" rx="6" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.2"/>
+  <rect x="12.130000000000052" y="897" width="3.5" height="44" rx="1.5" fill="#9ca3af"/>
+  <text x="148.5" y="916" font-size="12.0" text-anchor="middle" fill="#374151">Runtime.getRuntime().addShutdownHook(</text>
+  <text x="148.5" y="931" font-size="12.0" text-anchor="middle" fill="#374151">() -&gt; runtime.shutdown(SIGTERM).join())</text>
+  <line x1="150.5" y1="976" x2="1056.5" y2="976" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="553.145" y="955" width="96.71" height="17" fill="#ffffff"/>
+  <text x="601.5" y="967" font-size="11.5" text-anchor="middle" fill="#334155">runtime.start()</text>
+  <rect x="848.54" y="992" width="415.9200000000002" height="59" rx="6" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.2"/>
+  <rect x="848.54" y="992" width="3.5" height="59" rx="1.5" fill="#9ca3af"/>
+  <text x="1058.5" y="1011" font-size="12.0" text-anchor="middle" fill="#374151">admin bind -&gt; metrics -&gt; TLS -&gt; MessagingProcessor</text>
+  <text x="1058.5" y="1026" font-size="12.0" text-anchor="middle" fill="#374151">-&gt; gRPC application -&gt; gRPC listener -&gt; Remoting listener</text>
+  <text x="1058.5" y="1041" font-size="12.0" text-anchor="middle" fill="#374151">-&gt; listener contributors complete -&gt; route warmup -&gt; READY</text>
+  <path d="M 660.8849999999999,1067 H 1100.1150000000002 L 1112.1150000000002,1079 V 1113 H 660.8849999999999 Z" fill="#fef9c3" stroke="#eab308" stroke-width="1.2"/>
+  <path d="M 1100.1150000000002,1067 V 1079 H 1112.1150000000002" fill="none" stroke="#eab308" stroke-width="1.2"/>
+  <text x="674.8849999999999" y="1088" font-size="11.0" fill="#92400e">Local feature-off mode keeps the legacy BrokerController-wrapper-first</text>
+  <text x="674.8849999999999" y="1103" font-size="11.0" fill="#92400e">ordering instead of this Cluster sequence.</text>
+  <rect x="71.0" y="92" width="151" height="37" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="146.5" y="115.5" font-size="13.0" font-weight="600" text-anchor="middle" fill="#111827">ProxyStartup.main</text>
+  <rect x="251.5" y="92" width="170" height="37" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="336.5" y="115.5" font-size="13.0" font-weight="600" text-anchor="middle" fill="#111827">ProxyRuntimeFactory</text>
+  <rect x="641.5" y="92" width="150" height="37" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="716.5" y="115.5" font-size="13.0" font-weight="600" text-anchor="middle" fill="#111827">ConstructionScope</text>
+  <rect x="986.5" y="92" width="140" height="37" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="1056.5" y="115.5" font-size="13.0" font-weight="600" text-anchor="middle" fill="#111827">ProxyRuntime</text>
+  <line x1="30" y1="1151" x2="1246" y2="1151" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="30" y1="1173" x2="58" y2="1173" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <text x="66" y="1177" font-size="11" fill="#6b7280">request / forward call</text>
+  <line x1="226.07500000000002" y1="1173" x2="254.07500000000002" y2="1173" stroke="#9333ea" stroke-width="1.6" stroke-dasharray="6,4" marker-end="url(#ar-ret)"/>
+  <text x="262.07500000000005" y="1177" font-size="11" fill="#6b7280">response / return</text>
+  <rect x="393.99" y="1167" width="26" height="13" rx="3" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.1"/>
+  <text x="429.99" y="1177" font-size="11" fill="#6b7280">internal step</text>
+  <rect x="532.755" y="1167" width="26" height="13" rx="3" fill="#fef9c3" stroke="#eab308" stroke-width="1.1"/>
+  <text x="568.755" y="1177" font-size="11" fill="#6b7280">note / constraint</text>
+</svg>

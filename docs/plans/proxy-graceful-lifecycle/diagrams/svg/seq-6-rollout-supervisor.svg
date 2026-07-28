@@ -1,0 +1,134 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1433 1295" width="1433" height="1295">
+  <defs>
+    <marker id="ar-req" markerWidth="9" markerHeight="7" refX="8.5" refY="3.5" orient="auto">
+      <polygon points="0 0, 9 3.5, 0 7" fill="#2563eb"/>
+    </marker>
+    <marker id="ar-ret" markerWidth="9" markerHeight="7" refX="8.5" refY="3.5" orient="auto">
+      <polygon points="0 0, 9 3.5, 0 7" fill="#9333ea"/>
+    </marker>
+    <marker id="ar-self" markerWidth="9" markerHeight="7" refX="8.5" refY="3.5" orient="auto">
+      <polygon points="0 0, 9 3.5, 0 7" fill="#9ca3af"/>
+    </marker>
+  </defs>
+  <style>
+    text { font-family: 'Helvetica Neue', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif; }
+  </style>
+  <rect width="1433" height="1295" fill="#ffffff"/>
+  <text x="30" y="40" font-size="20" font-weight="700" fill="#111827">Rollout supervisor - single-Pod serialized drain</text>
+  <text x="30" y="62" font-size="12.5" fill="#6b7280">spec §4.4 + §12.7  ·  the supervisor gates on a persisted DrainResult, never on a metrics scrape alone</text>
+  <line x1="30" y1="74" x2="1403" y2="74" stroke="#e5e7eb" stroke-width="1"/>
+  <rect x="24" y="298" width="1385" height="80" rx="6" fill="none" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="6,4"/>
+  <rect x="36" y="796" width="1361" height="286" rx="6" fill="none" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="6,4"/>
+  <rect x="24" y="577" width="1385" height="529" rx="6" fill="none" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="6,4"/>
+  <line x1="100.0" y1="146" x2="100.0" y2="1215" stroke="#cbd5e1" stroke-width="1.4" stroke-dasharray="5,4"/>
+  <line x1="360.0" y1="146" x2="360.0" y2="1215" stroke="#cbd5e1" stroke-width="1.4" stroke-dasharray="5,4"/>
+  <line x1="730.0" y1="146" x2="730.0" y2="1215" stroke="#cbd5e1" stroke-width="1.4" stroke-dasharray="5,4"/>
+  <line x1="960.0" y1="146" x2="960.0" y2="1215" stroke="#cbd5e1" stroke-width="1.4" stroke-dasharray="5,4"/>
+  <line x1="1140.0" y1="146" x2="1140.0" y2="1215" stroke="#cbd5e1" stroke-width="1.4" stroke-dasharray="5,4"/>
+  <line x1="1320.0" y1="146" x2="1320.0" y2="1215" stroke="#cbd5e1" stroke-width="1.4" stroke-dasharray="5,4"/>
+  <rect x="24" y="298" width="127.94500000000004" height="19" rx="4" fill="#e2e8f0" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="87.97250000000003" y="311.5" font-size="11" font-weight="600" text-anchor="middle" fill="#475569">alt  live HPA found</text>
+  <line x1="36" y1="869" x2="1397" y2="869" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="6,4"/>
+  <rect x="46" y="871" width="276.99500000000006" height="18" rx="4" fill="#ffffff" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="184.49750000000003" y="883.5" font-size="11" font-weight="600" text-anchor="middle" fill="#475569">else  forced == true AND accepted_sends &gt; 0</text>
+  <line x1="36" y1="932" x2="1397" y2="932" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="6,4"/>
+  <rect x="46" y="934" width="282.99000000000007" height="18" rx="4" fill="#ffffff" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="187.49500000000003" y="946.5" font-size="11" font-weight="600" text-anchor="middle" fill="#475569">else  forced == true AND accepted_sends == 0</text>
+  <line x1="36" y1="1005" x2="1397" y2="1005" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="6,4"/>
+  <rect x="46" y="1007" width="141.14500000000004" height="18" rx="4" fill="#ffffff" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="116.57250000000002" y="1019.5" font-size="11" font-weight="600" text-anchor="middle" fill="#475569">else  DRAINED cleanly</text>
+  <rect x="36" y="796" width="315.77000000000015" height="19" rx="4" fill="#e2e8f0" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="193.88500000000008" y="809.5" font-size="11" font-weight="600" text-anchor="middle" fill="#475569">alt  store read/write fails, stale, or query timeout</text>
+  <rect x="24" y="577" width="230.74000000000007" height="19" rx="4" fill="#e2e8f0" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="139.37000000000003" y="590.5" font-size="11" font-weight="600" text-anchor="middle" fill="#475569">loop  for each old Pod being replaced</text>
+  <line x1="104.0" y1="195" x2="360.0" y2="195" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="131.47624999999996" y="174" width="197.04750000000007" height="17" fill="#ffffff"/>
+  <text x="230.0" y="186" font-size="11.5" text-anchor="middle" fill="#334155">run rollout(target chart/values)</text>
+  <line x1="364.0" y1="230" x2="730.0" y2="230" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="436.72999999999996" y="209" width="216.5400000000001" height="17" fill="#ffffff"/>
+  <text x="545.0" y="221" font-size="11.5" text-anchor="middle" fill="#334155">helm template/lint + schema check</text>
+  <line x1="364.0" y1="278" x2="730.0" y2="278" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="420.8024999999999" y="244" width="248.39500000000018" height="30" fill="#ffffff"/>
+  <text x="545.0" y="256" font-size="11.5" text-anchor="middle" fill="#334155">kubectl get hpa</text>
+  <text x="545.0" y="269" font-size="11.5" text-anchor="middle" fill="#334155">(assert no live HPA on target workload)</text>
+  <line x1="356.0" y1="354" x2="100.0" y2="354" stroke="#9333ea" stroke-width="1.6" stroke-dasharray="6,4" marker-end="url(#ar-ret)"/>
+  <rect x="122.53499999999994" y="320" width="214.93000000000012" height="30" fill="#ffffff"/>
+  <text x="230.0" y="332" font-size="11.5" text-anchor="middle" fill="#334155">fail fast, abort</text>
+  <text x="230.0" y="345" font-size="11.5" text-anchor="middle" fill="#334155">(no freeze / take-over attempted)</text>
+  <line x1="364.0" y1="426" x2="730.0" y2="426" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="407.60624999999993" y="392" width="274.7875000000002" height="30" fill="#ffffff"/>
+  <text x="545.0" y="404" font-size="11.5" text-anchor="middle" fill="#334155">verify all Pods READY, no in-progress drain,</text>
+  <text x="545.0" y="417" font-size="11.5" text-anchor="middle" fill="#334155">provider health-port evidence OK</text>
+  <line x1="364.0" y1="461" x2="730.0" y2="461" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="438.08124999999995" y="440" width="213.8375000000001" height="17" fill="#ffffff"/>
+  <text x="545.0" y="452" font-size="11.5" text-anchor="middle" fill="#334155">helm upgrade --wait (no --atomic)</text>
+  <line x1="734.0" y1="509" x2="1140.0" y2="509" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="857.34875" y="475" width="155.3025" height="30" fill="#ffffff"/>
+  <text x="935.0" y="487" font-size="11.5" text-anchor="middle" fill="#334155">schedule + start</text>
+  <text x="935.0" y="500" font-size="11.5" text-anchor="middle" fill="#334155">(surge, maxUnavailable=0)</text>
+  <line x1="734.0" y1="557" x2="960.0" y2="557" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="740.4675" y="523" width="209.0650000000001" height="30" fill="#ffffff"/>
+  <text x="845.0" y="535" font-size="11.5" text-anchor="middle" fill="#334155">send SIGTERM after new Pod</text>
+  <text x="845.0" y="548" font-size="11.5" text-anchor="middle" fill="#334155">reaches Ready + minReadySeconds</text>
+  <line x1="364.0" y1="620" x2="730.0" y2="620" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="420.1412499999999" y="599" width="249.71750000000014" height="17" fill="#ffffff"/>
+  <text x="545.0" y="611" font-size="11.5" text-anchor="middle" fill="#334155">assert at most one old Pod Terminating</text>
+  <rect x="847.92" y="636" width="224.16" height="44" rx="6" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.2"/>
+  <rect x="847.92" y="636" width="3.5" height="44" rx="1.5" fill="#9ca3af"/>
+  <text x="962.0" y="655" font-size="12.0" text-anchor="middle" fill="#374151">drain via PreStop</text>
+  <text x="962.0" y="670" font-size="12.0" text-anchor="middle" fill="#374151">(see PreStop sequence diagram)</text>
+  <line x1="964.0" y1="728" x2="1320.0" y2="728" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="987.8575" y="694" width="304.28500000000014" height="30" fill="#ffffff"/>
+  <text x="1140.0" y="706" font-size="11.5" text-anchor="middle" fill="#334155">write persisted DrainResult</text>
+  <text x="1140.0" y="719" font-size="11.5" text-anchor="middle" fill="#334155">(structured termination message / Pod Condition)</text>
+  <line x1="364.0" y1="776" x2="1320.0" y2="776" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="728.3375" y="742" width="223.32500000000013" height="30" fill="#ffffff"/>
+  <text x="840.0" y="754" font-size="11.5" text-anchor="middle" fill="#334155">read confirmed drain result</text>
+  <text x="840.0" y="767" font-size="11.5" text-anchor="middle" fill="#334155">(NOT the last metrics scrape alone)</text>
+  <rect x="268.44" y="820" width="183.12000000000003" height="29" rx="6" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.2"/>
+  <rect x="268.44" y="820" width="3.5" height="29" rx="1.5" fill="#9ca3af"/>
+  <text x="362.0" y="839" font-size="12.0" text-anchor="middle" fill="#374151">fail-closed: pause rollout</text>
+  <line x1="364.0" y1="912" x2="730.0" y2="912" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="404.8749999999999" y="891" width="280.25000000000017" height="17" fill="#ffffff"/>
+  <text x="545.0" y="903" font-size="11.5" text-anchor="middle" fill="#334155">kubectl rollout pause (possible real send loss)</text>
+  <rect x="247.44" y="956" width="225.11999999999998" height="29" rx="6" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.2"/>
+  <rect x="247.44" y="956" width="3.5" height="29" rx="1.5" fill="#9ca3af"/>
+  <text x="362.0" y="975" font-size="12.0" text-anchor="middle" fill="#374151">warn + record, continue rollout</text>
+  <rect x="282.17999999999995" y="1029" width="155.64000000000004" height="29" rx="6" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.2"/>
+  <rect x="282.17999999999995" y="1029" width="3.5" height="29" rx="1.5" fill="#9ca3af"/>
+  <text x="362.0" y="1048" font-size="12.0" text-anchor="middle" fill="#374151">proceed to next Pod</text>
+  <line x1="364.0" y1="1154" x2="730.0" y2="1154" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <rect x="369.36875000000003" y="1120" width="351.26249999999993" height="30" fill="#ffffff"/>
+  <text x="545.0" y="1132" font-size="11.5" text-anchor="middle" fill="#334155">post-rollout check: all Pods READY, NLB targets healthy,</text>
+  <text x="545.0" y="1145" font-size="11.5" text-anchor="middle" fill="#334155">no forced / late-connection increase</text>
+  <line x1="356.0" y1="1189" x2="100.0" y2="1189" stroke="#9333ea" stroke-width="1.6" stroke-dasharray="6,4" marker-end="url(#ar-ret)"/>
+  <rect x="107.81499999999991" y="1168" width="244.37000000000018" height="17" fill="#ffffff"/>
+  <text x="230.0" y="1180" font-size="11.5" text-anchor="middle" fill="#334155">rollout complete or paused with reason</text>
+  <rect x="30.0" y="92" width="140" height="54" rx="8" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1.5"/>
+  <circle cx="47.0" cy="112.0" r="4" fill="none" stroke="#3b82f6" stroke-width="1.4"/>
+  <path d="M 42.0,126.0 v -4 a 5,5 0 0 1 10,0 v 4" fill="none" stroke="#3b82f6" stroke-width="1.4"/>
+  <text x="110.0" y="124.0" font-size="13.0" font-weight="600" text-anchor="middle" fill="#111827">Operator</text>
+  <rect x="290.0" y="92" width="140" height="54" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="360.0" y="115.5" font-size="13.0" font-weight="600" text-anchor="middle" fill="#111827">proxy_rollout.py</text>
+  <text x="360.0" y="132.5" font-size="11.5" font-weight="400" text-anchor="middle" fill="#6b7280">supervisor</text>
+  <rect x="660.0" y="92" width="140" height="54" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="730.0" y="124.0" font-size="13.0" font-weight="600" text-anchor="middle" fill="#111827">kubectl / helm</text>
+  <rect x="890.0" y="92" width="140" height="54" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="960.0" y="115.5" font-size="13.0" font-weight="600" text-anchor="middle" fill="#111827">Pod N</text>
+  <text x="960.0" y="132.5" font-size="11.5" font-weight="400" text-anchor="middle" fill="#6b7280">(old)</text>
+  <rect x="1070.0" y="92" width="140" height="54" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="1140.0" y="115.5" font-size="13.0" font-weight="600" text-anchor="middle" fill="#111827">Pod N+1</text>
+  <text x="1140.0" y="132.5" font-size="11.5" font-weight="400" text-anchor="middle" fill="#6b7280">(new)</text>
+  <rect x="1237.0" y="92" width="166" height="54" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="1320.0" y="115.5" font-size="13.0" font-weight="600" text-anchor="middle" fill="#111827">Drain result store</text>
+  <text x="1320.0" y="132.5" font-size="11.5" font-weight="400" text-anchor="middle" fill="#6b7280">Pod Condition / CRD</text>
+  <line x1="30" y1="1227" x2="1403" y2="1227" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="30" y1="1249" x2="58" y2="1249" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ar-req)"/>
+  <text x="66" y="1253" font-size="11" fill="#6b7280">request / forward call</text>
+  <line x1="226.07500000000002" y1="1249" x2="254.07500000000002" y2="1249" stroke="#9333ea" stroke-width="1.6" stroke-dasharray="6,4" marker-end="url(#ar-ret)"/>
+  <text x="262.07500000000005" y="1253" font-size="11" fill="#6b7280">response / return</text>
+  <rect x="393.99" y="1243" width="26" height="13" rx="3" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.1"/>
+  <text x="429.99" y="1253" font-size="11" fill="#6b7280">internal step</text>
+  <rect x="532.755" y="1243" width="26" height="13" rx="3" fill="#fef9c3" stroke="#eab308" stroke-width="1.1"/>
+  <text x="568.755" y="1253" font-size="11" fill="#6b7280">note / constraint</text>
+</svg>
