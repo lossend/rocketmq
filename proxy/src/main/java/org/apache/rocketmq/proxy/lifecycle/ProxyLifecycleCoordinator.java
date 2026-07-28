@@ -65,7 +65,7 @@ public final class ProxyLifecycleCoordinator implements ProxyLifecycle {
     private final AtomicReference<Throwable> fatalRef = new AtomicReference<>();
 
     private volatile LifecycleScheduler.ScheduledHandle lbTimer;
-    private volatile LifecycleScheduler.ScheduledHandle migrationTimer;
+    private volatile LifecycleScheduler.ScheduledHandle hardDeadlineTimer;
 
     public ProxyLifecycleCoordinator(SendDrainGate gate, List<DrainProtocolAdapter> adapters,
         LifecycleScheduler scheduler, LongSupplier nanoClock, boolean lifecycleEnabled,
@@ -226,7 +226,29 @@ public final class ProxyLifecycleCoordinator implements ProxyLifecycle {
             if (readinessWithdraw != null) {
                 readinessWithdraw.run();
             }
-            transition(ProxyLifecycleState.QUIESCING, ProxyLifecycleState.MIGRATING, "migrating");
+            // Hold in QUIESCING until the lb cutoff so the provider (EndpointSlice plus
+            // NLB target deregistration) can stop routing new connections here. Migrating
+            // earlier would let a client that reconnects after GOAWAY land back on this Pod.
+            lbTimer = scheduler.schedule(() -> continueToMigrating(run),
+                Math.max(0L, session.lbCutoffNanos() - nanoClock.getAsLong()));
+            scheduleHardDeadline(run, session);
+        } catch (Throwable t) {
+            forceDrain(run, "orchestrate_exception", t);
+        }
+    }
+
+    /**
+     * Second half of the drain, run once the lb cutoff has elapsed: issue migration to
+     * every adapter, then close admission after they all report no-new-work.
+     */
+    private void continueToMigrating(DrainRun run) {
+        DrainSession session = run.session();
+        CompletableFuture<DrainResult> future = run.drainFuture();
+        try {
+            if (!transition(ProxyLifecycleState.QUIESCING, ProxyLifecycleState.MIGRATING, "migrating")) {
+                // Already advanced (forced, or pre-empted by a direct TERM): nothing to do.
+                return;
+            }
             for (DrainProtocolAdapter adapter : adapters) {
                 adapter.startMigration();
             }
@@ -251,16 +273,14 @@ public final class ProxyLifecycleCoordinator implements ProxyLifecycle {
                         future.complete(DrainResult.drained());
                     }
                 });
-
-            scheduleHardDeadline(run, session);
         } catch (Throwable t) {
-            forceDrain(run, "orchestrate_exception", t);
+            forceDrain(run, "migrate_exception", t);
         }
     }
 
     private void scheduleHardDeadline(DrainRun run, DrainSession session) {
         long delay = session.hardDeadlineNanos() - nanoClock.getAsLong();
-        migrationTimer = scheduler.schedule(() -> {
+        hardDeadlineTimer = scheduler.schedule(() -> {
             if (!run.drainFuture().isDone()) {
                 forceDrain(run, "hard_deadline_exceeded", null);
             }
@@ -309,7 +329,7 @@ public final class ProxyLifecycleCoordinator implements ProxyLifecycle {
         stopOverride.set(stopDeadline);
         phaseGeneration.incrementAndGet();
         cancel(lbTimer);
-        cancel(migrationTimer);
+        cancel(hardDeadlineTimer);
         DrainRun run = drainRunRef.get();
         CompletableFuture<Void> issued = new CompletableFuture<>();
         scheduler.execute(() -> {

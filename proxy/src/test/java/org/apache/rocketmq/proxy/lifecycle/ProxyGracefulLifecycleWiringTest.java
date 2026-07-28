@@ -126,6 +126,10 @@ public class ProxyGracefulLifecycleWiringTest {
         assertThat(state.body()).contains("\"state\":\"READY\"");
     }
 
+    /**
+     * Runs every task inline, including scheduled ones, so a drain walks the whole
+     * chain (including the lb-cutoff gate) within the test thread.
+     */
     private static final class ImmediateScheduler implements LifecycleScheduler {
         @Override
         public void execute(Runnable task) {
@@ -134,7 +138,8 @@ public class ProxyGracefulLifecycleWiringTest {
 
         @Override
         public ScheduledHandle schedule(Runnable task, long delayNanos) {
-            return () -> true;
+            task.run();
+            return () -> false;
         }
     }
 }

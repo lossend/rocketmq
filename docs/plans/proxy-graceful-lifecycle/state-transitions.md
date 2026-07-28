@@ -99,11 +99,27 @@ private void orchestrate(DrainRun run) {
         // ── 边①  READY → QUIESCING ──
         transition(ProxyLifecycleState.READY, ProxyLifecycleState.QUIESCING, "quiescing");
         if (readinessWithdraw != null) {
-            readinessWithdraw.run();          // 撤 readiness:探针开始摘流
+            readinessWithdraw.run();          // 可选钩子(当前生产接线传 null)
         }
+        // 停在 QUIESCING 直到 lbCutoff:等 provider(EndpointSlice + NLB target
+        // deregistration)真正停止把新连接投给本 Pod,之后才允许迁移。
+        lbTimer = scheduler.schedule(() -> continueToMigrating(run),
+            Math.max(0L, session.lbCutoffNanos() - nanoClock.getAsLong()));
+        scheduleHardDeadline(run, session);   // 兜底定时器
+    } catch (Throwable t) {
+        forceDrain(run, "orchestrate_exception", t);
+    }
+}
 
+// lbCutoff 到点后由调度器回调执行的后半段
+private void continueToMigrating(DrainRun run) {
+    DrainSession session = run.session();
+    CompletableFuture<DrainResult> future = run.drainFuture();
+    try {
         // ── 边②  QUIESCING → MIGRATING ──
-        transition(ProxyLifecycleState.QUIESCING, ProxyLifecycleState.MIGRATING, "migrating");
+        if (!transition(ProxyLifecycleState.QUIESCING, ProxyLifecycleState.MIGRATING, "migrating")) {
+            return;                           // 已被 forced / direct-TERM 抢占
+        }
         for (DrainProtocolAdapter adapter : adapters) {
             adapter.startMigration();         // migration_started:gate 仍开放
         }
@@ -130,22 +146,28 @@ private void orchestrate(DrainRun run) {
                     future.complete(DrainResult.drained());
                 }
             });
-
-        scheduleHardDeadline(run, session);   // 兜底定时器
     } catch (Throwable t) {
-        forceDrain(run, "orchestrate_exception", t);
+        forceDrain(run, "migrate_exception", t);
     }
 }
 ```
 
 逐边说明:
 
-| 边 | 代码行 | reason | 这条线**具体做的事** |
+| 边 | 所在方法 | reason | 这条线**具体做的事** |
 |---|---|---|---|
-| ① `READY→QUIESCING` | `:225-228` | `quiescing` | `transition` 成功后立即 `readinessWithdraw.run()`,让 `/ready` 转 503,K8s/LB 停止投递新连接;gate 仍开放,存量连接照常。 |
-| ② `QUIESCING→MIGRATING` | `:229-232` | `migrating` | 遍历每个 adapter 调 `startMigration()`。gRPC 侧即 `initiateServerDrain()` → grpc-java 内建双 GOAWAY,通知客户端在别处重连。**gate 依然开放**。 |
-| ③ `MIGRATING→DRAINING` | `:236-240` | `draining` | 在 `allNoNewWork`(所有 adapter 的 `noNewWorkReached` 都完成)之后触发;紧接着 `gate.closeAdmission()`——**整个生命周期唯一一次关闸**,此后新 send 被拒;再 `return gate.drainedFuture()` 等已接纳的 send 双终态归零。 |
-| ④ `DRAINING→DRAINED` | `:245-252` | `drained` | 在 gate 归零 **且** 每个 adapter 的 `awaitTerminated(deadline)` 都成功后;`transition` 成功则 `future.complete(DrainResult.drained())`,PreStop 的 `.join()` 得以返回。若 `error!=null` 则改走 `forceDrain(run,"drain_error",...)`。 |
+| ① `READY→QUIESCING` | `orchestrate` | `quiescing` | 只做两件事:改状态;调可选的 `readinessWithdraw` 钩子(**当前生产接线传的是 `null`,所以是 no-op**)。`/ready` 转 503 是**间接**发生的——`isReady()` 要求 `state==READY`,状态一旦离开 READY 就返回 false。随后**注册 `lbTimer`,在 QUIESCING 停留 `lbDetachTimeoutSeconds`(默认 60s)**,给 EndpointSlice/NLB 摘流留时间;gate 仍开放,存量连接照常。 |
+| ② `QUIESCING→MIGRATING` | `continueToMigrating`(由 `lbTimer` 回调) | `migrating` | **只有 lbCutoff 到点后才执行**。`transition` 返回 false 表示已被 forced/direct-TERM 抢占,直接返回。否则遍历每个 adapter 调 `startMigration()`:gRPC 侧即 `initiateServerDrain()` → `Server.shutdown()` → grpc-java 内建双 GOAWAY。**gate 依然开放**。 |
+| ③ `MIGRATING→DRAINING` | `continueToMigrating` | `draining` | 在 `allNoNewWork`(所有 adapter 的 `noNewWorkReached` 都完成)之后触发;紧接着 `gate.closeAdmission()`——**整个生命周期唯一一次关闸**,此后新 send 被拒;再 `return gate.drainedFuture()` 等已接纳的 send 双终态归零。 |
+| ④ `DRAINING→DRAINED` | `continueToMigrating` | `drained` | 在 gate 归零 **且** 每个 adapter 的 `awaitTerminated(deadline)` 都成功后;`transition` 成功则 `future.complete(DrainResult.drained())`,PreStop 的 `.join()` 得以返回。若 `error!=null` 则改走 `forceDrain(run,"drain_error",...)`。 |
+
+### 为什么 ① 必须等待,而不能立刻迁移
+
+摘流是 **kubelet/EndpointSlice + NLB target deregistration** 的行为,Proxy **无法直接观测**「我的 IP 已被摘掉」。因此设计上不观测、改用固定时间等待:`T0 + lbDetachTimeoutSeconds` 作为 `lbCutoff`。若在摘流完成前就发 GOAWAY,客户端断开重连**可能又落回本 Pod**,迁移空转。
+
+第二道防线是 late-transport 标记:`GrpcTransportLifecycleFilter` 给 `lbCutoff` 之后新建的 transport 打 `LATE_AFTER_LB_CUTOFF`,其 send 被 interceptor 拒绝(视为 provider 摘流违约)。
+
+> `lbDetachTimeoutSeconds` 的 60s 默认值需用真实环境实测「readiness 失败后最后一个新连接到达」的 p999 来校准 —— 这属于计划文档 §7 Step 1 的 provider spike,本地测试无法替代。
 
 `effectiveDrainDeadline`(`:200-207`)决定 `awaitTerminated` 用哪个 deadline——若存在更紧的 `stopOverride`(direct-TERM 设的)就用它,否则用 `session.hardDeadlineNanos()`:
 

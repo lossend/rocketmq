@@ -61,9 +61,11 @@ public class ProxyLifecycleCoordinatorTest {
         coordinator.markReady();
 
         DrainRun run = coordinator.beginDrain(DrainTrigger.PRESTOP);
+        assertThat(withdrawn.get()).isEqualTo(1);
+        // Migration only begins after the lb cutoff elapses (see migrationWaitsForLbCutoff).
+        scheduler.runScheduledAt(0);
         // Migration was started before admission closed.
         assertThat(adapter.migrationStarted).isTrue();
-        assertThat(withdrawn.get()).isEqualTo(1);
 
         adapter.noNewWork.complete(null);
         adapter.terminated.complete(null);
@@ -84,12 +86,40 @@ public class ProxyLifecycleCoordinatorTest {
         coordinator.markReady();
 
         coordinator.beginDrain(DrainTrigger.PRESTOP);
+        scheduler.runScheduledAt(0);   // elapse the lb cutoff so migration starts
         // Migration issued but no-new-work not yet reached: gate must stay open.
         assertThat(adapter.migrationStarted).isTrue();
         assertThat(gate.isAdmissionClosed()).isFalse();
 
         adapter.noNewWork.complete(null);
         assertThat(gate.isAdmissionClosed()).isTrue();
+    }
+
+    @Test
+    @DisplayName("migration waits for the lb cutoff so the provider can deregister the target first")
+    public void migrationWaitsForLbCutoff() {
+        FakeAdapter adapter = new FakeAdapter();
+        AtomicInteger withdrawn = new AtomicInteger();
+        ProxyLifecycleCoordinator coordinator = newCoordinator(adapter, withdrawn::incrementAndGet);
+        coordinator.markReady();
+
+        DrainRun run = coordinator.beginDrain(DrainTrigger.PRESTOP);
+
+        // Readiness is withdrawn immediately, but migration must NOT start yet: the
+        // provider still needs time to stop routing new connections to this Pod.
+        assertThat(withdrawn.get()).isEqualTo(1);
+        assertThat(coordinator.state()).isEqualTo(ProxyLifecycleState.QUIESCING);
+        assertThat(adapter.migrationStarted).isFalse();
+
+        // Fire the lb-cutoff timer: only now may migration begin.
+        scheduler.runScheduledAt(0);
+        assertThat(coordinator.state()).isEqualTo(ProxyLifecycleState.MIGRATING);
+        assertThat(adapter.migrationStarted).isTrue();
+
+        adapter.noNewWork.complete(null);
+        adapter.terminated.complete(null);
+        assertThat(coordinator.state()).isEqualTo(ProxyLifecycleState.DRAINED);
+        assertThat(run.drainFuture().getNow(null).isForced()).isFalse();
     }
 
     @Test
@@ -178,6 +208,14 @@ public class ProxyLifecycleCoordinatorTest {
     private static final class ImmediateScheduler implements LifecycleScheduler {
         final List<Runnable> scheduled = new ArrayList<>();
         int cancelledCount;
+
+        /** Fires a single scheduled task by registration order (0 = lb cutoff, 1 = hard deadline). */
+        void runScheduledAt(int index) {
+            Runnable task = scheduled.get(index);
+            if (task != null) {
+                task.run();
+            }
+        }
 
         @Override
         public void execute(Runnable task) {
