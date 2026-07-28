@@ -59,6 +59,44 @@ public class GrpcTransportLifecycleFilterTest {
     }
 
     @Test
+    @DisplayName("quiet duration is -1 until a business transport is observed")
+    public void quietUndefinedBeforeAnyConnect() {
+        AtomicLong now = new AtomicLong(100);
+        GrpcTransportLifecycleFilter filter = new GrpcTransportLifecycleFilter(now::get, () -> 0L);
+        assertThat(filter.hasObservedBusinessConnect()).isFalse();
+        assertThat(filter.quietDurationNanos()).isEqualTo(-1L);
+    }
+
+    @Test
+    @DisplayName("quiet duration measures elapsed time since the last business connect")
+    public void quietMeasuresSinceLastConnect() {
+        AtomicLong now = new AtomicLong(1_000);
+        GrpcTransportLifecycleFilter filter = new GrpcTransportLifecycleFilter(now::get, () -> 0L);
+        filter.transportReady(Attributes.EMPTY);
+        assertThat(filter.hasObservedBusinessConnect()).isTrue();
+        assertThat(filter.lastBusinessConnectNanos()).isEqualTo(1_000L);
+
+        now.set(1_500);
+        assertThat(filter.quietDurationNanos()).isEqualTo(500L);
+
+        // a newer connect resets the quiet window
+        filter.transportReady(Attributes.EMPTY);
+        assertThat(filter.quietDurationNanos()).isZero();
+    }
+
+    @Test
+    @DisplayName("a closed transport does not reset the quiet window")
+    public void terminationDoesNotResetQuiet() {
+        AtomicLong now = new AtomicLong(1_000);
+        GrpcTransportLifecycleFilter filter = new GrpcTransportLifecycleFilter(now::get, () -> 0L);
+        Attributes attrs = filter.transportReady(Attributes.EMPTY);
+        now.set(2_000);
+        filter.transportTerminated(attrs);
+        // quiet is measured from the last *connect*, not the last close
+        assertThat(filter.quietDurationNanos()).isEqualTo(1_000L);
+    }
+
+    @Test
     @DisplayName("transportTerminated decrements the connection count")
     public void terminatedDecrements() {
         AtomicLong now = new AtomicLong(100);

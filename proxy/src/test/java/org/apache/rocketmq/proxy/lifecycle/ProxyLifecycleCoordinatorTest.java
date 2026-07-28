@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.DisplayName;
@@ -120,6 +121,55 @@ public class ProxyLifecycleCoordinatorTest {
         adapter.terminated.complete(null);
         assertThat(coordinator.state()).isEqualTo(ProxyLifecycleState.DRAINED);
         assertThat(run.drainFuture().getNow(null).isForced()).isFalse();
+    }
+
+    @Test
+    @DisplayName("an already-quiet listener still does not shorten the lb cutoff wait")
+    public void quietObservationNeverShortensWait() {
+        FakeAdapter adapter = new FakeAdapter();
+        ProxyLifecycleCoordinator coordinator = newCoordinator(adapter, null);
+        ProxyLifecycleMetrics metrics = new ProxyLifecycleMetrics();
+        // Report a long-standing quiet window (well past the 20s threshold).
+        coordinator.observeLbDetachQuiet(() -> TimeUnit.SECONDS.toNanos(120), 20, metrics);
+        coordinator.markReady();
+
+        coordinator.beginDrain(DrainTrigger.PRESTOP);
+        // Even though the listener is quiet, migration must still wait for the cutoff.
+        assertThat(coordinator.state()).isEqualTo(ProxyLifecycleState.QUIESCING);
+        assertThat(adapter.migrationStarted).isFalse();
+
+        scheduler.runScheduledAt(0);
+        assertThat(adapter.migrationStarted).isTrue();
+        // Quiet threshold was met, so nothing is flagged.
+        assertThat(metrics.lbDetachQuietMissed()).isZero();
+    }
+
+    @Test
+    @DisplayName("a short quiet window flags that the lb detach timeout may be too small")
+    public void shortQuietWindowIsFlagged() {
+        FakeAdapter adapter = new FakeAdapter();
+        ProxyLifecycleCoordinator coordinator = newCoordinator(adapter, null);
+        ProxyLifecycleMetrics metrics = new ProxyLifecycleMetrics();
+        // New connections were arriving 2s before the cutoff, below the 20s threshold.
+        coordinator.observeLbDetachQuiet(() -> TimeUnit.SECONDS.toNanos(2), 20, metrics);
+        coordinator.markReady();
+
+        coordinator.beginDrain(DrainTrigger.PRESTOP);
+        scheduler.runScheduledAt(0);
+
+        assertThat(adapter.migrationStarted).isTrue();
+        assertThat(metrics.lbDetachQuietMissed()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("a drain with no quiet observation installed proceeds normally")
+    public void noQuietObservationIsHarmless() {
+        FakeAdapter adapter = new FakeAdapter();
+        ProxyLifecycleCoordinator coordinator = newCoordinator(adapter, null);
+        coordinator.markReady();
+        coordinator.beginDrain(DrainTrigger.PRESTOP);
+        scheduler.runScheduledAt(0);
+        assertThat(adapter.migrationStarted).isTrue();
     }
 
     @Test

@@ -23,9 +23,13 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongSupplier;
+import org.apache.rocketmq.common.constant.LoggerName;
+import org.apache.rocketmq.logging.org.slf4j.Logger;
+import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
 
 /**
  * Single-owner lifecycle coordinator. State lives in one {@link AtomicReference};
@@ -37,6 +41,8 @@ import java.util.function.LongSupplier;
  * triggers reuse the winning {@link DrainRun}.
  */
 public final class ProxyLifecycleCoordinator implements ProxyLifecycle {
+
+    private static final Logger log = LoggerFactory.getLogger(LoggerName.PROXY_LOGGER_NAME);
 
     private static final Map<ProxyLifecycleState, EnumSet<ProxyLifecycleState>> LEGAL =
         legalTransitions();
@@ -66,6 +72,14 @@ public final class ProxyLifecycleCoordinator implements ProxyLifecycle {
 
     private volatile LifecycleScheduler.ScheduledHandle lbTimer;
     private volatile LifecycleScheduler.ScheduledHandle hardDeadlineTimer;
+
+    // Optional lb-detach quiet-window observation. Diagnostic only: it never shortens
+    // the wait, because a locally idle listener does not prove the provider has
+    // deregistered this target. Its purpose is to supply real data for calibrating
+    // proxyLbDetachTimeoutSeconds.
+    private volatile LongSupplier quietDurationNanosSupplier;
+    private volatile int lbDetachQuietSeconds;
+    private volatile ProxyLifecycleMetrics metrics;
 
     public ProxyLifecycleCoordinator(SendDrainGate gate, List<DrainProtocolAdapter> adapters,
         LifecycleScheduler scheduler, LongSupplier nanoClock, boolean lifecycleEnabled,
@@ -106,6 +120,55 @@ public final class ProxyLifecycleCoordinator implements ProxyLifecycle {
 
     public ProxyLifecycleState state() {
         return state.get();
+    }
+
+    /**
+     * Installs the lb-detach quiet-window observation. Purely diagnostic: the drain
+     * always waits the full lb cutoff regardless of what is observed, since an idle
+     * local listener is not evidence that the provider stopped routing new
+     * connections here.
+     *
+     * @param quietDurationNanosSupplier nanos since the last business connect, or -1 if none seen
+     * @param lbDetachQuietSeconds       quiet threshold to report against
+     * @param metrics                    optional metrics sink
+     */
+    public void observeLbDetachQuiet(LongSupplier quietDurationNanosSupplier,
+        int lbDetachQuietSeconds, ProxyLifecycleMetrics metrics) {
+        this.quietDurationNanosSupplier = quietDurationNanosSupplier;
+        this.lbDetachQuietSeconds = lbDetachQuietSeconds;
+        this.metrics = metrics;
+    }
+
+    /**
+     * Reports whether the listener had gone quiet by the lb cutoff. A quiet window at
+     * least as long as the threshold suggests the provider finished deregistering well
+     * before the cutoff (the budget has headroom); a short window suggests new
+     * connections were still arriving and {@code proxyLbDetachTimeoutSeconds} may be
+     * too small.
+     */
+    private void reportLbDetachQuiet(DrainRun run) {
+        LongSupplier supplier = quietDurationNanosSupplier;
+        if (supplier == null) {
+            return;
+        }
+        long quietNanos = supplier.getAsLong();
+        String drainId = run.session().drainId();
+        if (quietNanos < 0L) {
+            log.info("lb detach quiet report drainId={} quiet=none-observed", drainId);
+            return;
+        }
+        long quietSeconds = TimeUnit.NANOSECONDS.toSeconds(quietNanos);
+        boolean reachedThreshold = quietSeconds >= lbDetachQuietSeconds;
+        log.info("lb detach quiet report drainId={} quietSeconds={} thresholdSeconds={} reached={}",
+            drainId, quietSeconds, lbDetachQuietSeconds, reachedThreshold);
+        if (!reachedThreshold) {
+            log.warn("new business connections arrived within {}s of the lb cutoff (quietSeconds={}); "
+                + "proxyLbDetachTimeoutSeconds may be too small", lbDetachQuietSeconds, quietSeconds);
+            ProxyLifecycleMetrics sink = metrics;
+            if (sink != null) {
+                sink.recordLbDetachQuietMissed();
+            }
+        }
     }
 
     void markStarted() {
@@ -249,6 +312,8 @@ public final class ProxyLifecycleCoordinator implements ProxyLifecycle {
                 // Already advanced (forced, or pre-empted by a direct TERM): nothing to do.
                 return;
             }
+            // Diagnostic only, emitted at the cutoff we just waited out.
+            reportLbDetachQuiet(run);
             for (DrainProtocolAdapter adapter : adapters) {
                 adapter.startMigration();
             }

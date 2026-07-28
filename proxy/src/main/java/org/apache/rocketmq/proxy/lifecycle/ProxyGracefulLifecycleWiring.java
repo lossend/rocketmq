@@ -106,6 +106,11 @@ public final class ProxyGracefulLifecycleWiring {
             config.getProxyConnectionLeaseGraceSeconds(),
             config.getProxySendDrainTimeoutSeconds(),
             config.getProxyPreStopWaitSeconds());
+        // Diagnostic lb-detach quiet observation: reports whether new business
+        // connections were still arriving near the cutoff, so the configured
+        // proxyLbDetachTimeoutSeconds can be calibrated against real provider timing.
+        coordinator.observeLbDetachQuiet(transportFilter::quietDurationNanos,
+            config.getProxyLbDetachQuietSeconds(), metrics);
         coordinatorRef.set(coordinator);
         return coordinator;
     }

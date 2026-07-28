@@ -42,6 +42,10 @@ public final class GrpcTransportLifecycleFilter extends ServerTransportFilter {
     private final LongSupplier lbCutoffNanosSupplier;
     private final AtomicInteger idSeq = new AtomicInteger();
     private final AtomicInteger connectionCount = new AtomicInteger();
+    private final java.util.concurrent.atomic.AtomicLong lastBusinessConnectNanos =
+        new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicBoolean sawBusinessConnect =
+        new java.util.concurrent.atomic.AtomicBoolean();
 
     public GrpcTransportLifecycleFilter(LongSupplier nanoClock, LongSupplier lbCutoffNanosSupplier) {
         this.nanoClock = nanoClock;
@@ -58,6 +62,8 @@ public final class GrpcTransportLifecycleFilter extends ServerTransportFilter {
         long now = nanoClock.getAsLong();
         boolean late = isLate(now, lbCutoffNanosSupplier.getAsLong());
         connectionCount.incrementAndGet();
+        lastBusinessConnectNanos.set(now);
+        sawBusinessConnect.set(true);
         return transportAttrs.toBuilder()
             .set(CONNECTION_ID, (long) idSeq.incrementAndGet())
             .set(READY_NANOS, now)
@@ -72,5 +78,27 @@ public final class GrpcTransportLifecycleFilter extends ServerTransportFilter {
 
     public int connectionCount() {
         return connectionCount.get();
+    }
+
+    /** True once at least one business transport has been observed. */
+    public boolean hasObservedBusinessConnect() {
+        return sawBusinessConnect.get();
+    }
+
+    /** Monotonic nanos of the most recent business transport, or 0 if none seen. */
+    public long lastBusinessConnectNanos() {
+        return lastBusinessConnectNanos.get();
+    }
+
+    /**
+     * Nanos since the last business transport was established. Returns -1 when no
+     * connect has ever been observed, so callers can distinguish "idle since start"
+     * from "quiet after traffic". Diagnostic only: this never shortens a drain.
+     */
+    public long quietDurationNanos() {
+        if (!sawBusinessConnect.get()) {
+            return -1L;
+        }
+        return nanoClock.getAsLong() - lastBusinessConnectNanos.get();
     }
 }

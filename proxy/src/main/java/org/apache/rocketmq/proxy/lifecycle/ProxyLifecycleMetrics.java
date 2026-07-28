@@ -32,6 +32,7 @@ public final class ProxyLifecycleMetrics {
     private final LongAdder drainDeadlineExceeded = new LongAdder();
     private final LongAdder transportTerminationFailed = new LongAdder();
     private final LongAdder forcedClose = new LongAdder();
+    private final LongAdder lbDetachQuietMissed = new LongAdder();
 
     private volatile boolean bound = false;
 
@@ -65,6 +66,19 @@ public final class ProxyLifecycleMetrics {
 
     public void recordForcedClose() {
         forcedClose.increment();
+    }
+
+    /**
+     * Counts drains where new business connections were still arriving within the
+     * quiet threshold of the lb cutoff, i.e. proxyLbDetachTimeoutSeconds may be
+     * too small. Diagnostic signal only; it never changes drain timing.
+     */
+    public void recordLbDetachQuietMissed() {
+        lbDetachQuietMissed.increment();
+    }
+
+    public long lbDetachQuietMissed() {
+        return lbDetachQuietMissed.sum();
     }
 
     public long lateConnectionsAfterCutoff() {
