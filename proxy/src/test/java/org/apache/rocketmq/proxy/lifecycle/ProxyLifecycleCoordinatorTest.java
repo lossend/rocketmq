@@ -225,6 +225,39 @@ public class ProxyLifecycleCoordinatorTest {
     }
 
     @Test
+    @DisplayName("admission is closed before the forced state is published (no post-force acquire window)")
+    public void forceClosesAdmissionBeforePublishingState() {
+        FakeAdapter adapter = new FakeAdapter();
+        AtomicReference<ProxyLifecycleState> stateWhenClosed = new AtomicReference<>();
+        // Capture the coordinator's state at the instant admission is closed. The fix
+        // requires closeAdmission() to run before FORCE_DRAINING becomes visible, so at
+        // that instant the state must NOT yet be FORCE_DRAINING.
+        AtomicReference<ProxyLifecycleCoordinator> ref = new AtomicReference<>();
+        SendDrainGate gate = new SendDrainGate() {
+            @Override
+            public long closeAdmission() {
+                ProxyLifecycleCoordinator c = ref.get();
+                if (c != null) {
+                    stateWhenClosed.compareAndSet(null, c.state());
+                }
+                return super.closeAdmission();
+            }
+        };
+        ProxyLifecycleCoordinator coordinator = new ProxyLifecycleCoordinator(gate,
+            Collections.singletonList(adapter), scheduler, clock::get, true, null,
+            60, 300, 0.10, 30, 30, 480);
+        ref.set(coordinator);
+        coordinator.onStartupComplete();
+        coordinator.beginDrain(DrainTrigger.PRESTOP);
+
+        scheduler.runScheduledAt(1);
+
+        assertThat(stateWhenClosed.get()).isNotEqualTo(ProxyLifecycleState.FORCE_DRAINING);
+        assertThat(coordinator.state()).isEqualTo(ProxyLifecycleState.FORCE_DRAINING);
+        assertThat(gate.isAdmissionClosed()).isTrue();
+    }
+
+    @Test
     @DisplayName("a hard deadline in MIGRATING force-closes admission")
     public void forceFromMigratingClosesAdmission() {
         FakeAdapter adapter = new FakeAdapter();
@@ -280,6 +313,56 @@ public class ProxyLifecycleCoordinatorTest {
 
         assertThat(result.isForced()).isTrue();
         assertThat(result.causes()).containsExactly(forceFailure);
+    }
+
+    @Test
+    @DisplayName("markStopping/markStopped advance a settled drain through the terminal states")
+    public void stopWiringReachesStopped() {
+        FakeAdapter adapter = new FakeAdapter();
+        adapter.noNewWork.complete(null);
+        adapter.terminated.complete(null);
+        ProxyLifecycleCoordinator coordinator = newCoordinator(adapter, null);
+        coordinator.onStartupComplete();
+        DrainRun run = coordinator.beginDrain(DrainTrigger.PRESTOP);
+        // Migration only begins after the lb cutoff elapses; then no-new-work + termination
+        // drive the run to DRAINED (mirrors normalDrainReachesDrained).
+        scheduler.runScheduledAt(0);
+        assertThat(coordinator.state()).isEqualTo(ProxyLifecycleState.DRAINED);
+        assertThat(run.drainFuture().getNow(null).isForced()).isFalse();
+
+        coordinator.markStopping();
+        assertThat(coordinator.state()).isEqualTo(ProxyLifecycleState.STOPPING);
+
+        coordinator.markStopped();
+        assertThat(coordinator.state()).isEqualTo(ProxyLifecycleState.STOPPED);
+    }
+
+    @Test
+    @DisplayName("markStopping advances a forced drain and keeps the forced outcome sticky through STOPPED")
+    public void stopWiringFromForcedStaysSticky() {
+        ProxyLifecycleCoordinator coordinator = newCoordinator(new FakeAdapter(), null);
+        coordinator.beginDrain(DrainTrigger.SIGTERM_FALLBACK);
+        assertThat(coordinator.state()).isEqualTo(ProxyLifecycleState.FORCE_DRAINING);
+
+        coordinator.markStopping();
+        assertThat(coordinator.state()).isEqualTo(ProxyLifecycleState.STOPPING);
+        assertThat(coordinator.snapshot().forced()).isTrue();
+
+        coordinator.markStopped();
+        assertThat(coordinator.state()).isEqualTo(ProxyLifecycleState.STOPPED);
+        assertThat(coordinator.snapshot().forced()).isTrue();
+    }
+
+    @Test
+    @DisplayName("stop wiring is a no-op before the drain has settled")
+    public void stopWiringNoopBeforeSettled() {
+        ProxyLifecycleCoordinator coordinator = newCoordinator(new FakeAdapter(), null);
+        coordinator.onStartupComplete();
+        // No drain started: markStopping/markStopped must not throw and must not move state.
+        coordinator.markStopping();
+        assertThat(coordinator.state()).isEqualTo(ProxyLifecycleState.READY);
+        coordinator.markStopped();
+        assertThat(coordinator.state()).isEqualTo(ProxyLifecycleState.READY);
     }
 
     @Test

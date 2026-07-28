@@ -144,6 +144,9 @@ public class ProxyStartup {
                             log.error("proxy drain exceeded {}s bound; proceeding with forced shutdown",
                                 drainJoinTimeoutSeconds);
                         }
+                        // Drain has settled (DRAINED or FORCE_DRAINING): enter STOPPING so
+                        // /state reports teardown-in-progress while resources are released.
+                        coordinatorRef.markStopping();
                         // Tear down the gRPC server within a single shared stop deadline.
                         ShutdownDeadline stopDeadline = ShutdownDeadline.afterNanos(System.nanoTime(),
                             TimeUnit.SECONDS.toNanos(proxyConfig.getProxyJvmShutdownTimeoutSeconds()),
@@ -152,6 +155,11 @@ public class ProxyStartup {
                     }
                     PROXY_START_AND_SHUTDOWN.preShutdown();
                     PROXY_START_AND_SHUTDOWN.shutdown();
+                    if (coordinatorRef != null) {
+                        // Publish the terminal STOPPED state while the admin server is still
+                        // up, so automation polling /state observes it before the endpoint closes.
+                        coordinatorRef.markStopped();
+                    }
                     if (adminServerRef != null) {
                         adminServerRef.stop(0);
                     }

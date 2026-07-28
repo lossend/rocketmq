@@ -190,6 +190,30 @@ public final class ProxyLifecycleCoordinator implements ProxyLifecycle {
     }
 
     /**
+     * Begins the process-stop phase, advancing a settled drain (DRAINED or
+     * FORCE_DRAINING) to STOPPING so {@code /state} reports teardown-in-progress.
+     * Best-effort and non-throwing: from any other current state this is a no-op, so
+     * the SIGTERM shutdown hook can call it unconditionally. The forced outcome
+     * remains sticky in {@link #snapshot()} across this edge.
+     */
+    public void markStopping() {
+        ProxyLifecycleState cur = state.get();
+        if (cur == ProxyLifecycleState.DRAINED || cur == ProxyLifecycleState.FORCE_DRAINING) {
+            transition(cur, ProxyLifecycleState.STOPPING, "stopping");
+        }
+    }
+
+    /**
+     * Publishes the terminal STOPPED state once teardown has finished. Only STOPPING
+     * may enter STOPPED; from any other current state this is an idempotent no-op, so
+     * the shutdown hook never throws. Should be invoked while the admin server is
+     * still serving so the terminal state is observable via {@code /state}.
+     */
+    public void markStopped() {
+        transition(ProxyLifecycleState.STOPPING, ProxyLifecycleState.STOPPED, "stopped");
+    }
+
+    /**
      * Validated transition. Only the CAS winner from {@code expected} advances the
      * state; a real backward edge, a skipped normal edge, or a duplicate push
      * throws so it is never silently swallowed.

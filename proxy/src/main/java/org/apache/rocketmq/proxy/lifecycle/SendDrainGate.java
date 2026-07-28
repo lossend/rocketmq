@@ -29,7 +29,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * close is counted. {@code drainedFuture} completes when admission is closed and
  * the accepted count has drained to zero.
  */
-public final class SendDrainGate {
+public class SendDrainGate {
 
     private static final long CLOSED_BIT = 1L << 63;
     private static final long COUNT_MASK = ~CLOSED_BIT;
