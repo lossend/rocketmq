@@ -19,12 +19,12 @@ package org.apache.rocketmq.proxy.lifecycle;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
-import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.rocketmq.proxy.config.ProxyConfig;
 import org.apache.rocketmq.proxy.lifecycle.grpc.GrpcDrainAdapter;
-import org.apache.rocketmq.proxy.lifecycle.readiness.ProxyReadinessContributors;
+import org.apache.rocketmq.proxy.lifecycle.warmup.WarmupRegistry;
+import org.apache.rocketmq.proxy.lifecycle.warmup.WarmupTasks;
 import org.junit.Test;
 import org.junit.jupiter.api.DisplayName;
 
@@ -51,10 +51,11 @@ public class ProxyGracefulLifecycleWarmupTest {
 
         AtomicBoolean nameServerUp = new AtomicBoolean(false);
         AtomicInteger readyCount = new AtomicInteger();
-        List<ReadinessContributor> contributors = ProxyReadinessContributors.coreSubset(
-            () -> true, () -> true, () -> true, nameServerUp::get);
+        WarmupRegistry registry = new WarmupRegistry();
+        registry.register(WarmupTasks.nameServerReachable(
+            WarmupTasks.PRIORITY_NAMESERVER, nameServerUp::get));
 
-        wiring.startWarmup(contributors, strictConfig(), scheduler, () -> {
+        wiring.startWarmup(registry, strictConfig(), scheduler, () -> {
             readyCount.incrementAndGet();
             coordinator.onStartupComplete();
         });
@@ -76,6 +77,32 @@ public class ProxyGracefulLifecycleWarmupTest {
     }
 
     @Test
+    @DisplayName("registry-driven warmup gates READY until the registered NameServer task passes")
+    public void registryDrivenWarmupGatesReady() {
+        ProxyGracefulLifecycleWiring wiring = new ProxyGracefulLifecycleWiring();
+        QueueingScheduler scheduler = new QueueingScheduler();
+        ProxyLifecycleCoordinator coordinator = wiring.createCoordinator(
+            new FakePhasedServer(), strictConfig(), scheduler, Runnable::run);
+
+        AtomicBoolean nameServerUp = new AtomicBoolean(false);
+        WarmupRegistry registry = new WarmupRegistry();
+        registry.register(WarmupTasks.supplied("grpc-listener-bound",
+            WarmupTasks.PRIORITY_GRPC_LISTENER, FailureScope.LOCAL_FATAL, () -> true));
+        registry.register(WarmupTasks.nameServerReachable(
+            WarmupTasks.PRIORITY_NAMESERVER, nameServerUp::get));
+
+        wiring.startWarmup(registry, strictConfig(), scheduler, coordinator::onStartupComplete);
+
+        // NameServer task not yet reachable: still STARTING.
+        assertThat(coordinator.state()).isEqualTo(ProxyLifecycleState.STARTING);
+
+        // Task recovers; next tick completes warmup and publishes READY.
+        nameServerUp.set(true);
+        scheduler.runNext();
+        assertThat(coordinator.state()).isEqualTo(ProxyLifecycleState.READY);
+    }
+
+    @Test
     @DisplayName("warmup with a broker topic gates READY until at least one broker for it is reachable")
     public void warmupGatesOnBrokerReachability() {
         ProxyGracefulLifecycleWiring wiring = new ProxyGracefulLifecycleWiring();
@@ -84,13 +111,13 @@ public class ProxyGracefulLifecycleWarmupTest {
             new FakePhasedServer(), strictConfig(), scheduler, Runnable::run);
 
         AtomicBoolean brokerUp = new AtomicBoolean(false);
-        List<ReadinessContributor> contributors = ProxyReadinessContributors.coreSubset(
-            () -> true, () -> true, () -> true, () -> true,
-            java.util.Collections.singletonList("TopicX"),
+        WarmupRegistry registry = new WarmupRegistry();
+        registry.register(WarmupTasks.nameServerReachable(WarmupTasks.PRIORITY_NAMESERVER, () -> true));
+        registry.register(WarmupTasks.brokerReachable("TopicX", WarmupTasks.PRIORITY_BROKER,
             topic -> java.util.Arrays.asList("broker-a:10911", "broker-b:10911"),
-            addr -> brokerUp.get());
+            addr -> brokerUp.get()));
 
-        wiring.startWarmup(contributors, strictConfig(), scheduler, coordinator::onStartupComplete);
+        wiring.startWarmup(registry, strictConfig(), scheduler, coordinator::onStartupComplete);
 
         // NameServer is up but no broker is reachable yet: still STARTING.
         assertThat(coordinator.state()).isEqualTo(ProxyLifecycleState.STARTING);
@@ -109,10 +136,10 @@ public class ProxyGracefulLifecycleWarmupTest {
         ProxyLifecycleCoordinator coordinator = wiring.createCoordinator(
             new FakePhasedServer(), strictConfig(), scheduler, Runnable::run);
 
-        List<ReadinessContributor> contributors = ProxyReadinessContributors.coreSubset(
-            () -> true, () -> true, () -> true, () -> false);
+        WarmupRegistry registry = new WarmupRegistry();
+        registry.register(WarmupTasks.nameServerReachable(WarmupTasks.PRIORITY_NAMESERVER, () -> false));
 
-        wiring.startWarmup(contributors, strictConfig(), scheduler, coordinator::onStartupComplete);
+        wiring.startWarmup(registry, strictConfig(), scheduler, coordinator::onStartupComplete);
 
         // Drive many ticks well past any deadline; state must never advance and the
         // loop must keep rescheduling (never markFatal, never STOPPED).

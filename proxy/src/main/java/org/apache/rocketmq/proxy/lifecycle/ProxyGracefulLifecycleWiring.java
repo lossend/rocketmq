@@ -17,6 +17,7 @@
 
 package org.apache.rocketmq.proxy.lifecycle;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.Executor;
@@ -29,6 +30,9 @@ import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.logging.org.slf4j.Logger;
 import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
 import org.apache.rocketmq.proxy.config.ProxyConfig;
+import org.apache.rocketmq.proxy.lifecycle.warmup.WarmupRegistry;
+import org.apache.rocketmq.proxy.lifecycle.warmup.WarmupTask;
+import org.apache.rocketmq.proxy.lifecycle.warmup.WarmupTaskContributorAdapter;
 import org.apache.rocketmq.proxy.lifecycle.grpc.GrpcActiveCallInterceptor;
 import org.apache.rocketmq.proxy.lifecycle.grpc.GrpcActiveCallRegistry;
 import org.apache.rocketmq.proxy.lifecycle.grpc.GrpcDrainAdapter;
@@ -169,6 +173,40 @@ public final class ProxyGracefulLifecycleWiring {
             throw new IllegalStateException("startWarmup requires createCoordinator to run first");
         }
         startWarmup(contributors, config, active, onReady);
+    }
+
+    /**
+     * Drives warmup from a {@link WarmupRegistry}: registered tasks are adapted to readiness
+     * contributors (in registry priority order) and evaluated by the same barrier. Uses the
+     * scheduler captured at {@code createCoordinator}.
+     *
+     * @param registry the registered warmup tasks
+     * @param config   supplies the warmup timeout budget
+     * @param onReady  published exactly once when the barrier completes
+     */
+    public void startWarmup(WarmupRegistry registry, ProxyConfig config, Runnable onReady) {
+        startWarmup(adapt(registry), config, onReady);
+    }
+
+    /**
+     * Registry-driven warmup with an explicit scheduler; primarily for tests.
+     *
+     * @param registry  the registered warmup tasks
+     * @param config    supplies the warmup timeout budget
+     * @param scheduler lifecycle scheduler driving the retry loop
+     * @param onReady   published exactly once when the barrier completes
+     */
+    public void startWarmup(WarmupRegistry registry, ProxyConfig config,
+        LifecycleScheduler scheduler, Runnable onReady) {
+        startWarmup(adapt(registry), config, scheduler, onReady);
+    }
+
+    private static List<ReadinessContributor> adapt(WarmupRegistry registry) {
+        List<ReadinessContributor> contributors = new ArrayList<>();
+        for (WarmupTask task : registry.tasks()) {
+            contributors.add(new WarmupTaskContributorAdapter(task));
+        }
+        return contributors;
     }
 
     /**
