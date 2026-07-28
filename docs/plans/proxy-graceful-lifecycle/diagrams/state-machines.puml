@@ -1,0 +1,174 @@
+@startuml
+title "ProxyLifecycleState (spec §3.1)"
+hide empty description
+
+[*] --> STARTING
+STARTING --> READY : warmup barrier complete\nreadiness succeeds
+READY --> QUIESCING : beginDrain(trigger)\nreadiness fails immediately
+QUIESCING --> MIGRATING : lbCutoff reached\n(EndpointSlice/NLB detached)
+MIGRATING --> DRAINING : migrationCutoff reached\nor business transport == 0
+DRAINING --> DRAINED : admission closed\n+ accepted_inflight_zero\n+ transports terminated
+DRAINED --> STOPPING : SIGTERM / shutdown()
+STOPPING --> STOPPED
+
+STARTING --> FORCE_DRAINING : deadline exceeded /\nstartup failure
+READY --> FORCE_DRAINING : deadline exceeded
+QUIESCING --> FORCE_DRAINING : deadline exceeded
+MIGRATING --> FORCE_DRAINING : deadline exceeded
+DRAINING --> FORCE_DRAINING : hard deadline exceeded
+FORCE_DRAINING --> STOPPING : forced close done
+
+note right of DRAINED
+  PreStop / POST /drain waiter
+  only ever returns here or at
+  FORCE_DRAINING. It never
+  drives STOPPING itself.
+end note
+
+note right of STOPPING
+  Only the SIGTERM hook or a
+  startup-failure closer may
+  advance past DRAINED/FORCE_DRAINING.
+end note
+
+note left of QUIESCING
+  All transitions are monotonic.
+  The normal path (top row) and the
+  forced path (bottom row) never merge
+  back into each other except at
+  STOPPING.
+end note
+@enduml
+
+@startuml
+title "SendPermit — backend state (spec §9.1)"
+hide empty description
+
+[*] --> NOT_STARTED
+
+NOT_STARTED --> STARTED : backendStarted()\nCAS wins
+STARTED --> TERMINAL : backendTerminal(cause)\nBroker Future completes
+
+NOT_STARTED --> SKIPPED : tryBackendSkipped(reason)\nCAS wins (cancel/reject\nbefore dispatch)
+
+TERMINAL --> TERMINAL : backendTerminal() re-entry\n(idempotent no-op)
+
+note right of STARTED
+  Once STARTED, cancel/close must
+  wait for the real Broker Future
+  terminal — it can NOT be
+  short-circuited to SKIPPED or a
+  synthetic terminal.
+end note
+
+note bottom of NOT_STARTED
+  backendTerminal() called while
+  still NOT_STARTED or SKIPPED is
+  an invariant violation — must
+  fail loudly, not silently patch.
+end note
+@enduml
+
+@startuml
+title "SendPermit — protocol terminal & release (spec §9.1)"
+hide empty description
+
+state "protocol: OPEN" as OPEN
+state "protocol: TERMINAL" as PTERM
+state "RELEASED" as RELEASED
+
+[*] --> OPEN
+OPEN --> PTERM : protocolTerminal(result)\n(gRPC streamClosed /\nRemoting ChannelFuture terminal)
+
+PTERM --> RELEASED : backend ∈ {TERMINAL, SKIPPED}\n&& protocol == TERMINAL\n(CAS once-only, decrements gate)
+
+note right of RELEASED
+  Release is the AND of two
+  independently tracked terminals.
+  Transport-level callbacks (cancel,
+  channel close) may only mark the
+  protocol side — never assume they
+  also finish the backend side.
+end note
+@enduml
+
+@startuml
+title "SendDrainGate (spec §9.1) — packed AtomicLong: close-bit + accepted count"
+hide empty description
+
+state "OPEN (accepted = N)" as OPEN
+state "CLOSED (accepted = N)" as CLOSED
+state "DRAINED (accepted = 0)" as DRAINED
+
+[*] --> OPEN
+
+OPEN --> OPEN : tryAcquire() CAS success\naccepted += 1
+OPEN --> CLOSED : closeAdmission() CAS\n(sets close bit, no new permits)
+CLOSED --> CLOSED : permit.release()\naccepted -= 1
+CLOSED --> DRAINED : accepted reaches 0\n(completes drainedFuture)
+
+note right of OPEN
+  tryAcquire() after the close bit
+  is set always returns empty —
+  never produces a late permit.
+end note
+
+note right of CLOSED
+  Permits acquired before closeAdmission()
+  are already counted in "accepted" and
+  must still be released normally.
+end note
+
+note bottom of DRAINED
+  accepted count is fail-fast bounded;
+  it must never overflow into the
+  close bit.
+end note
+@enduml
+
+@startuml
+title "GrpcActiveCall (spec §9.2) — non-unary drain lifecycle"
+hide empty description
+
+state "OPEN" as OPEN
+state "CLOSE_INTENT_SENT" as INTENT
+state "TERMINAL" as TERM
+
+[*] --> OPEN
+OPEN --> INTENT : closeAll(policy)\nTelemetry -> Status.OK\nother streaming -> UNAVAILABLE
+INTENT --> TERM : wrapped listener\nonComplete() / onCancel()
+OPEN --> TERM : wrapped listener\nonComplete() / onCancel()\n(no drain close involved)
+
+note right of INTENT
+  Close intent only blocks further
+  outbound writes. The call stays
+  registered — open count is NOT
+  decremented here.
+end note
+
+note right of TERM
+  Only the wrapped listener's
+  onComplete/onCancel is canonical
+  terminal. ServerCall.close()
+  returning is NOT proof of terminal.
+end note
+@enduml
+
+@startuml
+title "RequestTask (spec §9.3)"
+hide empty description
+
+[*] --> CREATED
+
+CREATED --> RUNNING : run()\nCAS CREATED -> RUNNING wins\n(installs scope, calls taskStarted())
+CREATED --> STOPPED : stop(reason)\nCAS CREATED -> STOPPED wins\n(writes taskSkipped(reason))
+
+RUNNING --> RUNNING : stop(reason) called\nafter RUNNING — CAS fails,\nno-op (task already dispatched)
+
+note bottom of CREATED
+  Only one of run()/stop() can win
+  the CAS from CREATED. Whichever
+  loses must not re-attempt the
+  transition or double-report state.
+end note
+@enduml

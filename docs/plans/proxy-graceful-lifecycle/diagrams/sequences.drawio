@@ -1,0 +1,738 @@
+<mxfile host="drawio">
+  <diagram id="seq1" name="PreStop drain full chain (spec §3.6 + §3.2)">
+    <mxGraphModel dx="800" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="kubelet" value="kubelet" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;participant=umlActor;verticalAlign=bottom;spacingBottom=-14;labelBackgroundColor=#ffffff;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="100" height="1520" as="geometry"/>
+        </mxCell>
+        <mxCell id="cli" value="mqproxyctl&#xa;(PreStop)" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="360" y="40" width="100" height="1520" as="geometry"/>
+        </mxCell>
+        <mxCell id="admin" value="ProxyAdminServer&#xa;(8082, loopback)" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="680" y="40" width="100" height="1520" as="geometry"/>
+        </mxCell>
+        <mxCell id="coord" value="ProxyLifecycleCoordinator" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="40" width="100" height="1520" as="geometry"/>
+        </mxCell>
+        <mxCell id="lb" value="NLB / EndpointSlice" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="1320" y="40" width="100" height="1520" as="geometry"/>
+        </mxCell>
+        <mxCell id="act0" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="coord">
+          <mxGeometry x="45" y="190" width="10" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="act1" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="admin">
+          <mxGeometry x="45" y="140" width="10" height="150" as="geometry"/>
+        </mxCell>
+        <mxCell id="act2" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="admin">
+          <mxGeometry x="45" y="580" width="10" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="act3" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="admin">
+          <mxGeometry x="45" y="1270" width="10" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="act4" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="cli">
+          <mxGeometry x="45" y="90" width="10" height="1280" as="geometry"/>
+        </mxCell>
+        <mxCell id="act5" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="lb">
+          <mxGeometry x="45" y="470" width="10" height="1010" as="geometry"/>
+        </mxCell>
+        <mxCell id="m0" value="exec PreStop&#xa;./mqproxyctl drain --wait --timeout 480s" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.0592;entryX=0;entryY=0.0;" edge="1" parent="1" source="kubelet" target="act4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m1" value="POST /drain" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.0391;entryX=0;entryY=0.0;" edge="1" parent="1" source="act4" target="act1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m2" value="beginDrain(PRESTOP)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.3333;entryX=0;entryY=0.0;" edge="1" parent="1" source="act1" target="act0">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m3" value="DrainRun (drainId, cutoffs)" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0;exitY=1.0;entryX=1;entryY=0.6667;" edge="1" parent="1" source="act0" target="act1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m4" value="202 { drainId, cutoffs }" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0;exitY=1.0;entryX=1;entryY=0.1562;" edge="1" parent="1" source="act1" target="act4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="note5" value="par" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="1070" y="360" width="120" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="m6" value="T0 -&gt; QUIESCING&#xa;readiness fails" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.2632;entryX=0.5;entryY=0.2829;" edge="1" parent="1" source="coord" target="coord">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="1110" y="440"/><mxPoint x="1110" y="470"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m7" value="(observed) EndpointSlice / target&#xa;deregistration begins" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.3092;entryX=0;entryY=0.0;" edge="1" parent="1" source="coord" target="act5">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="note8" value="else" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="430" y="540" width="120" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="m9" value="poll GET /drain/{drainId}" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.3828;entryX=0;entryY=0.0;" edge="1" parent="1" source="act4" target="act2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m10" value="200 { phase: QUIESCING, ... }" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0;exitY=1.0;entryX=1;entryY=0.4219;" edge="1" parent="1" source="act2" target="act4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="note11" value="end par" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="1070" y="700" width="120" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="m12" value="lbCutoff -&gt; MIGRATING&#xa;(reject/count late transport)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.4868;entryX=0.5;entryY=0.5066;" edge="1" parent="1" source="coord" target="coord">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="1110" y="780"/><mxPoint x="1110" y="810"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m13" value="migrationCutoff -&gt; DRAINING&#xa;(close admission, freeze intake)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.5329;entryX=0.5;entryY=0.5526;" edge="1" parent="1" source="coord" target="coord">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="1110" y="850"/><mxPoint x="1110" y="880"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m14" value="wait accepted_inflight_zero&#xa;(dual-terminal accounting)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.5789;entryX=0.5;entryY=0.5987;" edge="1" parent="1" source="coord" target="coord">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="1110" y="920"/><mxPoint x="1110" y="950"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="note15" value="alt: reached before hardDeadline" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="1070" y="970" width="254" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="m16" value="DRAINED" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.6645;entryX=0.5;entryY=0.6842;" edge="1" parent="1" source="coord" target="coord">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="1110" y="1050"/><mxPoint x="1110" y="1080"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="note17" value="else: hardDeadline exceeded" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="1070" y="1100" width="219" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="m18" value="FORCE_DRAINING (forced close)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.75;entryX=0.5;entryY=0.7697;" edge="1" parent="1" source="coord" target="coord">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="1110" y="1180"/><mxPoint x="1110" y="1210"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="note19" value="end alt" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="1070" y="1230" width="120" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="m20" value="poll GET /drain/{drainId}" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.9219;entryX=0;entryY=0.0;" edge="1" parent="1" source="act4" target="act3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m21" value="200 { phase: DRAINED | FORCE_DRAINING }" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0;exitY=1.0;entryX=1;entryY=0.9609;" edge="1" parent="1" source="act3" target="act4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m22" value="exit 0 (DRAINED)&#xa;or non-zero (FORCE_DRAINING)" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0;exitY=1.0;entryX=0.5;entryY=0.9013;" edge="1" parent="1" source="act4" target="kubelet">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="note23" value="NLB 450s deregistration / connection-drain runs in parallel with the&#xa;Proxy clock from the moment readiness / target is removed -&#xa;never serialized after podGrace." style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="1390" y="1440" width="260" height="40" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="seq2" name="gRPC double-GOAWAY drain (spec §9.2 + §3.4)">
+    <mxGraphModel dx="800" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="coord" value="ProxyLifecycleCoordinator" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="100" height="1750" as="geometry"/>
+        </mxCell>
+        <mxCell id="adapter" value="GrpcDrainAdapter" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="370" y="40" width="100" height="1750" as="geometry"/>
+        </mxCell>
+        <mxCell id="grpcserver" value="GrpcServer" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="700" y="40" width="100" height="1750" as="geometry"/>
+        </mxCell>
+        <mxCell id="server" value="io.grpc.Server&#xa;(grpc-java built-in)" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="1030" y="40" width="100" height="1750" as="geometry"/>
+        </mxCell>
+        <mxCell id="registry" value="GrpcActiveCallRegistry" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="1360" y="40" width="100" height="1750" as="geometry"/>
+        </mxCell>
+        <mxCell id="client" value="Client (5.0.7 / 5.2.1 / 5.3.2+)" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="1690" y="40" width="100" height="1750" as="geometry"/>
+        </mxCell>
+        <mxCell id="act0" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="client">
+          <mxGeometry x="45" y="240" width="10" height="170" as="geometry"/>
+        </mxCell>
+        <mxCell id="act1" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="grpcserver">
+          <mxGeometry x="45" y="140" width="10" height="1200" as="geometry"/>
+        </mxCell>
+        <mxCell id="act2" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="adapter">
+          <mxGeometry x="45" y="90" width="10" height="1300" as="geometry"/>
+        </mxCell>
+        <mxCell id="act3" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="server">
+          <mxGeometry x="45" y="190" width="10" height="1520" as="geometry"/>
+        </mxCell>
+        <mxCell id="act4" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="client">
+          <mxGeometry x="45" y="520" width="10" height="1190" as="geometry"/>
+        </mxCell>
+        <mxCell id="act5" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="registry">
+          <mxGeometry x="45" y="840" width="10" height="870" as="geometry"/>
+        </mxCell>
+        <mxCell id="m0" value="enter DRAINING&#xa;stopAcceptingNewRpcs()" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.0514;entryX=0;entryY=0.0;" edge="1" parent="1" source="coord" target="act2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m1" value="initiateServerDrain()" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.0385;entryX=0;entryY=0.0;" edge="1" parent="1" source="act2" target="act1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m2" value="shutdown()&#xa;(once-only CAS, non-blocking)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.0417;entryX=0;entryY=0.0;" edge="1" parent="1" source="act1" target="act3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m3" value="GOAWAY(lastStreamId=MAX, NO_ERROR)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.0329;entryX=0;entryY=0.0;" edge="1" parent="1" source="act3" target="act0">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m4" value="stop creating new streams&#xa;on this transport" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.2941;entryX=1;entryY=0.4706;" edge="1" parent="1" source="act0" target="act0">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="1800" y="330"/><mxPoint x="1800" y="360"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m5" value="PING(0x97ACEF001)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.1118;entryX=0;entryY=0.7059;" edge="1" parent="1" source="act3" target="act0">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m6" value="PING_ACK" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0;exitY=1.0;entryX=1;entryY=0.1447;" edge="1" parent="1" source="act0" target="act3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="note7" value="or 10s fallback if no ACK" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="1100" y="480" width="205" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="m8" value="GOAWAY(lastStreamCreated, NO_ERROR)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.2171;entryX=0;entryY=0.0;" edge="1" parent="1" source="act3" target="act4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="note9" value="freezes highest stream id&#xa;the server actually accepted" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="1760" y="590" width="270" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="m10" value="wait no_new_work_reached&#xa;(this protocol's evidence)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.4154;entryX=1;entryY=0.4385;" edge="1" parent="1" source="act2" target="act2">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="480" y="670"/><mxPoint x="480" y="700"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m11" value="last protocol reaches&#xa;no_new_work_reached -&gt;&#xa;SendDrainGate.closeAdmission()" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.4;entryX=0.5;entryY=0.4171;" edge="1" parent="1" source="coord" target="coord">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="150" y="740"/><mxPoint x="150" y="770"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m12" value="wait grpcOpenSendRpcs == 0" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.5231;entryX=1;entryY=0.5462;" edge="1" parent="1" source="act2" target="act2">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="480" y="810"/><mxPoint x="480" y="840"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m13" value="closeAll(GrpcDrainStatusPolicy)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.5769;entryX=0;entryY=0.0;" edge="1" parent="1" source="act2" target="act5">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m14" value="Telemetry stream -&gt; Status.OK&#xa;(normal completion)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.0575;entryX=0;entryY=0.3109;" edge="1" parent="1" source="act5" target="act4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m15" value="ReceiveMessage / other streaming&#xa;-&gt; UNAVAILABLE &quot;[PROXY_DRAINING] reconnect&quot;" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.1149;entryX=0;entryY=0.3529;" edge="1" parent="1" source="act5" target="act4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m16" value="Telemetry: 1s observer renewal,&#xa;resend Settings (no error log)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.395;entryX=1;entryY=0.4202;" edge="1" parent="1" source="act4" target="act4">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="1800" y="1030"/><mxPoint x="1800" y="1060"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m17" value="ReceiveMessage: reconnect&#xa;elsewhere via stable NLB address" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.4538;entryX=1;entryY=0.479;" edge="1" parent="1" source="act4" target="act4">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="1800" y="1100"/><mxPoint x="1800" y="1130"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m18" value="wait grpcOpenDrainableCalls == 0" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.8;entryX=0;entryY=0.3333;" edge="1" parent="1" source="act2" target="act5">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m19" value="awaitServerTermination(effectiveDeadline)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.8385;entryX=0;entryY=0.8667;" edge="1" parent="1" source="act2" target="act1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m20" value="awaitTermination(remaining)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.9083;entryX=0;entryY=0.6842;" edge="1" parent="1" source="act1" target="act3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="note21" value="alt: terminated in time" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="770" y="1300" width="191" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="m22" value="true" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0;exitY=1.0;entryX=1;entryY=0.9615;" edge="1" parent="1" source="act1" target="act2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m23" value="normal DrainResult" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0;exitY=1.0;entryX=0.5;entryY=0.7943;" edge="1" parent="1" source="act2" target="coord">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="note24" value="else: timeout / interrupted" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="770" y="1460" width="219" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="m25" value="shutdownNow() (once-only)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.8571;entryX=0;entryY=0.8618;" edge="1" parent="1" source="grpcserver" target="act3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m26" value="forced=true, cause" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0.5;exitY=0.8857;entryX=0.5;entryY=0.8857;" edge="1" parent="1" source="grpcserver" target="adapter">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m27" value="forced DrainResult" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0.5;exitY=0.9143;entryX=0.5;entryY=0.9143;" edge="1" parent="1" source="adapter" target="coord">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="note28" value="end alt" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="770" y="1670" width="120" height="40" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="seq3" name="Remoting lease-driven GO_AWAY migration (spec §3.3 + §9.4)">
+    <mxGraphModel dx="800" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="client" value="Client (Remoting &gt;V5_3_1)" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="100" height="1250" as="geometry"/>
+        </mxCell>
+        <mxCell id="server" value="NettyRemotingServer" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="330" y="40" width="100" height="1250" as="geometry"/>
+        </mxCell>
+        <mxCell id="listener" value="RemotingSendLifecycleListener" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="620" y="40" width="100" height="1250" as="geometry"/>
+        </mxCell>
+        <mxCell id="nlb" value="Stable NLB address" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="910" y="40" width="100" height="1250" as="geometry"/>
+        </mxCell>
+        <mxCell id="act0" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="listener">
+          <mxGeometry x="45" y="310" width="10" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="act1" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="listener">
+          <mxGeometry x="45" y="570" width="10" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="act2" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="listener">
+          <mxGeometry x="45" y="940" width="10" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="act3" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="nlb">
+          <mxGeometry x="45" y="90" width="10" height="1120" as="geometry"/>
+        </mxCell>
+        <mxCell id="act4" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="server">
+          <mxGeometry x="45" y="140" width="10" height="1070" as="geometry"/>
+        </mxCell>
+        <mxCell id="act5" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="client">
+          <mxGeometry x="45" y="410" width="10" height="800" as="geometry"/>
+        </mxCell>
+        <mxCell id="m0" value="connect" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.072;entryX=0;entryY=0.0;" edge="1" parent="1" source="client" target="act3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m1" value="new Channel" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0;exitY=0.0446;entryX=1;entryY=0.0;" edge="1" parent="1" source="act3" target="act4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m2" value="onChannelActive():&#xa;assign lease 270-330s&#xa;(jitter, monotonic deadline)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.0467;entryX=1;entryY=0.0748;" edge="1" parent="1" source="act4" target="act4">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="440" y="230"/><mxPoint x="440" y="260"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m3" value="SEND_MESSAGE (acknowledged, non-oneway)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.208;entryX=0;entryY=0.1121;" edge="1" parent="1" source="client" target="act4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m4" value="beforeEnqueue(channel, request)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.1589;entryX=0;entryY=0.0;" edge="1" parent="1" source="act4" target="act0">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m5" value="accepted (lease not expired, gate OPEN)" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0;exitY=1.0;entryX=1;entryY=0.2056;" edge="1" parent="1" source="act0" target="act4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m6" value="normal response" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0;exitY=0.2523;entryX=1;entryY=0.0;" edge="1" parent="1" source="act4" target="act5">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="note7" value="... lease deadline reached, channel otherwise idle&#xa;or next request arrives ..." style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="690" y="480" width="230" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="m8" value="SEND_MESSAGE" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.1375;entryX=0;entryY=0.3551;" edge="1" parent="1" source="act5" target="act4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m9" value="beforeEnqueue(channel, request)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.4019;entryX=0;entryY=0.0;" edge="1" parent="1" source="act4" target="act1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m10" value="GO_AWAY&#xa;(lease expired, clientVersion &gt; V5_3_1,&#xa;request NOT dispatched to Broker)" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0;exitY=1.0;entryX=1;entryY=0.4486;" edge="1" parent="1" source="act1" target="act4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m11" value="GO_AWAY response" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0;exitY=0.4953;entryX=1;entryY=0.325;" edge="1" parent="1" source="act4" target="act5">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m12" value="transport-layer reconnect&#xa;(one replay only)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.3875;entryX=1;entryY=0.425;" edge="1" parent="1" source="act5" target="act5">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="150" y="760"/><mxPoint x="150" y="790"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m13" value="reconnect" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.475;entryX=0;entryY=0.625;" edge="1" parent="1" source="act5" target="act3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m14" value="may land on same or different Pod" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0;exitY=0.6696;entryX=1;entryY=0.6542;" edge="1" parent="1" source="act3" target="act4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m15" value="replay SEND_MESSAGE (attempt 2)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.6;entryX=0;entryY=0.7009;" edge="1" parent="1" source="act5" target="act4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m16" value="beforeEnqueue (new channel,&#xa;fresh lease)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.7477;entryX=0;entryY=0.0;" edge="1" parent="1" source="act4" target="act2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m17" value="accepted" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0;exitY=1.0;entryX=1;entryY=0.7944;" edge="1" parent="1" source="act2" target="act4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m18" value="normal response" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0;exitY=0.8411;entryX=1;entryY=0.7875;" edge="1" parent="1" source="act4" target="act5">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="note19" value="A second GO_AWAY on the replayed attempt WOULD fail the&#xa;client - this path buffers exactly one migration, never&#xa;correctness." style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="110" y="1110" width="230" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="note20" value="Idle channel with zero inflight and expired lease is closed&#xa;directly. Legacy clients (&lt;= V5_2_0) get SERVE_UNTIL_CUTOFF:&#xa;no GO_AWAY capability, served until forced close." style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="400" y="1170" width="230" height="40" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="seq4" name="Direct SIGTERM preempts PreStop (spec §8.3)">
+    <mxGraphModel dx="800" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="term" value="SIGTERM (JVM shutdown hook)" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="100" height="1430" as="geometry"/>
+        </mxCell>
+        <mxCell id="runtime" value="ProxyRuntime" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="400" y="40" width="100" height="1430" as="geometry"/>
+        </mxCell>
+        <mxCell id="coord" value="ProxyLifecycleCoordinator" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="760" y="40" width="100" height="1430" as="geometry"/>
+        </mxCell>
+        <mxCell id="adapters" value="GrpcDrainAdapter /&#xa;RemotingDrainAdapter" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="1120" y="40" width="100" height="1430" as="geometry"/>
+        </mxCell>
+        <mxCell id="gate" value="SendDrainGate" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="1480" y="40" width="100" height="1430" as="geometry"/>
+        </mxCell>
+        <mxCell id="act0" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="coord">
+          <mxGeometry x="45" y="140" width="10" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="act1" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="coord">
+          <mxGeometry x="45" y="380" width="10" height="290" as="geometry"/>
+        </mxCell>
+        <mxCell id="act2" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="adapters">
+          <mxGeometry x="45" y="620" width="10" height="410" as="geometry"/>
+        </mxCell>
+        <mxCell id="act3" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="runtime">
+          <mxGeometry x="45" y="90" width="10" height="1120" as="geometry"/>
+        </mxCell>
+        <mxCell id="act4" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="gate">
+          <mxGeometry x="45" y="570" width="10" height="820" as="geometry"/>
+        </mxCell>
+        <mxCell id="m0" value="shutdown(SIGTERM_FALLBACK)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.0629;entryX=0;entryY=0.0;" edge="1" parent="1" source="term" target="act3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m1" value="beginDrain(SIGTERM_FALLBACK)&#xa;(join existing DrainRun if present)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.0446;entryX=0;entryY=0.0;" edge="1" parent="1" source="act3" target="act0">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m2" value="DrainRun (session, drainFuture)" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0;exitY=1.0;entryX=1;entryY=0.0893;" edge="1" parent="1" source="act0" target="act3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m3" value="CAS AtomicReference&lt;StopRun&gt;&#xa;(first winner constructs StopRun)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.1339;entryX=1;entryY=0.1607;" edge="1" parent="1" source="act3" target="act3">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="510" y="280"/><mxPoint x="510" y="310"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m4" value="stopDeadline =&#xa;min(now+jvmTimeout,&#xa;(preStopDeadline+jvmTimeout)-now)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.1964;entryX=1;entryY=0.2232;" edge="1" parent="1" source="act3" target="act3">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="510" y="350"/><mxPoint x="510" y="380"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m5" value="escalateForStop(stopDeadline)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.2589;entryX=0;entryY=0.0;" edge="1" parent="1" source="act3" target="act1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m6" value="cancel pending lb/lease&#xa;scheduled timers (phase generation)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.1724;entryX=1;entryY=0.2759;" edge="1" parent="1" source="act1" target="act1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="870" y="470"/><mxPoint x="870" y="500"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m7" value="fast-forward state machine&#xa;(READY/QUIESCING/MIGRATING -&gt; DRAINING,&#xa;or STARTING -&gt; FORCE_DRAINING)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.4138;entryX=1;entryY=0.5172;" edge="1" parent="1" source="act1" target="act1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="870" y="540"/><mxPoint x="870" y="570"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m8" value="closeAdmission() immediately&#xa;(no 60s / 420s wait)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.6552;entryX=0;entryY=0.0;" edge="1" parent="1" source="act1" target="act4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m9" value="freeze both protocols&#xa;(same fan-out as normal drain)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.8276;entryX=0;entryY=0.0;" edge="1" parent="1" source="act1" target="act2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m10" value="escalateForStop future completes&#xa;(freeze issued)" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0;exitY=1.0;entryX=1;entryY=0.5179;" edge="1" parent="1" source="act1" target="act3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m11" value="await accepted_inflight_zero&#xa;within min(drainDeadline, stopDeadline)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.5625;entryX=1;entryY=0.5893;" edge="1" parent="1" source="act3" target="act3">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="510" y="760"/><mxPoint x="510" y="790"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="note12" value="alt: drained before stopDeadline" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="470" y="810" width="254" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="m13" value="StopRun succeeds normally" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.6786;entryX=1;entryY=0.7054;" edge="1" parent="1" source="act3" target="act3">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="510" y="890"/><mxPoint x="510" y="920"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="note14" value="else: stopDeadline exceeded" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="470" y="940" width="219" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="m15" value="force(stopDeadline)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.7946;entryX=0;entryY=0.878;" edge="1" parent="1" source="act3" target="act2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m16" value="forced DrainResult" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0;exitY=1.0;entryX=1;entryY=0.8393;" edge="1" parent="1" source="act2" target="act3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="note17" value="end alt" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="470" y="1100" width="120" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="m18" value="STOPPING -&gt; shut down&#xa;Remoting -&gt; gRPC Server -&gt; TLS listener&#xa;-&gt; EventLoopGroups -&gt; executors -&gt; STOPPED" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.9375;entryX=1;entryY=0.9643;" edge="1" parent="1" source="act3" target="act3">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="510" y="1180"/><mxPoint x="510" y="1210"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m19" value="stopFuture completes,&#xa;hook join() returns" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0;exitY=1.0;entryX=0.5;entryY=0.8462;" edge="1" parent="1" source="act3" target="term">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m20" value="JVM exits" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.8811;entryX=0.5;entryY=0.9021;" edge="1" parent="1" source="term" target="term">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="150" y="1300"/><mxPoint x="150" y="1330"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="note21" value="If TERM bypasses/interrupts an in-progress PreStop drain, it must&#xa;NOT wait for the 60s lbCutoff or 420s migrationCutoff - it closes&#xa;admission and freezes both protocols on the very first scheduler&#xa;tick." style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="470" y="1350" width="300" height="40" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="seq5" name="Runtime construction and startup order (spec §8.2)">
+    <mxGraphModel dx="800" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="main" value="ProxyStartup.main" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="100" height="1440" as="geometry"/>
+        </mxCell>
+        <mxCell id="factory" value="ProxyRuntimeFactory" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="260" y="40" width="100" height="1440" as="geometry"/>
+        </mxCell>
+        <mxCell id="scope" value="ConstructionScope" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="480" y="40" width="100" height="1440" as="geometry"/>
+        </mxCell>
+        <mxCell id="runtime" value="ProxyRuntime" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="700" y="40" width="100" height="1440" as="geometry"/>
+        </mxCell>
+        <mxCell id="act0" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="scope">
+          <mxGeometry x="45" y="280" width="10" height="430" as="geometry"/>
+        </mxCell>
+        <mxCell id="act1" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="factory">
+          <mxGeometry x="45" y="230" width="10" height="530" as="geometry"/>
+        </mxCell>
+        <mxCell id="act2" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="runtime">
+          <mxGeometry x="45" y="940" width="10" height="460" as="geometry"/>
+        </mxCell>
+        <mxCell id="act3" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="scope">
+          <mxGeometry x="45" y="990" width="10" height="410" as="geometry"/>
+        </mxCell>
+        <mxCell id="m0" value="parseCommandLineArgument(args)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.0625;entryX=0.5;entryY=0.0833;" edge="1" parent="1" source="main" target="main">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="150" y="130"/><mxPoint x="150" y="160"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m1" value="initConfiguration(argument)&#xa;-&gt; validateGracefulLifecycle()" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.1111;entryX=0.5;entryY=0.1319;" edge="1" parent="1" source="main" target="main">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="150" y="200"/><mxPoint x="150" y="230"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m2" value="create()" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.1597;entryX=0;entryY=0.0;" edge="1" parent="1" source="main" target="act1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m3" value="new ConstructionScope()" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.0943;entryX=0;entryY=0.0;" edge="1" parent="1" source="act1" target="act0">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m4" value="own(&quot;server-executor&quot;, newServerExecutor())" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.1887;entryX=0;entryY=0.1163;" edge="1" parent="1" source="act1" target="act0">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m5" value="own(&quot;messaging-processor&quot;,&#xa;buildMessagingProcessorSafely())" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.283;entryX=0;entryY=0.2326;" edge="1" parent="1" source="act1" target="act0">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m6" value="own(&quot;grpc-server-bundle&quot;,&#xa;buildGrpcServerSafely(executor))" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.3774;entryX=0;entryY=0.3488;" edge="1" parent="1" source="act1" target="act0">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m7" value="own(&quot;remoting-server&quot;,&#xa;buildRemotingSafely(processor))" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.4717;entryX=0;entryY=0.4651;" edge="1" parent="1" source="act1" target="act0">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m8" value="own(&quot;admin-server&quot;, buildAdmin())" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.566;entryX=0;entryY=0.5814;" edge="1" parent="1" source="act1" target="act0">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="note9" value="alt: any leaf construction throws" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="550" y="600" width="160" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="m10" value="rollback already-owned&#xa;leaves in reverse order" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.8372;entryX=1;entryY=0.907;" edge="1" parent="1" source="act0" target="act0">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="590" y="680"/><mxPoint x="590" y="710"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m11" value="rethrow with rollback&#xa;close failures as suppressed" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0;exitY=1.0;entryX=1;entryY=0.9057;" edge="1" parent="1" source="act0" target="act1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m12" value="exception (runtime still null)" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0;exitY=1.0;entryX=0.5;entryY=0.5278;" edge="1" parent="1" source="act1" target="main">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m13" value="forceStop(startupFailure).join()&#xa;System.exit(1)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.5625;entryX=0.5;entryY=0.5833;" edge="1" parent="1" source="main" target="main">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="150" y="850"/><mxPoint x="150" y="880"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="note14" value="else: all leaves succeed" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="330" y="900" width="160" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="m15" value="new ProxyRuntime(leaves...)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.6528;entryX=0;entryY=0.0;" edge="1" parent="1" source="factory" target="act2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m16" value="commit()&#xa;(ownership transferred, scope&#xa;won't close on exit)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.6875;entryX=0;entryY=0.0;" edge="1" parent="1" source="factory" target="act3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m17" value="runtime instance" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0.5;exitY=0.7222;entryX=0.5;entryY=0.7222;" edge="1" parent="1" source="factory" target="main">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="note18" value="end alt" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="330" y="1110" width="120" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="m19" value="Runtime.getRuntime().addShutdownHook(&#xa;() -&gt; runtime.shutdown(SIGTERM).join())" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.7986;entryX=0.5;entryY=0.8194;" edge="1" parent="1" source="main" target="main">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="150" y="1190"/><mxPoint x="150" y="1220"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m20" value="runtime.start()" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.8472;entryX=0;entryY=0.6087;" edge="1" parent="1" source="main" target="act2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m21" value="admin bind&#xa;-&gt; metrics -&gt; TLS&#xa;-&gt; MessagingProcessor&#xa;-&gt; gRPC application -&gt; gRPC listener&#xa;-&gt; Remoting listener&#xa;-&gt; listener contributors complete&#xa;-&gt; route warmup -&gt; READY" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.7174;entryX=1;entryY=0.7826;" edge="1" parent="1" source="act2" target="act2">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="810" y="1310"/><mxPoint x="810" y="1340"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="note22" value="Local feature-off mode keeps the legacy&#xa;BrokerController-wrapper-first ordering&#xa;instead of this Cluster sequence." style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="770" y="1360" width="160" height="40" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="seq6" name="Rollout supervisor - single-Pod serialized drain (spec §4.4 + §12.7)">
+    <mxGraphModel dx="800" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="operator" value="Operator" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;participant=umlActor;verticalAlign=bottom;spacingBottom=-14;labelBackgroundColor=#ffffff;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="100" height="1650" as="geometry"/>
+        </mxCell>
+        <mxCell id="supervisor" value="proxy_rollout.py&#xa;(supervisor)" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="400" y="40" width="100" height="1650" as="geometry"/>
+        </mxCell>
+        <mxCell id="k8s" value="kubectl / helm" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="760" y="40" width="100" height="1650" as="geometry"/>
+        </mxCell>
+        <mxCell id="oldpod" value="Pod N (old)" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="1120" y="40" width="100" height="1650" as="geometry"/>
+        </mxCell>
+        <mxCell id="newpod" value="Pod N+1 (new)" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="1480" y="40" width="100" height="1650" as="geometry"/>
+        </mxCell>
+        <mxCell id="store" value="Drain result store&#xa;(Pod Condition / CRD)" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;size=40;" vertex="1" parent="1">
+          <mxGeometry x="1840" y="40" width="100" height="1650" as="geometry"/>
+        </mxCell>
+        <mxCell id="act0" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="supervisor">
+          <mxGeometry x="45" y="90" width="10" height="210" as="geometry"/>
+        </mxCell>
+        <mxCell id="act1" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="k8s">
+          <mxGeometry x="45" y="140" width="10" height="1470" as="geometry"/>
+        </mxCell>
+        <mxCell id="act2" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="newpod">
+          <mxGeometry x="45" y="510" width="10" height="1100" as="geometry"/>
+        </mxCell>
+        <mxCell id="act3" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="oldpod">
+          <mxGeometry x="45" y="560" width="10" height="1050" as="geometry"/>
+        </mxCell>
+        <mxCell id="act4" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;fillColor=#ffffff;" vertex="1" parent="store">
+          <mxGeometry x="45" y="790" width="10" height="820" as="geometry"/>
+        </mxCell>
+        <mxCell id="m0" value="run rollout(target chart/values)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.0545;entryX=0;entryY=0.0;" edge="1" parent="1" source="operator" target="act0">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m1" value="helm template/lint + schema check" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.2381;entryX=0;entryY=0.0;" edge="1" parent="1" source="act0" target="act1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m2" value="kubectl get hpa&#xa;(assert no live HPA on target workload)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.4762;entryX=0;entryY=0.034;" edge="1" parent="1" source="act0" target="act1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="note3" value="alt: live HPA found" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="470" y="260" width="163" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="m4" value="fail fast, abort&#xa;(no freeze/take-over attempted)" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0;exitY=1.0;entryX=0.5;entryY=0.1818;" edge="1" parent="1" source="act0" target="operator">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="note5" value="end alt" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="470" y="370" width="120" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="m6" value="verify all Pods READY,&#xa;no in-progress drain,&#xa;provider health-port evidence OK" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.2485;entryX=0;entryY=0.1837;" edge="1" parent="1" source="supervisor" target="act1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m7" value="helm upgrade --wait&#xa;(no --atomic)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.2788;entryX=0;entryY=0.2177;" edge="1" parent="1" source="supervisor" target="act1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m8" value="schedule + start&#xa;(surge, maxUnavailable=0)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.2517;entryX=0;entryY=0.0;" edge="1" parent="1" source="act1" target="act2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m9" value="send SIGTERM after new Pod&#xa;reaches Ready + minReadySeconds" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.2857;entryX=0;entryY=0.0;" edge="1" parent="1" source="act1" target="act3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="note10" value="loop: for each old Pod being replaced" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="470" y="630" width="289" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="m11" value="assert at most one&#xa;old Pod Terminating" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.4061;entryX=0;entryY=0.3605;" edge="1" parent="1" source="supervisor" target="act1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m12" value="drain via PreStop&#xa;(see PreStop sequence diagram)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.1524;entryX=1;entryY=0.181;" edge="1" parent="1" source="act3" target="act3">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="1230" y="760"/><mxPoint x="1230" y="790"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m13" value="write persisted DrainResult&#xa;(structured termination message /&#xa;Pod Condition)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=1;exitY=0.219;entryX=0;entryY=0.0;" edge="1" parent="1" source="act3" target="act4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m14" value="read confirmed drain result&#xa;(NOT the last metrics scrape alone)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.5091;entryX=0;entryY=0.061;" edge="1" parent="1" source="supervisor" target="act4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="note15" value="alt: store read/write fails, stale, or query timeout" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="470" y="910" width="300" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="m16" value="fail-closed:&#xa;pause rollout" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.5758;entryX=0.5;entryY=0.5939;" edge="1" parent="1" source="supervisor" target="supervisor">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="510" y="990"/><mxPoint x="510" y="1020"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="note17" value="else: forced == true AND accepted_sends &gt; 0" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="470" y="1040" width="300" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="m18" value="kubectl rollout pause&#xa;(possible real send loss)" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.6545;entryX=0;entryY=0.6395;" edge="1" parent="1" source="supervisor" target="act1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="note19" value="else: forced == true AND accepted_sends == 0" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="470" y="1150" width="300" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="m20" value="warn + record,&#xa;continue rollout" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.7212;entryX=0.5;entryY=0.7394;" edge="1" parent="1" source="supervisor" target="supervisor">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="510" y="1230"/><mxPoint x="510" y="1260"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="note21" value="else: DRAINED cleanly" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="470" y="1280" width="177" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="m22" value="proceed to next Pod" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.8;entryX=0.5;entryY=0.8182;" edge="1" parent="1" source="supervisor" target="supervisor">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="510" y="1360"/><mxPoint x="510" y="1390"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="note23" value="end alt" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="470" y="1410" width="120" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="note24" value="end loop" style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="470" y="1470" width="120" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="m25" value="post-rollout check:&#xa;all Pods READY, NLB targets healthy,&#xa;no forced/late-connection increase" style="html=1;verticalAlign=bottom;endArrow=block;curved=0;rounded=0;exitX=0.5;exitY=0.9152;entryX=0;entryY=0.932;" edge="1" parent="1" source="supervisor" target="act1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="m26" value="rollout complete&#xa;or paused with reason" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;curved=0;rounded=0;strokeColor=#999999;fontColor=#999999;exitX=0.5;exitY=0.9455;entryX=0.5;entryY=0.9455;" edge="1" parent="1" source="supervisor" target="operator">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

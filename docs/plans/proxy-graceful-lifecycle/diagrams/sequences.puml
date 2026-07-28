@@ -1,0 +1,260 @@
+@startuml
+title "PreStop drain full chain (spec §3.6 + §3.2)"
+actor kubelet
+participant "mqproxyctl\n(PreStop)" as CLI
+participant "ProxyAdminServer\n(8082, loopback)" as Admin
+participant "ProxyLifecycleCoordinator" as Coord
+participant "NLB / EndpointSlice" as LB
+
+kubelet -> CLI : exec PreStop\n./mqproxyctl drain --wait --timeout 480s
+CLI -> Admin : POST /drain
+Admin -> Coord : beginDrain(PRESTOP)
+Coord --> Admin : DrainRun (drainId, cutoffs)
+Admin --> CLI : 202 { drainId, cutoffs }
+
+par
+  Coord -> Coord : T0 -> QUIESCING\nreadiness fails
+  Coord -> LB : (observed) EndpointSlice / target\nderegistration begins
+else
+  CLI -> Admin : poll GET /drain/{drainId}
+  Admin --> CLI : 200 { phase: QUIESCING, ... }
+end
+
+Coord -> Coord : lbCutoff -> MIGRATING\n(reject/count late transport)
+Coord -> Coord : migrationCutoff -> DRAINING\n(close admission, freeze intake)
+Coord -> Coord : wait accepted_inflight_zero\n(dual-terminal accounting)
+
+alt reached before hardDeadline
+  Coord -> Coord : DRAINED
+else hardDeadline exceeded
+  Coord -> Coord : FORCE_DRAINING (forced close)
+end
+
+CLI -> Admin : poll GET /drain/{drainId}
+Admin --> CLI : 200 { phase: DRAINED | FORCE_DRAINING }
+CLI --> kubelet : exit 0 (DRAINED)\nor non-zero (FORCE_DRAINING)
+
+note over LB
+  NLB 450s deregistration / connection-drain
+  runs in parallel with the Proxy clock from
+  the moment readiness / target is removed —
+  never serialized after podGrace.
+end note
+@enduml
+
+@startuml
+title "gRPC double-GOAWAY drain (spec §9.2 + §3.4)"
+participant "ProxyLifecycleCoordinator" as Coord
+participant "GrpcDrainAdapter" as Adapter
+participant "GrpcServer" as GrpcServer
+participant "io.grpc.Server\n(grpc-java built-in)" as Server
+participant "GrpcActiveCallRegistry" as Registry
+participant "Client (5.0.7 / 5.2.1 / 5.3.2+)" as Client
+
+Coord -> Adapter : enter DRAINING\nstopAcceptingNewRpcs()
+Adapter -> GrpcServer : initiateServerDrain()
+GrpcServer -> Server : shutdown()\n(once-only CAS, non-blocking)
+
+Server -> Client : GOAWAY(lastStreamId=MAX, NO_ERROR)
+Client -> Client : stop creating new streams\non this transport
+Server -> Client : PING(0x97ACEF001)
+Client --> Server : PING_ACK
+note right : or 10s fallback if no ACK
+Server -> Client : GOAWAY(lastStreamCreated, NO_ERROR)
+note right : freezes highest stream id\nthe server actually accepted
+
+Adapter -> Adapter : wait no_new_work_reached\n(this protocol's evidence)
+Coord -> Coord : last protocol reaches\nno_new_work_reached ->\nSendDrainGate.closeAdmission()
+Adapter -> Adapter : wait grpcOpenSendRpcs == 0
+
+Adapter -> Registry : closeAll(GrpcDrainStatusPolicy)
+Registry -> Client : Telemetry stream -> Status.OK\n(normal completion)
+Registry -> Client : ReceiveMessage / other streaming\n-> UNAVAILABLE "[PROXY_DRAINING] reconnect"
+Client -> Client : Telemetry: 1s observer renewal,\nresend Settings (no error log)
+Client -> Client : ReceiveMessage: reconnect\nelsewhere via stable NLB address
+
+Adapter -> Registry : wait grpcOpenDrainableCalls == 0
+Adapter -> GrpcServer : awaitServerTermination(effectiveDeadline)
+GrpcServer -> Server : awaitTermination(remaining)
+
+alt terminated in time
+  GrpcServer --> Adapter : true
+  Adapter --> Coord : normal DrainResult
+else timeout / interrupted
+  GrpcServer -> Server : shutdownNow() (once-only)
+  GrpcServer --> Adapter : forced=true, cause
+  Adapter --> Coord : forced DrainResult
+end
+@enduml
+
+@startuml
+title "Remoting lease-driven GO_AWAY migration (spec §3.3 + §9.4)"
+participant "Client (Remoting >V5_3_1)" as Client
+participant "NettyRemotingServer" as Server
+participant "RemotingSendLifecycleListener" as Listener
+participant "Stable NLB address" as NLB
+
+Client -> NLB : connect
+NLB -> Server : new Channel
+Server -> Server : onChannelActive():\nassign lease 270-330s\n(jitter, monotonic deadline)
+
+Client -> Server : SEND_MESSAGE (acknowledged, non-oneway)
+Server -> Listener : beforeEnqueue(channel, request)
+Listener --> Server : accepted (lease not expired, gate OPEN)
+Server -> Client : normal response
+
+... lease deadline reached, channel otherwise idle or next request arrives ...
+
+Client -> Server : SEND_MESSAGE
+Server -> Listener : beforeEnqueue(channel, request)
+Listener --> Server : GO_AWAY\n(lease expired, clientVersion > V5_3_1,\nrequest NOT dispatched to Broker)
+Server -> Client : GO_AWAY response
+
+Client -> Client : transport-layer reconnect\n(one replay only)
+Client -> NLB : reconnect
+NLB -> Server : may land on same or different Pod
+Client -> Server : replay SEND_MESSAGE (attempt 2)
+Server -> Listener : beforeEnqueue (new channel,\nfresh lease)
+Listener --> Server : accepted
+Server -> Client : normal response
+
+note over Client, Server
+  A second GO_AWAY on the replayed attempt
+  WOULD fail the client — this path buffers
+  exactly one migration, never correctness.
+end note
+
+note over Server
+  Idle channel with zero inflight and expired
+  lease is closed directly. Legacy clients
+  (<= V5_2_0) get SERVE_UNTIL_CUTOFF: no
+  GO_AWAY capability, served until forced close.
+end note
+@enduml
+
+@startuml
+title "Direct SIGTERM preempts PreStop (spec §8.3)"
+participant "SIGTERM (JVM shutdown hook)" as Term
+participant "ProxyRuntime" as Runtime
+participant "ProxyLifecycleCoordinator" as Coord
+participant "GrpcDrainAdapter /\nRemotingDrainAdapter" as Adapters
+participant "SendDrainGate" as Gate
+
+Term -> Runtime : shutdown(SIGTERM_FALLBACK)
+Runtime -> Coord : beginDrain(SIGTERM_FALLBACK)\n(join existing DrainRun if present)
+Coord --> Runtime : DrainRun (session, drainFuture)
+
+Runtime -> Runtime : CAS AtomicReference<StopRun>\n(first winner constructs StopRun)
+Runtime -> Runtime : stopDeadline =\nmin(now+jvmTimeout,\n(preStopDeadline+jvmTimeout)-now)
+
+Runtime -> Coord : escalateForStop(stopDeadline)
+Coord -> Coord : cancel pending lb/lease\nscheduled timers (phase generation)
+Coord -> Coord : fast-forward state machine\n(READY/QUIESCING/MIGRATING -> DRAINING,\nor STARTING -> FORCE_DRAINING)
+Coord -> Gate : closeAdmission() immediately\n(no 60s / 420s wait)
+Coord -> Adapters : freeze both protocols\n(same fan-out as normal drain)
+Coord --> Runtime : escalateForStop future completes\n(freeze issued)
+
+Runtime -> Runtime : await accepted_inflight_zero\nwithin min(drainDeadline, stopDeadline)
+
+alt drained before stopDeadline
+  Runtime -> Runtime : StopRun succeeds normally
+else stopDeadline exceeded
+  Runtime -> Adapters : force(stopDeadline)
+  Adapters --> Runtime : forced DrainResult
+end
+
+Runtime -> Runtime : STOPPING -> shut down\nRemoting -> gRPC Server -> TLS listener\n-> EventLoopGroups -> executors -> STOPPED
+Runtime --> Term : stopFuture completes,\nhook join() returns
+Term -> Term : JVM exits
+
+note over Runtime
+  If TERM bypasses/interrupts an in-progress
+  PreStop drain, it must NOT wait for the
+  60s lbCutoff or 420s migrationCutoff —
+  it closes admission and freezes both
+  protocols on the very first scheduler tick.
+end note
+@enduml
+
+@startuml
+title "Runtime construction and startup order (spec §8.2)"
+participant "ProxyStartup.main" as Main
+participant "ProxyRuntimeFactory" as Factory
+participant "ConstructionScope" as Scope
+participant "ProxyRuntime" as Runtime
+
+Main -> Main : parseCommandLineArgument(args)
+Main -> Main : initConfiguration(argument)\n-> validateGracefulLifecycle()
+Main -> Factory : create()
+
+Factory -> Scope : new ConstructionScope()
+Factory -> Scope : own("server-executor", newServerExecutor())
+Factory -> Scope : own("messaging-processor",\nbuildMessagingProcessorSafely())
+Factory -> Scope : own("grpc-server-bundle",\nbuildGrpcServerSafely(executor))
+Factory -> Scope : own("remoting-server",\nbuildRemotingSafely(processor))
+Factory -> Scope : own("admin-server", buildAdmin())
+
+alt any leaf construction throws
+  Scope -> Scope : rollback already-owned\nleaves in reverse order
+  Scope --> Factory : rethrow with rollback\nclose failures as suppressed
+  Factory --> Main : exception (runtime still null)
+  Main -> Main : forceStop(startupFailure).join()\nSystem.exit(1)
+else all leaves succeed
+  Factory -> Runtime : new ProxyRuntime(leaves...)
+  Factory -> Scope : commit()\n(ownership transferred, scope\nwon't close on exit)
+  Factory --> Main : runtime instance
+end
+
+Main -> Main : Runtime.getRuntime().addShutdownHook(\n() -> runtime.shutdown(SIGTERM).join())
+Main -> Runtime : runtime.start()
+
+Runtime -> Runtime : admin bind\n-> metrics -> TLS\n-> MessagingProcessor\n-> gRPC application -> gRPC listener\n-> Remoting listener\n-> listener contributors complete\n-> route warmup -> READY
+
+note right of Runtime
+  Local feature-off mode keeps the legacy
+  BrokerController-wrapper-first ordering
+  instead of this Cluster sequence.
+end note
+@enduml
+
+@startuml
+title "Rollout supervisor — single-Pod serialized drain (spec §4.4 + §12.7)"
+actor Operator
+participant "proxy_rollout.py\n(supervisor)" as Supervisor
+participant "kubectl / helm" as K8s
+participant "Pod N (old)" as OldPod
+participant "Pod N+1 (new)" as NewPod
+participant "Drain result store\n(Pod Condition / CRD)" as Store
+
+Operator -> Supervisor : run rollout(target chart/values)
+Supervisor -> K8s : helm template/lint + schema check
+Supervisor -> K8s : kubectl get hpa\n(assert no live HPA on target workload)
+alt live HPA found
+  Supervisor --> Operator : fail fast, abort\n(no freeze/take-over attempted)
+end
+Supervisor -> K8s : verify all Pods READY,\nno in-progress drain,\nprovider health-port evidence OK
+
+Supervisor -> K8s : helm upgrade --wait\n(no --atomic)
+K8s -> NewPod : schedule + start\n(surge, maxUnavailable=0)
+K8s -> OldPod : send SIGTERM after new Pod\nreaches Ready + minReadySeconds
+
+loop for each old Pod being replaced
+  Supervisor -> K8s : assert at most one\nold Pod Terminating
+  OldPod -> OldPod : drain via PreStop\n(see PreStop sequence diagram)
+  OldPod -> Store : write persisted DrainResult\n(structured termination message /\nPod Condition)
+  Supervisor -> Store : read confirmed drain result\n(NOT the last metrics scrape alone)
+
+  alt store read/write fails, stale, or query timeout
+    Supervisor -> Supervisor : fail-closed:\npause rollout
+  else forced == true AND accepted_sends > 0
+    Supervisor -> K8s : kubectl rollout pause\n(possible real send loss)
+  else forced == true AND accepted_sends == 0
+    Supervisor -> Supervisor : warn + record,\ncontinue rollout
+  else DRAINED cleanly
+    Supervisor -> Supervisor : proceed to next Pod
+  end
+end
+
+Supervisor -> K8s : post-rollout check:\nall Pods READY, NLB targets healthy,\nno forced/late-connection increase
+Supervisor --> Operator : rollout complete\nor paused with reason
+@enduml

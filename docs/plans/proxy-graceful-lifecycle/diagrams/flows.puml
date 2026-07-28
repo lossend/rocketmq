@@ -1,0 +1,277 @@
+@startuml
+title "Unique shutdown order — 4 milestones per protocol (spec §3.4)"
+start
+
+:QUIESCING entered\n(gate stays OPEN);
+
+fork
+  :gRPC: migration_started\n(initiateServerDrain() -> Server.shutdown()\ntriggers built-in double GOAWAY, non-blocking);
+fork again
+  :Remoting: migration_started\n(GO_AWAY per clientVersion x invocation mode,\nor close idle channel);
+end fork
+
+note right
+  Gate remains OPEN across the whole
+  migration phase. Neither protocol
+  waits for the other to start.
+end note
+
+fork
+  :gRPC: wait for no_new_work_reached\npredicate from Step-1 spike\n(double GOAWAY itself, or bounded\nquiet window if new streams still possible);
+fork again
+  :Remoting: wait for no_new_work_reached\n(freezeRequestIntake() barrier crossed);
+end fork
+
+:last protocol to reach\nno_new_work_reached triggers\nadmission_closed\n(SendDrainGate.closeAdmission(), exactly once, global);
+
+fork
+  :gRPC: wait accepted_inflight_zero\n(grpcOpenSendRpcs == 0);
+fork again
+  :Remoting: wait accepted_inflight_zero\n(remotingPendingWrites == 0);
+end fork
+
+if (all terminals reached before\neffective deadline?) then (yes)
+  :DRAINED;
+else (no)
+  :FORCE_DRAINING\n(forced close, drain marked failed);
+endif
+
+stop
+@enduml
+
+@startuml
+title "Single clock budget timeline (spec §3.6)"
+start
+:T0 = beginDrain()\nenter QUIESCING, readiness fails,\nEndpointSlice / NLB detach starts;
+:+60s -> lbCutoff\nreject any new business transport\nas late from here on;
+:+420s (60+330+30) -> migrationCutoff\nclose admission if not already closed,\nfreeze intake;
+:+450s -> drainHardDeadline\nmust reach DRAINED by here or force;
+:+480s -> preStopWait\nPreStop / HTTP drain waiter absolute cap;
+:+540s -> podGrace\nterminationGracePeriodSeconds;
+:>=600s -> rollout step budget\n(next Pod replacement not started before this);
+stop
+
+note right
+  Named budgets (must share one config source):
+  D_provider_keep >= D_app_hard + D_skew + D_safety
+  D_dependency_wait + D_app_hard + D_skew + D_safety <= D_provider_keep
+  terminationGracePeriodSeconds >= D_prestop + D_process_stop + D_safety
+
+  All of these are DERIVED from one config source,
+  never re-defaulted independently in Helm / app / PreStop / supervisor.
+end note
+@enduml
+
+@startuml
+title "Remoting beforeEnqueue admission decision (spec §9.4)"
+start
+:processor lookup;
+if (already in global shutdown?) then (yes)
+  :return existing\nversioned GO_AWAY behavior;
+  stop
+else (no)
+endif
+
+:classify request\n(producer send code? clientVersion? invocation mode);
+
+if (lease not expired\nAND gate OPEN?) then (yes)
+  :accepted\n(bind RemotingSendLifecycle(permit));
+else (no)
+  if (lease expired AND\nclientVersion > V5_3_1 AND\nnot oneway?) then (yes)
+    :write GO_AWAY\n(do not dispatch to Broker);
+  else (no)
+    if (DRAINING or past lbCutoff\nAND clientVersion > V5_3_1?) then (yes)
+      :write GO_AWAY\n(do not dispatch);
+    else (no)
+      if (legacy client past cutoff?) then (yes)
+        :write SYSTEM_BUSY\n"[PROXY_DRAINING] retry another proxy"\nclose channel, count as degraded;
+      else (no)
+        if (channel closed before dispatch?) then (yes)
+          :tryBackendSkipped(CHANNEL_CLOSED_BEFORE_DISPATCH)\n+ protocol terminal;
+        else (no)
+          :flow-control reject\n(rejectRequest / submit reject)\n-> synthetic backend terminal;
+        endif
+      endif
+    endif
+  endif
+endif
+
+if (accepted?) then (yes)
+  :construct RequestTask\nwith RequestTaskContext;
+  :submit to executor;
+  if (submit rejected?) then (yes)
+    :task skipped,\ntracked SYSTEM_BUSY response;
+  else (no)
+    :execute -> Broker dispatch;
+  endif
+endif
+stop
+@enduml
+
+@startuml
+title "gRPC send admission decision (spec §9.2)"
+start
+:ServerStreamTracer.newServerStreamTracer\ncreates GrpcSendLifecycleHolder,\nincrements grpcOpenSendRpcs;
+:tracer.filterContext()\ninjects holder into io.grpc.Context;
+:GrpcSendLifecycleInterceptor.interceptCall\nreads holder from Context;
+
+if (non-send method?) then (yes)
+  :next.startCall() directly\n(no gate interaction);
+  stop
+else (no)
+endif
+
+if (transport marked late\n(after lbCutoff) OR\ngate already CLOSED?) then (yes)
+  :holder.tryBackendSkipped(...);
+  :close call with\nStatus.UNAVAILABLE;
+  stop
+else (no)
+endif
+
+:gate.tryAcquire();
+if (permit acquired?) then (yes)
+  :CAS-bind permit to holder;
+  :next.startCall() -> handler\n-> Broker dispatch;
+  :Future completes ->\nbackendTerminal();
+else (no, gate closed\nconcurrently)
+  :holder.tryBackendSkipped(...);
+  :close call with\nStatus.UNAVAILABLE;
+endif
+
+:streamClosed() is the only\ncanonical protocol terminal\n(decrements grpcOpenSendRpcs);
+stop
+
+note right
+  Duplicate bind attempts, missing
+  holder, or method mismatch must
+  fail loudly (Status.INTERNAL) —
+  never silently drop the permit.
+end note
+@enduml
+
+@startuml
+title "Readiness — /ready vs /ready-for-traffic (spec §8.4)"
+start
+:STARTING;
+:ReadinessBarrier evaluates\nall required contributors\n(listeners, MessagingProcessor,\nACL/TLS, NameServer sync,\nwarmup topics if configured);
+
+if (all required succeed?) then (yes)
+  :first transition\nSTARTING -> READY;
+else (no)
+  :stay NotReady,\nbackoff + retry\nuntil proxyWarmupTimeoutSeconds;
+  stop
+endif
+
+repeat
+  :contributor check tick;
+  if (failureScope == LOCAL_FATAL?) then (yes)
+    :/ready -> 503\n/ready-for-traffic -> 503\n(immediate fail-close, both endpoints);
+  else (SHARED_DEPENDENCY)
+    if (consecutive failures\n>= dependencyFailureThreshold?) then (yes)
+      :/ready -> still 200 (fail-open)\n/ready-for-traffic -> 503 (fail-close);
+    else (no)
+      :/ready -> 200\n/ready-for-traffic -> 200\n(dependency still within tolerance);
+    endif
+  endif
+
+  if (lifecycle state >= QUIESCING?) then (yes)
+    :/ready -> 503, never recovers\neven if contributors succeed again;
+    if (readyForTrafficDuringDrain == true\nAND provider spike proved safe?) then (yes)
+      :/ready-for-traffic may stay 200\nuntil admission actually closes;
+    else (no)
+      :/ready-for-traffic -> 503\n(conservative default);
+    endif
+  endif
+repeat while (not STOPPED)
+
+:STOPPED -> both endpoints 503;
+stop
+@enduml
+
+@startuml
+title "Coordinator DRAINING fan-out / fan-in (spec §8.3)"
+start
+:T0: enter QUIESCING\n(readiness fails, both adapters\nnotified, gate stays OPEN);
+:lbCutoff: enter MIGRATING\n(reject/count late transport,\nkeep waiting on existing leases);
+
+if (business transport count == 0\nbefore migrationCutoff?) then (yes)
+  :enter DRAINING early;
+else (no)
+  :migrationCutoff reached ->\nforce enter DRAINING;
+endif
+
+fork
+  :gRPC adapter:\nstopAcceptingNewRpcs()\n-> GrpcServer.initiateServerDrain();
+fork again
+  :Remoting adapter:\nfreezeRequestIntake();
+end fork
+
+fork
+  :gRPC: reach no_new_work_reached;
+fork again
+  :Remoting: reach no_new_work_reached;
+end fork
+
+:last-arriving protocol triggers\nsendDrainGate.closeAdmission()\n(single shared call);
+
+fork
+  :gRPC: await grpcOpenSendRpcs == 0;
+fork again
+  :Remoting: await remotingPendingWrites == 0;
+end fork
+
+:accepted_inflight_zero reached;
+
+:closeAll(GrpcDrainStatusPolicy)\non non-send streaming calls\n(Telemetry -> OK, others -> UNAVAILABLE);
+:close Remoting business channels;
+
+fork
+  :awaitServerTermination(effectiveDeadline);
+fork again
+  :await grpcOpenDrainableCalls == 0\nand Remoting ChannelGroup empty;
+end fork
+
+if (all conditions met before\neffective deadline?) then (yes)
+  :DRAINED;
+else (no)
+  :FORCE_DRAINING\n(force-close both protocols,\nmark this drain forced);
+endif
+stop
+@enduml
+
+@startuml
+title "Rollout / rollback flow (spec §6)"
+start
+:Canary release,\nlifecycle enabled,\nreal 5.0.7 / 5.2.1 / 5.3.2 clients,\nreal provider 8082 health check,\nsingle Pod delete verified;
+
+:Pre-scale main cluster\n(capacity inequality, not a magic\nreplica count) + confirm no live HPA;
+
+:One annotation-driven\nbootstrap rollout\n(binary + enableProxyAdminServer=true,\ncompressed into a single lossy rollout);
+
+:Verify 8082 reachable\non every existing target;
+
+if (all targets healthy on 8082?) then (yes)
+  :Explicitly enable lifecycle=true\nin production values,\nswitch HTTP probes / PreStop /\nderived budgets / NLB health check;
+else (no)
+  :Stop — do not proceed\nto strict enablement;
+  stop
+endif
+
+:Wait at least one full\nmax-lease + grace cycle;
+
+if (forced / timeout / late-connection\nmetrics show zero increase?) then (yes)
+  :Enable strict SLO,\nresume normal controlled rollout;
+else (no)
+  :Pause rollout,\nkeep existing READY Pods,\ninvestigate before retry;
+endif
+stop
+
+note right
+  On any send-SLO, connection-storm, or
+  provider-detach anomaly during rollout:
+  pause immediately, keep READY Pods,
+  roll back only to a Helm revision that
+  is binary+probe+PreStop compatible.
+  Never auto-rollback.
+end note
+@enduml

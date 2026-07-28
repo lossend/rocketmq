@@ -1,0 +1,320 @@
+<mxfile host="drawio">
+  <diagram id="sm1" name="ProxyLifecycleState (spec §3.1)">
+    <mxGraphModel dx="800" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="init1" value="" style="ellipse;whiteSpace=wrap;html=1;fillColor=#000000;strokeColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="0" y="270" width="30" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="STARTING" value="STARTING" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="70" y="260" width="140" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="READY" value="READY" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="370" y="230" width="140" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="QUIESCING" value="QUIESCING" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="670" y="170" width="140" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="MIGRATING" value="MIGRATING" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="850" y="150" width="140" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="DRAINING" value="DRAINING" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="1140" y="110" width="140" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="DRAINED" value="DRAINED" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="1550" y="110" width="140" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="STOPPING" value="STOPPING" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="1840" y="190" width="140" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="STOPPED" value="STOPPED" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="2020" y="190" width="140" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="FORCE_DRAINING" value="FORCE_DRAINING" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="1540" y="190" width="152" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="note1" value="PreStop / POST /drain waiter only ever returns&#xa;here or at FORCE_DRAINING. It never drives&#xa;STOPPING itself." style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;align=left;" vertex="1" parent="1">
+          <mxGeometry x="1030" y="0" width="362" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="note2" value="Only the SIGTERM hook or a startup-failure closer&#xa;may advance past DRAINED/FORCE_DRAINING." style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;align=left;" vertex="1" parent="1">
+          <mxGeometry x="1420" y="260" width="383" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="note3" value="All transitions are monotonic. The normal path (top&#xa;row) and the forced path (bottom row) never merge&#xa;back into each other except at STOPPING." style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;align=left;" vertex="1" parent="1">
+          <mxGeometry x="240" y="120" width="397" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="e0" value="" style="html=1;rounded=0;" edge="1" parent="1" source="init1" target="STARTING">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="30" y="280"/><mxPoint x="50" y="280"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e1" value="warmup barrier complete&#xa;readiness succeeds" style="html=1;rounded=0;" edge="1" parent="1" source="STARTING" target="READY">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="210" y="270"/><mxPoint x="360" y="270"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e2" value="beginDrain(trigger)&#xa;readiness fails immediately" style="html=1;rounded=0;" edge="1" parent="1" source="READY" target="QUIESCING">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="600" y="230"/><mxPoint x="740" y="230"/><mxPoint x="740" y="230"/><mxPoint x="740" y="230"/><mxPoint x="740" y="230"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e3" value="lbCutoff reached&#xa;(EndpointSlice/NLB detached)" style="html=1;rounded=0;" edge="1" parent="1" source="QUIESCING" target="MIGRATING">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="820" y="180"/><mxPoint x="840" y="180"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e4" value="migrationCutoff reached&#xa;or business transport == 0" style="html=1;rounded=0;" edge="1" parent="1" source="MIGRATING" target="DRAINING">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="990" y="150"/><mxPoint x="1130" y="150"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e5" value="admission closed&#xa;+ accepted_inflight_zero&#xa;+ transports terminated" style="html=1;rounded=0;" edge="1" parent="1" source="DRAINING" target="DRAINED">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1280" y="140"/><mxPoint x="1530" y="140"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e6" value="SIGTERM / shutdown()" style="html=1;rounded=0;" edge="1" parent="1" source="DRAINED" target="STOPPING">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1770" y="130"/><mxPoint x="1910" y="130"/><mxPoint x="1910" y="130"/><mxPoint x="1910" y="130"/><mxPoint x="1910" y="180"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e7" value="" style="html=1;rounded=0;" edge="1" parent="1" source="STOPPING" target="STOPPED">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1980" y="210"/><mxPoint x="2010" y="210"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e8" value="deadline exceeded /&#xa;startup failure" style="html=1;rounded=0;" edge="1" parent="1" source="STARTING" target="FORCE_DRAINING">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="140" y="240"/><mxPoint x="140" y="220"/><mxPoint x="140" y="220"/><mxPoint x="140" y="220"/><mxPoint x="1530" y="220"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e9" value="deadline exceeded" style="html=1;rounded=0;" edge="1" parent="1" source="READY" target="FORCE_DRAINING">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="510" y="240"/><mxPoint x="1530" y="240"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e10" value="deadline exceeded" style="html=1;rounded=0;" edge="1" parent="1" source="QUIESCING" target="FORCE_DRAINING">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="820" y="210"/><mxPoint x="1530" y="210"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e11" value="deadline exceeded" style="html=1;rounded=0;" edge="1" parent="1" source="MIGRATING" target="FORCE_DRAINING">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="990" y="190"/><mxPoint x="1530" y="190"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e12" value="hard deadline exceeded" style="html=1;rounded=0;" edge="1" parent="1" source="DRAINING" target="FORCE_DRAINING">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1210" y="170"/><mxPoint x="1210" y="190"/><mxPoint x="1210" y="190"/><mxPoint x="1210" y="190"/><mxPoint x="1530" y="190"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e13" value="forced close done" style="html=1;rounded=0;" edge="1" parent="1" source="FORCE_DRAINING" target="STOPPING">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1690" y="200"/><mxPoint x="1830" y="200"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e14" value="" style="html=1;endArrow=none;dashed=1;strokeColor=#d6b656;" edge="1" parent="1" source="note1" target="DRAINED">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1330" y="110"/><mxPoint x="1330" y="120"/><mxPoint x="1330" y="120"/><mxPoint x="1330" y="120"/><mxPoint x="1530" y="120"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e15" value="" style="html=1;endArrow=none;dashed=1;strokeColor=#d6b656;" edge="1" parent="1" source="note2" target="STOPPING">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1750" y="240"/><mxPoint x="1750" y="220"/><mxPoint x="1750" y="220"/><mxPoint x="1750" y="220"/><mxPoint x="1830" y="220"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e16" value="" style="html=1;endArrow=none;dashed=1;strokeColor=#d6b656;" edge="1" parent="1" source="note3" target="QUIESCING">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="640" y="190"/><mxPoint x="660" y="190"/></Array></mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="sm2" name="SendPermit - backend state (spec §9.1)">
+    <mxGraphModel dx="800" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="init2" value="" style="ellipse;whiteSpace=wrap;html=1;fillColor=#000000;strokeColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="190" y="80" width="30" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="NOT_STARTED" value="NOT_STARTED" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="590" y="110" width="140" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="STARTED" value="STARTED" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="900" y="30" width="140" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="TERMINAL" value="TERMINAL" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="30" width="140" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="SKIPPED" value="SKIPPED" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="900" y="110" width="140" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="note4" value="Once STARTED, cancel/close must wait for the real&#xa;Broker Future terminal - it can NOT be short-circuited&#xa;to SKIPPED or a synthetic terminal." style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;align=left;" vertex="1" parent="1">
+          <mxGeometry x="450" y="0" width="418" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="note5" value="backendTerminal() called while still NOT_STARTED or&#xa;SKIPPED is an invariant violation - must fail loudly,&#xa;not silently patch." style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;align=left;" vertex="1" parent="1">
+          <mxGeometry x="0" y="130" width="411" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="e0" value="" style="html=1;rounded=0;" edge="1" parent="1" source="init2" target="NOT_STARTED">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="210" y="110"/><mxPoint x="210" y="120"/><mxPoint x="210" y="120"/><mxPoint x="210" y="120"/><mxPoint x="570" y="120"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e1" value="backendStarted()&#xa;CAS wins" style="html=1;rounded=0;" edge="1" parent="1" source="NOT_STARTED" target="STARTED">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="790" y="120"/><mxPoint x="880" y="120"/><mxPoint x="880" y="120"/><mxPoint x="880" y="120"/><mxPoint x="880" y="60"/><mxPoint x="880" y="60"/><mxPoint x="880" y="60"/><mxPoint x="890" y="60"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e2" value="backendTerminal(cause)&#xa;Broker Future completes" style="html=1;rounded=0;" edge="1" parent="1" source="STARTED" target="TERMINAL">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1040" y="50"/><mxPoint x="1070" y="50"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e3" value="tryBackendSkipped(reason)&#xa;CAS wins (cancel/reject&#xa;before dispatch)" style="html=1;rounded=0;" edge="1" parent="1" source="NOT_STARTED" target="SKIPPED">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="730" y="140"/><mxPoint x="890" y="140"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e4" value="backendTerminal() re-entry&#xa;(idempotent no-op)" style="html=1;rounded=0;" edge="1" parent="1" source="TERMINAL" target="TERMINAL">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1070" y="60"/><mxPoint x="1060" y="60"/><mxPoint x="1060" y="60"/><mxPoint x="1060" y="60"/><mxPoint x="1060" y="90"/><mxPoint x="1060" y="90"/><mxPoint x="1060" y="90"/><mxPoint x="1240" y="90"/><mxPoint x="1240" y="90"/><mxPoint x="1240" y="90"/><mxPoint x="1240" y="60"/><mxPoint x="1240" y="60"/><mxPoint x="1240" y="60"/><mxPoint x="1230" y="60"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e5" value="" style="html=1;endArrow=none;dashed=1;strokeColor=#d6b656;" edge="1" parent="1" source="note4" target="STARTED">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="870" y="50"/><mxPoint x="890" y="50"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e6" value="" style="html=1;endArrow=none;dashed=1;strokeColor=#d6b656;" edge="1" parent="1" source="note5" target="NOT_STARTED">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="410" y="140"/><mxPoint x="570" y="140"/></Array></mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="sm3" name="SendPermit - protocol terminal &amp; release (spec §9.1)">
+    <mxGraphModel dx="800" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="init3" value="" style="ellipse;whiteSpace=wrap;html=1;fillColor=#000000;strokeColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="0" y="10" width="30" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="OPEN3" value="protocol: OPEN" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="70" y="0" width="152" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="PTERM" value="protocol: TERMINAL" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="370" y="0" width="184" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="RELEASED" value="RELEASED" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="700" y="50" width="140" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="note6" value="Release is the AND of two independently tracked&#xa;terminals. Transport-level callbacks (cancel, channel&#xa;close) may only mark the protocol side - never assume&#xa;they also finish the backend side." style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;align=left;" vertex="1" parent="1">
+          <mxGeometry x="250" y="70" width="411" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="e0" value="" style="html=1;rounded=0;" edge="1" parent="1" source="init3" target="OPEN3">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="30" y="20"/><mxPoint x="50" y="20"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e1" value="protocolTerminal(result)&#xa;(gRPC streamClosed /&#xa;Remoting ChannelFuture terminal)" style="html=1;rounded=0;" edge="1" parent="1" source="OPEN3" target="PTERM">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="220" y="20"/><mxPoint x="360" y="20"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e2" value="backend ∈ {TERMINAL, SKIPPED}&#xa;&amp;&amp; protocol == TERMINAL&#xa;(CAS once-only, decrements gate)" style="html=1;rounded=0;" edge="1" parent="1" source="PTERM" target="RELEASED">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="640" y="20"/><mxPoint x="770" y="20"/><mxPoint x="770" y="20"/><mxPoint x="770" y="20"/><mxPoint x="770" y="40"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e3" value="" style="html=1;endArrow=none;dashed=1;strokeColor=#d6b656;" edge="1" parent="1" source="note6" target="RELEASED">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="670" y="80"/><mxPoint x="690" y="80"/></Array></mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="sm4" name="SendDrainGate (spec §9.1) - packed AtomicLong: close-bit + accepted count">
+    <mxGraphModel dx="800" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="init4" value="" style="ellipse;whiteSpace=wrap;html=1;fillColor=#000000;strokeColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="170" y="0" width="30" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="OPEN4" value="OPEN (accepted = N)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="500" y="20" width="192" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="CLOSED4" value="CLOSED (accepted = N)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="930" y="70" width="208" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="DRAINED4" value="DRAINED (accepted = 0)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="1260" y="110" width="216" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="note7" value="tryAcquire() after the close bit is set always&#xa;returns empty - never produces a late permit." style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;align=left;" vertex="1" parent="1">
+          <mxGeometry x="0" y="50" width="362" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="note8" value="Permits acquired before closeAdmission() are already&#xa;counted in &quot;accepted&quot; and must still be released&#xa;normally." style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;align=left;" vertex="1" parent="1">
+          <mxGeometry x="400" y="90" width="404" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="note9" value="accepted count is fail-fast bounded; it must never&#xa;overflow into the close bit." style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;align=left;" vertex="1" parent="1">
+          <mxGeometry x="840" y="140" width="390" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="e0" value="" style="html=1;rounded=0;" edge="1" parent="1" source="init4" target="OPEN4">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="180" y="40"/><mxPoint x="180" y="40"/><mxPoint x="180" y="40"/><mxPoint x="180" y="40"/><mxPoint x="490" y="40"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e1" value="tryAcquire() CAS success&#xa;accepted += 1" style="html=1;rounded=0;" edge="1" parent="1" source="OPEN4" target="OPEN4">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="470" y="70"/><mxPoint x="450" y="70"/><mxPoint x="450" y="70"/><mxPoint x="450" y="70"/><mxPoint x="450" y="80"/><mxPoint x="450" y="80"/><mxPoint x="450" y="80"/><mxPoint x="750" y="80"/><mxPoint x="750" y="80"/><mxPoint x="750" y="80"/><mxPoint x="750" y="50"/><mxPoint x="750" y="50"/><mxPoint x="750" y="50"/><mxPoint x="710" y="50"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e2" value="closeAdmission() CAS&#xa;(sets close bit, no new permits)" style="html=1;rounded=0;" edge="1" parent="1" source="OPEN4" target="CLOSED4">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="600" y="80"/><mxPoint x="600" y="90"/><mxPoint x="600" y="90"/><mxPoint x="600" y="90"/><mxPoint x="920" y="90"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e3" value="permit.release()&#xa;accepted -= 1" style="html=1;rounded=0;" edge="1" parent="1" source="CLOSED4" target="CLOSED4">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="900" y="110"/><mxPoint x="880" y="110"/><mxPoint x="880" y="110"/><mxPoint x="880" y="110"/><mxPoint x="880" y="130"/><mxPoint x="880" y="130"/><mxPoint x="880" y="130"/><mxPoint x="1180" y="130"/><mxPoint x="1180" y="130"/><mxPoint x="1180" y="130"/><mxPoint x="1180" y="110"/><mxPoint x="1180" y="110"/><mxPoint x="1180" y="110"/><mxPoint x="1150" y="110"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e4" value="accepted reaches 0&#xa;(completes drainedFuture)" style="html=1;rounded=0;" edge="1" parent="1" source="CLOSED4" target="DRAINED4">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1140" y="110"/><mxPoint x="1250" y="110"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e5" value="" style="html=1;endArrow=none;dashed=1;strokeColor=#d6b656;" edge="1" parent="1" source="note7" target="OPEN4">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="360" y="60"/><mxPoint x="490" y="60"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e6" value="" style="html=1;endArrow=none;dashed=1;strokeColor=#d6b656;" edge="1" parent="1" source="note8" target="CLOSED4">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="800" y="100"/><mxPoint x="920" y="100"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e7" value="" style="html=1;endArrow=none;dashed=1;strokeColor=#d6b656;" edge="1" parent="1" source="note9" target="DRAINED4">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1230" y="150"/><mxPoint x="1250" y="150"/></Array></mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="sm5" name="GrpcActiveCall (spec §9.2) - non-unary drain lifecycle">
+    <mxGraphModel dx="800" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="init5" value="" style="ellipse;whiteSpace=wrap;html=1;fillColor=#000000;strokeColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="0" y="120" width="30" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="OPEN5" value="OPEN" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="190" y="110" width="140" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="INTENT" value="CLOSE_INTENT_SENT" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="600" y="50" width="176" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="TERM5" value="TERMINAL" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="920" y="110" width="140" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="note10" value="Close intent only blocks further outbound writes.&#xa;The call stays registered - open count is NOT&#xa;decremented here." style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;align=left;" vertex="1" parent="1">
+          <mxGeometry x="70" y="0" width="383" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="note11" value="Only the wrapped listener's onComplete/onCancel is&#xa;canonical terminal. ServerCall.close() returning is&#xa;NOT proof of terminal." style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;align=left;" vertex="1" parent="1">
+          <mxGeometry x="480" y="160" width="397" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="e0" value="" style="html=1;rounded=0;" edge="1" parent="1" source="init5" target="OPEN5">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="30" y="130"/><mxPoint x="180" y="130"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e1" value="closeAll(policy)&#xa;Telemetry -&gt; Status.OK&#xa;other streaming -&gt; UNAVAILABLE" style="html=1;rounded=0;" edge="1" parent="1" source="OPEN5" target="INTENT">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="260" y="100"/><mxPoint x="260" y="100"/><mxPoint x="260" y="100"/><mxPoint x="260" y="100"/><mxPoint x="580" y="100"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e2" value="wrapped listener&#xa;onComplete() / onCancel()" style="html=1;rounded=0;" edge="1" parent="1" source="INTENT" target="TERM5">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="860" y="80"/><mxPoint x="990" y="80"/><mxPoint x="990" y="80"/><mxPoint x="990" y="80"/><mxPoint x="990" y="100"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e3" value="wrapped listener&#xa;onComplete() / onCancel()&#xa;(no drain close involved)" style="html=1;rounded=0;" edge="1" parent="1" source="OPEN5" target="TERM5">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="330" y="120"/><mxPoint x="910" y="120"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e4" value="" style="html=1;endArrow=none;dashed=1;strokeColor=#d6b656;" edge="1" parent="1" source="note10" target="INTENT">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="450" y="70"/><mxPoint x="580" y="70"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e5" value="" style="html=1;endArrow=none;dashed=1;strokeColor=#d6b656;" edge="1" parent="1" source="note11" target="TERM5">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="830" y="150"/><mxPoint x="830" y="140"/><mxPoint x="830" y="140"/><mxPoint x="830" y="140"/><mxPoint x="910" y="140"/></Array></mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="sm6" name="RequestTask (spec §9.3)">
+    <mxGraphModel dx="800" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="init6" value="" style="ellipse;whiteSpace=wrap;html=1;fillColor=#000000;strokeColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="170" y="20" width="30" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="CREATED" value="CREATED" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="410" y="50" width="140" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="RUNNING" value="RUNNING" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="590" y="20" width="140" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="STOPPED6" value="STOPPED" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="590" y="90" width="140" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="note12" value="Only one of run()/stop() can win the CAS from&#xa;CREATED. Whichever loses must not re-attempt the&#xa;transition or double-report state." style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#fff2cc;strokeColor=#d6b656;align=left;" vertex="1" parent="1">
+          <mxGeometry x="0" y="70" width="376" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="e0" value="" style="html=1;rounded=0;" edge="1" parent="1" source="init6" target="CREATED">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="190" y="60"/><mxPoint x="190" y="60"/><mxPoint x="190" y="60"/><mxPoint x="190" y="60"/><mxPoint x="400" y="60"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e1" value="run()&#xa;CAS CREATED -&gt; RUNNING wins&#xa;(installs scope, calls taskStarted())" style="html=1;rounded=0;" edge="1" parent="1" source="CREATED" target="RUNNING">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="550" y="60"/><mxPoint x="580" y="60"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e2" value="stop(reason)&#xa;CAS CREATED -&gt; STOPPED wins&#xa;(writes taskSkipped(reason))" style="html=1;rounded=0;" edge="1" parent="1" source="CREATED" target="STOPPED6">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="550" y="90"/><mxPoint x="580" y="90"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e3" value="stop(reason) called&#xa;after RUNNING - CAS fails,&#xa;no-op (task already dispatched)" style="html=1;rounded=0;" edge="1" parent="1" source="RUNNING" target="RUNNING">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="580" y="60"/><mxPoint x="570" y="60"/><mxPoint x="570" y="60"/><mxPoint x="570" y="60"/><mxPoint x="570" y="80"/><mxPoint x="570" y="80"/><mxPoint x="570" y="80"/><mxPoint x="750" y="80"/><mxPoint x="750" y="80"/><mxPoint x="750" y="80"/><mxPoint x="750" y="40"/><mxPoint x="750" y="40"/><mxPoint x="750" y="40"/><mxPoint x="740" y="40"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e4" value="" style="html=1;endArrow=none;dashed=1;strokeColor=#d6b656;" edge="1" parent="1" source="note12" target="CREATED">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="380" y="90"/><mxPoint x="400" y="90"/></Array></mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
