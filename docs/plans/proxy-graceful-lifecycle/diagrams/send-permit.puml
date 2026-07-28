@@ -1,0 +1,199 @@
+@startuml
+title "SendPermit — dual-terminal AND-join (packed AtomicInteger)"
+hide empty description
+
+state "SendPermit.state : AtomicInteger" as PERMIT {
+  state "backend: NOT_STARTED" as NOT_STARTED
+  state "backend: STARTED" as STARTED
+  state "backend: TERMINAL" as B_TERMINAL
+  state "backend: SKIPPED" as SKIPPED
+
+  [*] --> NOT_STARTED
+  NOT_STARTED --> STARTED : backendStarted() CAS wins\n(worker thread, before Broker call)
+  STARTED --> B_TERMINAL : backendTerminal(cause)\nBroker future completed
+  NOT_STARTED --> SKIPPED : tryBackendSkipped(reason)\nnever dispatched to Broker
+  B_TERMINAL --> B_TERMINAL : re-entry is an idempotent no-op
+  --
+  state "protocol: OPEN" as OPEN
+  state "protocol: TERMINAL" as P_TERMINAL
+
+  [*] --> OPEN
+  OPEN --> P_TERMINAL : protocolTerminal(result)\ngRPC streamClosed /\nRemoting write terminal
+  P_TERMINAL --> P_TERMINAL : re-entry is an idempotent no-op
+}
+
+state "RELEASED  (bit 3)" as RELEASED
+
+PERMIT --> RELEASED : maybeRelease() CAS wins\nbackend in {TERMINAL, SKIPPED}\nAND protocol == TERMINAL
+
+RELEASED --> [*] : onRelease.run()\n-> SendDrainGate accepted -= 1\ncompletion.complete(null)
+
+note as REGIONS
+  <b>backend region</b> — "did the Broker call finish?"
+  STARTED can only leave via the real Broker
+  future. It must never be short-circuited to
+  SKIPPED or a synthetic terminal.
+
+  <b>protocol region</b> — "did the client-facing
+  stream finish?" Written once, by the transport,
+  from the tracer's streamClosed.
+end note
+
+note bottom of RELEASED
+  The two regions advance independently
+  and in any order. Only the AND of both
+  releases the permit, and only the
+  winning CAS decrements the gate — so
+  the gate count can never be double-
+  decremented nor leaked.
+end note
+@enduml
+
+@startuml
+title "SendPermit — happy path: both terminals, backend first"
+autonumber
+
+participant "gRPC transport" as T
+participant "StreamTracerFactory\n+ Holder" as TR
+participant "LifecycleInterceptor" as IC
+participant "SendDrainGate" as G
+participant "SendPermit" as P
+participant "MessagingApplication\n(service thread)" as APP
+participant "LifecycleMessagingActivity\n(worker thread)" as ACT
+participant "Broker" as BK
+
+T -> TR : newServerStreamTracer(SendMessage)
+activate TR
+TR -> TR : openSendRpcs += 1\nnew GrpcSendLifecycleHolder
+TR --> T : filterContext(): holder into gRPC Context
+deactivate TR
+
+T -> IC : interceptCall()
+activate IC
+IC -> G : tryAcquire(GRPC)
+activate G
+G -> G : CAS: accepted += 1
+G -> P **: new SendPermit(onRelease = gate::onPermitReleased)
+note right of P : backend = NOT_STARTED\nprotocol = OPEN
+G --> IC : Optional[permit]
+deactivate G
+IC -> TR : holder.bindPermit(permit)  // CAS, once only
+IC --> T : next.startCall()
+deactivate IC
+
+T -> APP : sendMessage(request)
+activate APP
+APP -> APP : requestPipeline.execute()\nSendLifecycleBindPipeline copies\npermit onto ProxyContext
+APP -> APP : validateContext() ok
+APP -> ACT : executor.submit(GrpcTask)
+deactivate APP
+
+activate ACT
+ACT -> P : backendStarted()
+P --> ACT : true  (NOT_STARTED -> STARTED)
+ACT -> BK : delegate.sendMessage()
+activate BK
+BK --> ACT : future completes
+deactivate BK
+ACT -> P : backendTerminal(throwable)
+activate P
+P -> P : backend = TERMINAL\nmaybeRelease: protocol still OPEN -> no release
+deactivate P
+ACT -> T : writeResponse() -> onNext / onCompleted
+deactivate ACT
+
+T -> TR : streamClosed(status)
+activate TR
+TR -> P : onStreamClosed -> tryBackendSkipped()
+P --> TR : false (already TERMINAL — expected)
+TR -> P : protocolTerminal(success)
+activate P
+P -> P : protocol = TERMINAL\nmaybeRelease: AND satisfied -> RELEASED
+P -> G : onPermitReleased()
+activate G
+G -> G : CAS: accepted -= 1\nif closed && accepted == 0 -> drainedFuture.complete()
+deactivate G
+deactivate P
+TR -> TR : openSendRpcs -= 1
+deactivate TR
+@enduml
+
+@startuml
+title "SendPermit — skip path: sync validation throws before dispatch"
+autonumber
+
+participant "gRPC transport" as T
+participant "StreamTracerFactory\n+ Holder" as TR
+participant "SendDrainGate" as G
+participant "SendPermit" as P
+participant "MessagingApplication\n(service thread)" as APP
+participant "Broker" as BK
+
+note over T, P
+  Tracer + interceptor ran exactly as in the happy path:
+  the gate already counted this send (accepted += 1) and
+  the permit is bound to the holder.
+end note
+
+T -> APP : sendMessage(request)
+activate APP
+APP -> APP : requestPipeline.execute()\npermit copied onto ProxyContext
+APP -> APP : validateContext() throws\n(e.g. CLIENT_ID_REQUIRED)
+note right of APP
+  Thrown BEFORE executor.submit(), so no
+  worker thread ever runs. Nobody will
+  ever call backendStarted().
+end note
+APP -> P : markSendSkipped -> tryBackendSkipped(SYNC_VALIDATION)
+activate P
+P -> P : backend = SKIPPED\nmaybeRelease: protocol still OPEN -> no release
+deactivate P
+APP -> T : writeResponse(error status)
+deactivate APP
+
+BK -[#gray]-> BK : never called
+
+T -> TR : streamClosed(status)
+activate TR
+TR -> P : protocolTerminal(failure)
+activate P
+P -> P : protocol = TERMINAL\nAND satisfied -> RELEASED
+P -> G : onPermitReleased() -> accepted -= 1
+deactivate P
+deactivate TR
+
+note over P, G
+  Without markSendSkipped the backend region would stay
+  NOT_STARTED forever, the AND would never be satisfied,
+  and the gate count would never reach zero — QUIESCING
+  would hang until the hard deadline force-kills it.
+end note
+@enduml
+
+@startuml
+title "No permit at all — gate already closed"
+autonumber
+
+participant "gRPC transport" as T
+participant "StreamTracerFactory\n+ Holder" as TR
+participant "LifecycleInterceptor" as IC
+participant "SendDrainGate" as G
+
+T -> TR : newServerStreamTracer(SendMessage)
+TR -> TR : openSendRpcs += 1\nnew holder (no permit yet)
+
+T -> IC : interceptCall()
+activate IC
+IC -> G : tryAcquire(GRPC)
+G --> IC : Optional.empty()  // closed bit set
+note right of G : accepted count untouched —\nthis send was never admitted
+IC -> TR : holder.rejectBeforeAdmission(GATE_CLOSED)
+IC -> T : call.close(UNAVAILABLE, "draining")
+note right of IC : handler never invoked, so\nSendLifecycleBindPipeline sees\nholder.hasPermit() == false and\nleaves ProxyContext empty
+deactivate IC
+
+T -> TR : streamClosed(status)
+activate TR
+TR -> TR : onStreamClosed: permit == null -> return\nopenSendRpcs -= 1
+deactivate TR
+@enduml
