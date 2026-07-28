@@ -18,6 +18,8 @@
 package org.apache.rocketmq.proxy.lifecycle.grpc;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.rocketmq.proxy.lifecycle.DrainProtocolAdapter;
 import org.apache.rocketmq.proxy.lifecycle.SendProtocol;
@@ -46,16 +48,28 @@ public final class GrpcDrainAdapter implements DrainProtocolAdapter {
     private final PhasedGrpcServer server;
     private final GrpcActiveCallRegistry registry;
     private final GrpcDrainStatusPolicy policy;
+    private final Executor terminationExecutor;
 
     private final AtomicBoolean migrationStarted = new AtomicBoolean(false);
     private final AtomicBoolean forced = new AtomicBoolean(false);
     private final CompletableFuture<Void> noNewWork = new CompletableFuture<>();
 
+    /**
+     * @deprecated supply a managed termination executor so blocking server waits
+     *             have an explicit owner.
+     */
+    @Deprecated
     public GrpcDrainAdapter(PhasedGrpcServer server, GrpcActiveCallRegistry registry,
         GrpcDrainStatusPolicy policy) {
+        this(server, registry, policy, ForkJoinPool.commonPool());
+    }
+
+    public GrpcDrainAdapter(PhasedGrpcServer server, GrpcActiveCallRegistry registry,
+        GrpcDrainStatusPolicy policy, Executor terminationExecutor) {
         this.server = server;
         this.registry = registry;
         this.policy = policy;
+        this.terminationExecutor = terminationExecutor;
     }
 
     @Override
@@ -80,7 +94,7 @@ public final class GrpcDrainAdapter implements DrainProtocolAdapter {
     @Override
     public CompletableFuture<Void> awaitTerminated(ShutdownDeadline effectiveDeadline) {
         registry.closeAll(policy);
-        return registry.drainedFuture().thenCompose(ignored -> {
+        return registry.drainedFuture().thenComposeAsync(ignored -> {
             CompletableFuture<Void> done = new CompletableFuture<>();
             try {
                 if (server.awaitServerTermination(effectiveDeadline)) {
@@ -95,7 +109,7 @@ public final class GrpcDrainAdapter implements DrainProtocolAdapter {
                 Thread.currentThread().interrupt();
             }
             return done;
-        });
+        }, terminationExecutor);
     }
 
     @Override

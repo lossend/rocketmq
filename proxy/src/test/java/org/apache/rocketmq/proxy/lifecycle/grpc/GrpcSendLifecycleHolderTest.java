@@ -17,7 +17,16 @@
 
 package org.apache.rocketmq.proxy.lifecycle.grpc;
 
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import org.apache.rocketmq.proxy.lifecycle.ProtocolResult;
 import org.apache.rocketmq.proxy.lifecycle.SendDrainGate;
+import org.apache.rocketmq.proxy.lifecycle.SendLifecycleContext;
 import org.apache.rocketmq.proxy.lifecycle.SendPermit;
 import org.apache.rocketmq.proxy.lifecycle.SendProtocol;
 import org.apache.rocketmq.proxy.lifecycle.SkipReason;
@@ -48,8 +57,77 @@ public class GrpcSendLifecycleHolderTest {
         holder.bindPermit(permit);
 
         holder.onStreamClosed(true, null);
-        assertThat(permit.completionFuture()).isCompleted();
+        assertThat(permit.releasedFuture()).isCompleted();
         assertThat(gate.acceptedCount()).isZero();
+    }
+
+    @Test
+    @DisplayName("streamClosed before permit binding is latched and delivered after bind")
+    public void streamClosedBeforeBindIsDeliveredAfterBind() {
+        SendDrainGate gate = new SendDrainGate();
+        SendPermit permit = gate.tryAcquire(SendProtocol.GRPC).get();
+        GrpcSendLifecycleHolder holder = new GrpcSendLifecycleHolder();
+
+        holder.onStreamClosed(true, null);
+        assertThat(permit.releasedFuture()).isNotCompleted();
+
+        assertThat(holder.bindPermit(permit)).isTrue();
+        assertThat(permit.releasedFuture()).isCompleted();
+        assertThat(gate.acceptedCount()).isZero();
+    }
+
+    @Test
+    @DisplayName("only the first stream terminal is retained before permit binding")
+    public void firstStreamTerminalWinsBeforeBind() {
+        GrpcSendLifecycleHolder holder = new GrpcSendLifecycleHolder();
+        RecordingLifecycleContext context = new RecordingLifecycleContext();
+        RuntimeException failure = new RuntimeException("first close");
+
+        holder.onStreamClosed(false, failure);
+        holder.onStreamClosed(true, null);
+        assertThat(holder.bindPermit(context)).isTrue();
+
+        assertThat(context.backendSkippedCalls.get()).isOne();
+        assertThat(context.protocolTerminalCalls.get()).isOne();
+        assertThat(context.protocolResult.isSuccess()).isFalse();
+        assertThat(context.protocolResult.cause()).isSameAs(failure);
+    }
+
+    @Test
+    @DisplayName("concurrent bind and stream close deliver the terminal exactly once")
+    public void concurrentBindAndStreamCloseDeliverTerminalExactlyOnce() throws Exception {
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            for (int i = 0; i < 100; i++) {
+                GrpcSendLifecycleHolder holder = new GrpcSendLifecycleHolder();
+                RecordingLifecycleContext context = new RecordingLifecycleContext();
+                CountDownLatch ready = new CountDownLatch(2);
+                CountDownLatch start = new CountDownLatch(1);
+
+                Future<Boolean> bind = executor.submit(() -> {
+                    ready.countDown();
+                    start.await();
+                    return holder.bindPermit(context);
+                });
+                Future<?> close = executor.submit(() -> {
+                    ready.countDown();
+                    start.await();
+                    holder.onStreamClosed(true, null);
+                    return null;
+                });
+
+                assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+                start.countDown();
+                assertThat(bind.get(10, TimeUnit.SECONDS)).isTrue();
+                close.get(10, TimeUnit.SECONDS);
+
+                holder.onStreamClosed(false, new RuntimeException("duplicate close"));
+                assertThat(context.backendSkippedCalls.get()).isOne();
+                assertThat(context.protocolTerminalCalls.get()).isOne();
+            }
+        } finally {
+            executor.shutdownNow();
+        }
     }
 
     @Test
@@ -62,10 +140,10 @@ public class GrpcSendLifecycleHolderTest {
 
         assertThat(permit.backendStarted()).isTrue();
         permit.backendTerminal(null);
-        assertThat(permit.completionFuture()).isNotCompleted();
+        assertThat(permit.releasedFuture()).isNotCompleted();
 
         holder.onStreamClosed(true, null);
-        assertThat(permit.completionFuture()).isCompleted();
+        assertThat(permit.releasedFuture()).isCompleted();
     }
 
     @Test
@@ -76,5 +154,45 @@ public class GrpcSendLifecycleHolderTest {
         assertThat(holder.hasPermit()).isFalse();
         assertThat(holder.wasRejectedBeforeAdmission()).isTrue();
         holder.onStreamClosed(false, new RuntimeException("closed"));
+    }
+
+    private static final class RecordingLifecycleContext implements SendLifecycleContext {
+        private final AtomicInteger backendSkippedCalls = new AtomicInteger();
+        private final AtomicInteger protocolTerminalCalls = new AtomicInteger();
+        private final CompletableFuture<Void> released = new CompletableFuture<>();
+        private volatile ProtocolResult protocolResult;
+
+        @Override
+        public boolean backendStarted() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void backendTerminal(Throwable cause) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean tryBackendSkipped(SkipReason reason) {
+            backendSkippedCalls.incrementAndGet();
+            return true;
+        }
+
+        @Override
+        public void protocolTerminal(ProtocolResult result) {
+            protocolResult = result;
+            protocolTerminalCalls.incrementAndGet();
+        }
+
+        @Override
+        public CompletableFuture<Void> releasedFuture() {
+            return released;
+        }
+
+        @Deprecated
+        @Override
+        public CompletableFuture<Void> completionFuture() {
+            return releasedFuture();
+        }
     }
 }

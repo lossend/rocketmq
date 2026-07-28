@@ -74,7 +74,7 @@ public class ProxyGracefulLifecycleWiringTest {
         ProxyGracefulLifecycleWiring wiring = new ProxyGracefulLifecycleWiring();
         FakePhasedServer server = new FakePhasedServer();
         ProxyLifecycleCoordinator coordinator = wiring.createCoordinator(
-            server, strictConfig(), new ImmediateScheduler());
+            server, strictConfig(), new ImmediateScheduler(), Runnable::run);
         assertThat(coordinator).isNotNull();
         assertThat(wiring.coordinator()).isSameAs(coordinator);
         assertThat(coordinator.state()).isEqualTo(ProxyLifecycleState.STARTING);
@@ -86,8 +86,8 @@ public class ProxyGracefulLifecycleWiringTest {
         ProxyGracefulLifecycleWiring wiring = new ProxyGracefulLifecycleWiring();
         FakePhasedServer server = new FakePhasedServer();
         ProxyLifecycleCoordinator coordinator = wiring.createCoordinator(
-            server, strictConfig(), new ImmediateScheduler());
-        coordinator.markReady();
+            server, strictConfig(), new ImmediateScheduler(), Runnable::run);
+        coordinator.onStartupComplete();
 
         CoordinatorAdminHandlers handlers = new CoordinatorAdminHandlers(coordinator, Runnable::run);
 
@@ -117,8 +117,8 @@ public class ProxyGracefulLifecycleWiringTest {
     public void stateReflectsLifecycle() {
         ProxyGracefulLifecycleWiring wiring = new ProxyGracefulLifecycleWiring();
         ProxyLifecycleCoordinator coordinator = wiring.createCoordinator(
-            new FakePhasedServer(), strictConfig(), new ImmediateScheduler());
-        coordinator.markReady();
+            new FakePhasedServer(), strictConfig(), new ImmediateScheduler(), Runnable::run);
+        coordinator.onStartupComplete();
         CoordinatorAdminHandlers handlers = new CoordinatorAdminHandlers(coordinator, Runnable::run);
         ProxyAdminResponse state = handlers.state();
         assertThat(state.status()).isEqualTo(200);

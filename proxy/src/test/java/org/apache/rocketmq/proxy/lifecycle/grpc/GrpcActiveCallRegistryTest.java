@@ -18,6 +18,9 @@
 package org.apache.rocketmq.proxy.lifecycle.grpc;
 
 import io.grpc.Status;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -136,6 +139,45 @@ public class GrpcActiveCallRegistryTest {
             pool.shutdown();
             assertThat(pool.awaitTermination(30, TimeUnit.SECONDS)).isTrue();
             assertThat(registry.isRegistrationClosed()).isTrue();
+            assertThat(registry.openCount()).isZero();
+            assertThat(registry.drainedFuture()).isCompleted();
+        }
+    }
+
+    @Test
+    @DisplayName("every call accepted concurrently with closeAll receives a close intent")
+    public void concurrentAcceptedRegistrationsAreNeverMissed() throws Exception {
+        for (int round = 0; round < 50; round++) {
+            GrpcActiveCallRegistry registry = new GrpcActiveCallRegistry();
+            List<RecordingCall> acceptedCalls = Collections.synchronizedList(new ArrayList<>());
+            List<GrpcActiveCallRegistry.Registration> registrations =
+                Collections.synchronizedList(new ArrayList<>());
+            int threads = 32;
+            ExecutorService pool = Executors.newFixedThreadPool(threads + 1);
+            CountDownLatch start = new CountDownLatch(1);
+            for (int i = 0; i < threads; i++) {
+                pool.submit(() -> {
+                    awaitLatch(start);
+                    RecordingCall call =
+                        new RecordingCall("apache.rocketmq.v2.MessagingService/ReceiveMessage");
+                    GrpcActiveCallRegistry.Registration registration = registry.register(call);
+                    if (registration.isAccepted()) {
+                        acceptedCalls.add(call);
+                        registrations.add(registration);
+                    }
+                });
+            }
+            pool.submit(() -> {
+                awaitLatch(start);
+                registry.closeAll(new GrpcDrainStatusPolicy());
+            });
+
+            start.countDown();
+            pool.shutdown();
+            assertThat(pool.awaitTermination(30, TimeUnit.SECONDS)).isTrue();
+            assertThat(acceptedCalls).allSatisfy(call -> assertThat(call.closes.get()).isEqualTo(1));
+
+            registrations.forEach(GrpcActiveCallRegistry.Registration::terminate);
             assertThat(registry.openCount()).isZero();
             assertThat(registry.drainedFuture()).isCompleted();
         }

@@ -17,7 +17,7 @@ Produce and persist a decision-complete, server-managed design for graceful Prox
 
 ## Current Phase
 
-Phase 8: Detail the Code-Level Implementation Plan
+Phase 10: Complete
 
 ## Phases
 
@@ -81,6 +81,27 @@ Phase 8: Detail the Code-Level Implementation Plan
 - [x] Add Helm/template/script file-level tasks without touching user-private values or runtime code.
 - [x] Adversarially review the detailed plan for API compatibility, concurrency races, and incomplete paths.
 - [x] Verify the expanded plan, preserve the original plan, and update planning records.
+- **Status:** complete
+
+### Phase 9: Repair Lifecycle and Send-Permit Correctness
+
+- [x] Publish READY only after the production Proxy startup chain succeeds.
+- [x] Make every force-drain path close send admission before transport teardown and retain adapter failures.
+- [x] Deliver a gRPC stream terminal exactly once even when `streamClosed` races ahead of permit binding.
+- [x] Move blocking transport termination off the gRPC completion thread.
+- [x] Make the Broker future and lifecycle backend terminal one response-visible completion chain, and prevent exception mappings from producing `Code.OK`.
+- [x] Make `mqproxyctl drain --wait` fail closed on `FORCE_DRAINING`.
+- [x] Retry a lost force-state CAS and close the active-call register/close publication race.
+- [x] Integrate the lifecycle-dependent `enableProxySendDrain` toggle without replacing concurrent work.
+- **Status:** complete
+
+### Phase 10: Verify and Document the Corrected Invariants
+
+- [x] Add deterministic race, startup assembly, forced-drain, CLI, response-causality, active-call, and toggle regression tests.
+- [x] Run focused lifecycle/gRPC tests.
+- [x] Run the launcher shell suite.
+- [x] Run the required clean Java compile and inspect the final diff.
+- [x] Synchronize `send-permit.md`, findings, and progress records with the implementation.
 - **Status:** complete
 
 ## Errors Encountered

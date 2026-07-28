@@ -84,16 +84,16 @@ public class SendDrainGateTest {
         SendPermit a = gate.tryAcquire(SendProtocol.GRPC).get();
         a.backendStarted();
         a.backendTerminal(null);
-        assertThat(a.completionFuture()).isNotCompleted();
+        assertThat(a.releasedFuture()).isNotCompleted();
         a.protocolTerminal(ProtocolResult.success());
-        assertThat(a.completionFuture()).isCompleted();
+        assertThat(a.releasedFuture()).isCompleted();
         // protocol first
         SendPermit b = gate.tryAcquire(SendProtocol.GRPC).get();
         b.protocolTerminal(ProtocolResult.success());
-        assertThat(b.completionFuture()).isNotCompleted();
+        assertThat(b.releasedFuture()).isNotCompleted();
         b.backendStarted();
         b.backendTerminal(null);
-        assertThat(b.completionFuture()).isCompleted();
+        assertThat(b.releasedFuture()).isCompleted();
     }
 
     @Test
@@ -103,7 +103,7 @@ public class SendDrainGateTest {
         SendPermit p = gate.tryAcquire(SendProtocol.GRPC).get();
         assertThat(p.tryBackendSkipped(SkipReason.SYNC_VALIDATION)).isTrue();
         p.protocolTerminal(ProtocolResult.success());
-        assertThat(p.completionFuture()).isCompleted();
+        assertThat(p.releasedFuture()).isCompleted();
         assertThat(gate.acceptedCount()).isZero();
     }
 
@@ -118,7 +118,7 @@ public class SendDrainGateTest {
         p.protocolTerminal(ProtocolResult.success());
         p.protocolTerminal(ProtocolResult.failure(new RuntimeException("dup")));
         assertThat(gate.acceptedCount()).isZero();
-        assertThat(p.completionFuture()).isCompleted();
+        assertThat(p.releasedFuture()).isCompleted();
     }
 
     @Test
@@ -130,9 +130,9 @@ public class SendDrainGateTest {
         assertThat(p.tryBackendSkipped(SkipReason.CANCELLED_BEFORE_DISPATCH)).isFalse();
         // backend is still STARTED: a real terminal is required, permit not yet released
         p.protocolTerminal(ProtocolResult.success());
-        assertThat(p.completionFuture()).isNotCompleted();
+        assertThat(p.releasedFuture()).isNotCompleted();
         p.backendTerminal(null);
-        assertThat(p.completionFuture()).isCompleted();
+        assertThat(p.releasedFuture()).isCompleted();
     }
 
     @Test

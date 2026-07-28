@@ -44,6 +44,7 @@ import apache.rocketmq.v2.SyncLiteSubscriptionResponse;
 import apache.rocketmq.v2.TelemetryCommand;
 import io.grpc.stub.StreamObserver;
 import java.util.concurrent.CompletableFuture;
+import org.apache.rocketmq.common.utils.FutureUtils;
 import org.apache.rocketmq.proxy.common.ProxyContext;
 import org.apache.rocketmq.proxy.grpc.v2.ContextStreamObserver;
 import org.apache.rocketmq.proxy.grpc.v2.GrpcMessagingActivity;
@@ -72,14 +73,31 @@ public final class SendLifecycleMessagingActivity implements GrpcMessagingActivi
             return delegate.sendMessage(ctx, request);
         }
         if (!lifecycle.backendStarted()) {
-            // Cancelled/skipped before dispatch: never call the Broker. The permit
-            // still releases via the tracer's protocol terminal, so leave the future
-            // uncompleted (no response is written to an already-closed stream).
-            return new CompletableFuture<>();
+            // Cancelled/skipped before dispatch: never call the Broker. Fail explicitly
+            // so a still-open response path cannot hang or fabricate success. If the
+            // stream already closed, grpc-java simply discards this completion.
+            return FutureUtils.completeExceptionally(
+                new IllegalStateException("send backend dispatch skipped before Broker invocation"));
         }
-        CompletableFuture<SendMessageResponse> future = delegate.sendMessage(ctx, request);
-        future.whenComplete((response, throwable) -> lifecycle.backendTerminal(throwable));
-        return future;
+        try {
+            CompletableFuture<SendMessageResponse> future = delegate.sendMessage(ctx, request);
+            if (future == null) {
+                throw new NullPointerException("send delegate returned a null future");
+            }
+            // Return the dependent stage. A response callback must not observe the
+            // delegate result before bookkeeping for that same completion finishes.
+            return future.whenComplete((response, throwable) -> lifecycle.backendTerminal(throwable));
+        } catch (Throwable dispatchFailure) {
+            try {
+                lifecycle.backendTerminal(dispatchFailure);
+            } catch (Throwable lifecycleFailure) {
+                if (lifecycleFailure != dispatchFailure) {
+                    lifecycleFailure.addSuppressed(dispatchFailure);
+                }
+                return FutureUtils.completeExceptionally(lifecycleFailure);
+            }
+            return FutureUtils.completeExceptionally(dispatchFailure);
+        }
     }
 
     @Override

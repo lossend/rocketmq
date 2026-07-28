@@ -86,6 +86,10 @@ public class GrpcServerBuilder {
             port, bossLoopNum, workerLoopNum, maxInboundMessageSize);
     }
 
+    GrpcServerBuilder(NettyServerBuilder serverBuilder) {
+        this.serverBuilder = serverBuilder;
+    }
+
     public GrpcServerBuilder shutdownTime(long time, TimeUnit unit) {
         this.time = time;
         this.unit = unit;
@@ -120,22 +124,48 @@ public class GrpcServerBuilder {
     }
 
     /**
-     * Installs the graceful-lifecycle wiring when enabled: connection max-age (so
-     * long-lived streams rotate), the send stream tracer, the send-permit and
-     * active-call interceptors, and the transport lifecycle filter. Interceptors
-     * are applied outermost-first; the send interceptor reads the tracer holder
-     * from the Context and the active-call interceptor wraps every non-unary call.
+     * Preserves the original lifecycle-builder contract, which installed send
+     * draining together with the transport lifecycle.
      */
     public GrpcServerBuilder configLifecycle(ServerStreamTracer.Factory sendTracerFactory,
         ServerInterceptor sendInterceptor, ServerInterceptor activeCallInterceptor,
         ServerTransportFilter transportFilter, long connectionAgeSeconds, long connectionAgeGraceSeconds) {
+        return configLifecycle(sendTracerFactory, sendInterceptor, activeCallInterceptor,
+            transportFilter, connectionAgeSeconds, connectionAgeGraceSeconds, true);
+    }
+
+    /**
+     * Installs the graceful-lifecycle wiring when enabled: connection max-age (so
+     * long-lived streams rotate), the transport lifecycle filter, and the
+     * active-call interceptor that wraps every non-unary call. The send stream
+     * tracer and send-permit interceptor (the SendPermit accounting) are only
+     * installed when {@code installSendDrain} is true, so that accounting can be
+     * disabled independently of the rest of the lifecycle. Interceptors are applied
+     * outermost-first; the send interceptor reads the tracer holder from the Context.
+     *
+     * @param sendTracerFactory     per-stream send tracer; installed only when {@code installSendDrain}
+     * @param sendInterceptor       send-permit admission interceptor; installed only when {@code installSendDrain}
+     * @param activeCallInterceptor non-unary active-call interceptor; always installed
+     * @param transportFilter       transport lifecycle filter; always installed
+     * @param connectionAgeSeconds  max connection age before graceful rotation
+     * @param connectionAgeGraceSeconds grace period after max connection age
+     * @param installSendDrain      whether to install the SendPermit accounting components
+     * @return this builder
+     */
+    public GrpcServerBuilder configLifecycle(ServerStreamTracer.Factory sendTracerFactory,
+        ServerInterceptor sendInterceptor, ServerInterceptor activeCallInterceptor,
+        ServerTransportFilter transportFilter, long connectionAgeSeconds, long connectionAgeGraceSeconds,
+        boolean installSendDrain) {
         this.serverBuilder
             .maxConnectionAge(connectionAgeSeconds, TimeUnit.SECONDS)
             .maxConnectionAgeGrace(connectionAgeGraceSeconds, TimeUnit.SECONDS)
-            .addStreamTracerFactory(sendTracerFactory)
             .addTransportFilter(transportFilter)
-            .intercept(activeCallInterceptor)
-            .intercept(sendInterceptor);
+            .intercept(activeCallInterceptor);
+        if (installSendDrain) {
+            this.serverBuilder
+                .addStreamTracerFactory(sendTracerFactory)
+                .intercept(sendInterceptor);
+        }
         return this;
     }
 }

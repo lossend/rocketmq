@@ -34,9 +34,16 @@ import io.grpc.ServerInterceptor;
 public final class GrpcActiveCallInterceptor implements ServerInterceptor {
 
     private final GrpcActiveCallRegistry registry;
+    private final GrpcDrainStatusPolicy drainStatusPolicy;
 
     public GrpcActiveCallInterceptor(GrpcActiveCallRegistry registry) {
+        this(registry, new GrpcDrainStatusPolicy());
+    }
+
+    public GrpcActiveCallInterceptor(GrpcActiveCallRegistry registry,
+        GrpcDrainStatusPolicy drainStatusPolicy) {
         this.registry = registry;
+        this.drainStatusPolicy = drainStatusPolicy;
     }
 
     @Override
@@ -48,6 +55,11 @@ public final class GrpcActiveCallInterceptor implements ServerInterceptor {
 
         GrpcActiveCall<T, R> wrapped = new GrpcActiveCall<>(call);
         GrpcActiveCallRegistry.Registration registration = registry.register(wrapped);
+        if (!registration.isAccepted()) {
+            wrapped.closeForDrain(drainStatusPolicy.closeStatusFor(wrapped.fullMethodName()));
+            return new ServerCall.Listener<T>() {
+            };
+        }
         ServerCall.Listener<T> listener;
         try {
             listener = next.startCall(wrapped, headers);

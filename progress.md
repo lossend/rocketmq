@@ -51,3 +51,15 @@
 - Completed an adversarial concurrency and rollout review; the final increment has no remaining P0/P1 findings. Runtime implementation remains out of scope for this documentation pass pending final file verification.
 - Documentation verification passed: the original SDK-dependent plan is byte-identical to HEAD, the expanded plan has balanced fences and no placeholders/stale atomic APIs, required code/Helm contracts are present, and all RocketMQ diffs are limited to the new plan plus planning records.
 - The sibling Helm worktree changed concurrently during this pass: four tracked documentation/upgrade-test files and two untracked private values are currently present. They were not created, read, reverted, or overwritten by this task and are preserved as external user work.
+
+## 2026-07-28
+
+- Reopened the lifecycle work for implementation after the user approved fixing the correctness findings.
+- Revalidated the production startup, force-drain, gRPC terminal, response-mapping, and CLI paths with CodeGraph and current source.
+- Added Phase 9/10 to the persistent task plan and saved the focused implementation plan at `docs/plans/plan-proxy-graceful-lifecycle-correctness-fixes.md`.
+- Implemented production READY publication, force-before-teardown gate closure, sticky forced outcomes, adapter-error retention, and a retrying force-state CAS that cannot lose the hard deadline to a concurrent normal transition.
+- Implemented close-before-bind terminal latching, response-visible backend bookkeeping, fail-closed throwable status mapping, release-future naming with API compatibility, and managed off-thread gRPC termination waits.
+- Closed the active-call register/close publication race and made post-close streaming calls bypass the business handler.
+- Preserved and integrated the concurrently developed `enableProxySendDrain` configuration: default off, parent-lifecycle validation, complete on/off component symmetry, old builder API compatibility, and explicit strict-profile documentation.
+- Added startup, force-race, active-call, holder, send-causality, response-mapping, toggle, builder-matrix, drain-result, and CLI regression tests.
+- Verification passed: 87 focused tests from a clean Proxy build plus 3 builder-matrix tests, zero Checkstyle/SpotBugs findings, all 13 `mqproxyctl` shell cases, the 19-module `mvn clean compile`, and `git diff --check`.

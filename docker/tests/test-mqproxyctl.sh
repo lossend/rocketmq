@@ -84,6 +84,40 @@ FAKE_CODE=409 FAKE_BODY='{"error":"off"}' "$CTL" drain >/dev/null 2>&1 && rc=0 |
 FAKE_CODE=503 FAKE_BODY='' "$CTL" drain >/dev/null 2>&1 && rc=0 || rc=$?
 [ "$rc" -ne 0 ] && pass "drain 503 fails non-zero (rc=$rc)" || fail "drain 503 should fail"
 
+# --- drain --wait: graceful terminal states succeed ---
+FAKE_CODE=200 FAKE_BODY='{"runId":"admin-drained","state":"DRAINED"}' \
+  "$CTL" drain --wait --timeout 1 >"$WORK/o" 2>"$WORK/e" && rc=0 || rc=$?
+if [ "$rc" -eq 0 ] && grep -q '"state":"DRAINED"' "$WORK/o"; then
+  pass "drain --wait succeeds for DRAINED"
+else
+  fail "drain --wait DRAINED rc=$rc stdout=$(cat "$WORK/o") stderr=$(cat "$WORK/e")"
+fi
+
+FAKE_CODE=200 FAKE_BODY='{"runId":"admin-stopped","state":"STOPPED"}' \
+  "$CTL" drain --wait --timeout 1 >"$WORK/o" 2>"$WORK/e" && rc=0 || rc=$?
+if [ "$rc" -eq 0 ] && grep -q '"state":"STOPPED"' "$WORK/o"; then
+  pass "drain --wait succeeds for STOPPED"
+else
+  fail "drain --wait STOPPED rc=$rc stdout=$(cat "$WORK/o") stderr=$(cat "$WORK/e")"
+fi
+
+# --- drain --wait: forced termination must be visible to automation ---
+FAKE_CODE=200 FAKE_BODY='{"runId":"admin-forced","state":"FORCE_DRAINING"}' \
+  "$CTL" drain --wait --timeout 1 >"$WORK/o" 2>"$WORK/e" && rc=0 || rc=$?
+if [ "$rc" -eq 6 ] && grep -qi 'forced' "$WORK/e"; then
+  pass "drain --wait FORCE_DRAINING fails explicitly (rc=$rc)"
+else
+  fail "drain --wait FORCE_DRAINING rc=$rc stdout=$(cat "$WORK/o") stderr=$(cat "$WORK/e")"
+fi
+
+FAKE_CODE=200 FAKE_BODY='{"runId":"admin-forced-stopped","state":"STOPPED","forced":true}' \
+  "$CTL" drain --wait --timeout 1 >"$WORK/o" 2>"$WORK/e" && rc=0 || rc=$?
+if [ "$rc" -eq 6 ] && grep -qi 'forced' "$WORK/e"; then
+  pass "drain --wait preserves forced failure after STOPPED (rc=$rc)"
+else
+  fail "drain --wait forced STOPPED rc=$rc stdout=$(cat "$WORK/o") stderr=$(cat "$WORK/e")"
+fi
+
 # --- status: 200 prints body ---
 FAKE_CODE=200 FAKE_BODY='{"state":"READY"}' "$CTL" status > "$WORK/o" 2>&1 && rc=0 || rc=$?
 if [ "$rc" -eq 0 ] && grep -q 'READY' "$WORK/o"; then

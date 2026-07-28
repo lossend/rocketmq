@@ -198,3 +198,24 @@
 - An outer `ConstructionScope.own(name, buildComposite())` cannot recover leaves allocated inside a composite factory that throws before returning. Every composite builder needs its own nested scope or explicit try/catch rollback, with failure injection at the Nth leaf.
 - `tryBackendSkipped(false)` only means that invocation lost the NOT_STARTED-to-SKIPPED CAS. The observed state may already be SKIPPED, STARTED, or TERMINAL, so callers cannot infer that a worker started.
 - Final verification observed concurrent external changes in `/Users/lossend/pro/rocketmq-helm`: tracked edits to `README.md`, `scripts/README.md`, `scripts/deploy/upgrade-testing.py`, and `tests/test_upgrade_testing.py`, plus untracked `in.yaml` and `test-in.yaml`. This documentation task did not create, inspect, revert, or overwrite them; final reporting must not claim that Helm worktree is clean.
+
+## 2026-07-28 correctness review
+
+- Production constructs `ProxyLifecycleCoordinator` in `STARTING`, but the startup assembly never invokes its package-private `markStarted()` / `markReady()` methods. A normal drain therefore takes the `starting_state` forced path even after the Proxy has served traffic.
+- `forceDrain(...)` publishes `FORCE_DRAINING` and tears down adapters without closing `SendDrainGate`; a concurrent sender can still acquire a permit during forced teardown.
+- `GrpcSendLifecycleHolder.onStreamClosed(...)` drops the terminal when the tracer closes before the interceptor binds its permit. No later callback repairs it, so the permit can remain counted forever.
+- `SendDrainGate` completes its drain future inline, and non-async coordinator continuations can call the blocking gRPC server termination wait on the stream-tracer completion thread.
+- The current Broker send future is returned independently from the `backendTerminal` callback stage. It works on the normal path but does not structurally guarantee that lifecycle bookkeeping has completed before response handling.
+- Throwable-to-status mapping accepts response code `SUCCESS`; a malformed `MQBrokerException`, `MQClientException`, or `GrpcProxyException` can therefore turn an exceptional completion into application `Code.OK`.
+- `mqproxyctl drain --wait` currently returns success for `FORCE_DRAINING`, hiding an incomplete graceful drain from rollout automation.
+
+## 2026-07-28 correctness resolution
+
+- Production now calls one `onStartupComplete()` transition only after the full registered startup chain succeeds; startup failure cannot publish READY.
+- Force drain closes admission before adapter teardown, retains every force error, keeps the forced outcome visible after STOPPED, and retries a failed state CAS so a concurrent normal transition cannot consume the one-shot hard deadline.
+- gRPC stream terminal delivery is latched across close-before-bind and delivered exactly once. The response-visible send stage includes `backendTerminal`; skipped, synchronous-failure, null-future, and callback-failure paths are exceptional.
+- Throwable mapping now has a fail-closed guard that rewrites any exceptional `Code.OK` to `INTERNAL_SERVER_ERROR`. Production `Code.OK` remains causally tied to `SendMessageActivity` mapping Broker `SendStatus.SEND_OK`.
+- Blocking gRPC server termination runs on an explicitly owned terminator executor, separate from tracer/permit completion and lifecycle deadline scheduling.
+- Active-call registration now publishes its counted call under the same short lock used to close and snapshot the registry. Calls rejected after closure are closed by policy without invoking the business handler.
+- `enableProxySendDrain` is an explicit lifecycle-dependent opt-in. Disabling it skips all four send-permit components while retaining transport migration and active-call draining; the original six-argument builder API still enables send drain for compatibility.
+- CLI forced drain is fail-closed, including sticky `forced:true` after STOPPED.

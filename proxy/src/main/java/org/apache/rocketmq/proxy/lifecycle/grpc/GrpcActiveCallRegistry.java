@@ -18,6 +18,8 @@
 package org.apache.rocketmq.proxy.lifecycle.grpc;
 
 import io.grpc.Status;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -26,8 +28,11 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * Tracks in-flight non-unary RPCs so drain can proactively end them. A single
  * packed {@link AtomicLong} (top bit = registration closed, low 63 = open count)
- * linearizes register/closeAll: a call may only register while the closed bit is
- * 0. A drain close intent never decrements the count; only the wrapped listener's
+ * tracks admission and termination. A short registration lock makes publishing
+ * the counted call into {@code live} atomic with respect to {@link #closeAll};
+ * otherwise closeAll could set the closed bit and iterate the map after the count
+ * CAS but before the call was visible, permanently missing its close intent. A
+ * drain close intent never decrements the count; only the wrapped listener's
  * terminal ({@link Registration#terminate()}) does. {@code drainedFuture}
  * completes once registration is closed and the open count reaches zero.
  */
@@ -54,6 +59,7 @@ public final class GrpcActiveCallRegistry {
     private final Map<Long, ActiveCall> live = new ConcurrentHashMap<>();
     private final AtomicLong idSeq = new AtomicLong();
     private final CompletableFuture<Void> drainedFuture = new CompletableFuture<>();
+    private final Object registrationLock = new Object();
 
     private static boolean isClosed(long s) {
         return (s & CLOSED_BIT) != 0;
@@ -69,16 +75,18 @@ public final class GrpcActiveCallRegistry {
      * the returned handle must be terminated exactly once by the wrapped listener.
      */
     public Registration register(ActiveCall call) {
-        while (true) {
-            long cur = state.get();
-            if (isClosed(cur)) {
-                return REJECTED;
-            }
-            long next = CLOSED_BIT & cur | (count(cur) + 1);
-            if (state.compareAndSet(cur, next)) {
-                long id = idSeq.incrementAndGet();
-                live.put(id, call);
-                return new AcceptedRegistration(id);
+        synchronized (registrationLock) {
+            while (true) {
+                long cur = state.get();
+                if (isClosed(cur)) {
+                    return REJECTED;
+                }
+                long next = CLOSED_BIT & cur | (count(cur) + 1);
+                if (state.compareAndSet(cur, next)) {
+                    long id = idSeq.incrementAndGet();
+                    live.put(id, call);
+                    return new AcceptedRegistration(id);
+                }
             }
         }
     }
@@ -109,17 +117,21 @@ public final class GrpcActiveCallRegistry {
      * completes {@code drainedFuture} immediately.
      */
     public void closeAll(GrpcDrainStatusPolicy policy) {
-        while (true) {
-            long cur = state.get();
-            long next = cur | CLOSED_BIT;
-            if (state.compareAndSet(cur, next)) {
-                if (count(next) == 0) {
-                    drainedFuture.complete(null);
+        List<ActiveCall> callsToClose;
+        synchronized (registrationLock) {
+            while (true) {
+                long cur = state.get();
+                long next = cur | CLOSED_BIT;
+                if (state.compareAndSet(cur, next)) {
+                    if (count(next) == 0) {
+                        drainedFuture.complete(null);
+                    }
+                    callsToClose = new ArrayList<>(live.values());
+                    break;
                 }
-                break;
             }
         }
-        for (ActiveCall call : live.values()) {
+        for (ActiveCall call : callsToClose) {
             try {
                 call.closeForDrain(policy.closeStatusFor(call.fullMethodName()));
             } catch (Throwable ignored) {

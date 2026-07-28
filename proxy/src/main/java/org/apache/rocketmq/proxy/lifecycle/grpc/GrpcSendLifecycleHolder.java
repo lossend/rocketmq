@@ -17,6 +17,7 @@
 
 package org.apache.rocketmq.proxy.lifecycle.grpc;
 
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.rocketmq.proxy.lifecycle.ProtocolResult;
 import org.apache.rocketmq.proxy.lifecycle.SendLifecycleContext;
@@ -32,11 +33,17 @@ import org.apache.rocketmq.proxy.lifecycle.SkipReason;
 public final class GrpcSendLifecycleHolder {
 
     private final AtomicReference<SendLifecycleContext> permit = new AtomicReference<>();
+    private final AtomicReference<ProtocolResult> protocolTerminal = new AtomicReference<>();
+    private final AtomicBoolean protocolTerminalDelivered = new AtomicBoolean();
     private volatile boolean rejectedBeforeAdmission;
 
     /** Binds the acquired permit exactly once. Returns false if already bound. */
     public boolean bindPermit(SendLifecycleContext context) {
-        return permit.compareAndSet(null, context);
+        if (!permit.compareAndSet(null, context)) {
+            return false;
+        }
+        deliverProtocolTerminalIfReady();
+        return true;
     }
 
     /** Records that this RPC never got a permit (late transport or closed gate). */
@@ -62,11 +69,28 @@ public final class GrpcSendLifecycleHolder {
      * backend is skipped so it can still release.
      */
     public void onStreamClosed(boolean success, Throwable cause) {
-        SendLifecycleContext context = permit.get();
-        if (context == null) {
+        ProtocolResult result = success ? ProtocolResult.success() : ProtocolResult.failure(cause);
+        if (!protocolTerminal.compareAndSet(null, result)) {
             return;
         }
-        context.tryBackendSkipped(SkipReason.STREAM_CLOSED_BEFORE_DISPATCH);
-        context.protocolTerminal(success ? ProtocolResult.success() : ProtocolResult.failure(cause));
+        deliverProtocolTerminalIfReady();
+    }
+
+    /**
+     * Bind and close may race in either order. Once both values are visible, one
+     * caller wins delivery; callbacks run after the atomic decision and outside
+     * any lock.
+     */
+    private void deliverProtocolTerminalIfReady() {
+        SendLifecycleContext context = permit.get();
+        ProtocolResult result = protocolTerminal.get();
+        if (context == null || result == null || !protocolTerminalDelivered.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            context.tryBackendSkipped(SkipReason.STREAM_CLOSED_BEFORE_DISPATCH);
+        } finally {
+            context.protocolTerminal(result);
+        }
     }
 }

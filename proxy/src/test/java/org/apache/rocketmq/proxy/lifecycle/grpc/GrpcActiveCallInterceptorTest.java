@@ -21,12 +21,16 @@ import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.ServerCall;
 import io.grpc.ServerCallHandler;
+import io.grpc.Status;
+import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 public class GrpcActiveCallInterceptorTest {
@@ -35,7 +39,8 @@ public class GrpcActiveCallInterceptorTest {
     private ServerCall<byte[], byte[]> mockCall(MethodDescriptor.MethodType type) {
         ServerCall<byte[], byte[]> call = mock(ServerCall.class);
         MethodDescriptor<byte[], byte[]> descriptor = mock(MethodDescriptor.class);
-        when(descriptor.getFullMethodName()).thenReturn("apache.rocketmq.v2.MessagingService/Telemetry");
+        when(descriptor.getFullMethodName())
+            .thenReturn("apache.rocketmq.v2.MessagingService/ReceiveMessage");
         when(descriptor.getType()).thenReturn(type);
         when(call.getMethodDescriptor()).thenReturn(descriptor);
         return call;
@@ -100,6 +105,25 @@ public class GrpcActiveCallInterceptorTest {
         } catch (RuntimeException expected) {
             assertThat(expected).hasMessage("boom");
         }
+        assertThat(registry.openCount()).isZero();
+    }
+
+    @Test
+    @DisplayName("a non-unary call rejected after drain is closed without invoking its handler")
+    public void rejectedCallIsClosedWithoutStartingHandler() {
+        GrpcActiveCallRegistry registry = new GrpcActiveCallRegistry();
+        GrpcDrainStatusPolicy policy = new GrpcDrainStatusPolicy();
+        registry.closeAll(policy);
+        GrpcActiveCallInterceptor interceptor = new GrpcActiveCallInterceptor(registry, policy);
+        ServerCall<byte[], byte[]> call = mockCall(MethodDescriptor.MethodType.SERVER_STREAMING);
+        ServerCallHandler<byte[], byte[]> handler = passThroughHandler();
+
+        interceptor.interceptCall(call, new Metadata(), handler);
+
+        verify(handler, never()).startCall(any(), any());
+        ArgumentCaptor<Status> status = ArgumentCaptor.forClass(Status.class);
+        verify(call).close(status.capture(), any(Metadata.class));
+        assertThat(status.getValue().getCode()).isEqualTo(Status.Code.UNAVAILABLE);
         assertThat(registry.openCount()).isZero();
     }
 }

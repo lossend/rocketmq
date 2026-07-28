@@ -107,7 +107,8 @@ public class ProxyStartup {
                     lifecycleWiring.activeCallInterceptor(),
                     lifecycleWiring.transportFilter(),
                     proxyConfig.getProxyConnectionLeaseSeconds(),
-                    proxyConfig.getProxyConnectionLeaseGraceSeconds());
+                    proxyConfig.getProxyConnectionLeaseGraceSeconds(),
+                    proxyConfig.isEnableProxySendDrain());
             }
             GrpcServer grpcServer = grpcServerBuilder.build();
             PROXY_START_AND_SHUTDOWN.appendStartAndShutdown(grpcServer);
@@ -122,8 +123,8 @@ public class ProxyStartup {
                 coordinator = lifecycleWiring.coordinator();
             }
 
-            // start servers one by one.
-            PROXY_START_AND_SHUTDOWN.start();
+            // Start servers one by one, then publish READY as one assembly step.
+            startAndSignalReady(PROXY_START_AND_SHUTDOWN, coordinator);
 
             final ProxyAdminServer adminServerRef = adminServer;
             final ProxyLifecycleCoordinator coordinatorRef = coordinator;
@@ -265,8 +266,12 @@ public class ProxyStartup {
             java.util.concurrent.Executors.newSingleThreadScheduledExecutor(
                 r -> new Thread(r, "ProxyLifecycleScheduler"));
         PROXY_START_AND_SHUTDOWN.appendShutdown(lifecycleExecutor::shutdown);
+        java.util.concurrent.ExecutorService terminationExecutor =
+            java.util.concurrent.Executors.newSingleThreadExecutor(
+                r -> new Thread(r, "ProxyLifecycleTerminator"));
+        PROXY_START_AND_SHUTDOWN.appendShutdown(terminationExecutor::shutdownNow);
         ProxyLifecycleCoordinator coordinator = wiring.createCoordinator(
-            grpcServer, config, new ExecutorLifecycleScheduler(lifecycleExecutor));
+            grpcServer, config, new ExecutorLifecycleScheduler(lifecycleExecutor), terminationExecutor);
 
         java.util.concurrent.ThreadPoolExecutor adminExecutor = new java.util.concurrent.ThreadPoolExecutor(
             2, 2, 0L, TimeUnit.MILLISECONDS,
@@ -281,6 +286,14 @@ public class ProxyStartup {
         log.info("proxy admin server started on {}:{}", config.getProxyAdminBindAddress(),
             config.getProxyAdminPort());
         return adminServer;
+    }
+
+    static void startAndSignalReady(StartAndShutdown startup,
+        ProxyLifecycleCoordinator coordinator) throws Exception {
+        startup.start();
+        if (coordinator != null) {
+            coordinator.onStartupComplete();
+        }
     }
 
     private static GrpcMessagingApplication createServiceProcessor(MessagingProcessor messagingProcessor) {

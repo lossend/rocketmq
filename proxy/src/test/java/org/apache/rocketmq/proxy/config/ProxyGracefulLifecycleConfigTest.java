@@ -138,4 +138,29 @@ public class ProxyGracefulLifecycleConfigTest {
         assertThat(t.getMessage()).contains("JitterRatio");
         assertThat(t.getMessage()).contains("proxyConnectionLeaseSeconds");
     }
+
+    @Test
+    @DisplayName("send-drain accounting is disabled by default")
+    public void sendDrainDefaultsOff() {
+        assertThat(new ProxyConfig().isEnableProxySendDrain()).isFalse();
+    }
+
+    @Test
+    @DisplayName("send-drain may be enabled on top of a well-formed strict config")
+    public void sendDrainAllowedWithLifecycle() {
+        ProxyConfig config = strictConfig();
+        config.setEnableProxySendDrain(true);
+        config.validateGracefulLifecycle();
+    }
+
+    @Test
+    @DisplayName("send-drain cannot be enabled while the parent lifecycle flag is off")
+    public void sendDrainRequiresLifecycle() {
+        ProxyConfig config = new ProxyConfig();
+        config.setEnableProxyGracefulLifecycle(false);
+        config.setEnableProxySendDrain(true);
+        assertThatThrownBy(config::validateGracefulLifecycle)
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("enableProxySendDrain");
+    }
 }

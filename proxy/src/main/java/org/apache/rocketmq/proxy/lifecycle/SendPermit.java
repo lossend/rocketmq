@@ -42,7 +42,7 @@ public final class SendPermit implements SendLifecycleContext {
 
     private final SendProtocol protocol;
     private final AtomicInteger state = new AtomicInteger(BACKEND_NOT_STARTED);
-    private final CompletableFuture<Void> completion = new CompletableFuture<>();
+    private final CompletableFuture<Void> released = new CompletableFuture<>();
     private final Runnable onRelease;
 
     SendPermit(SendProtocol protocol, Runnable onRelease) {
@@ -148,14 +148,20 @@ public final class SendPermit implements SendLifecycleContext {
                 if (onRelease != null) {
                     onRelease.run();
                 }
-                completion.complete(null);
+                released.complete(null);
                 return;
             }
         }
     }
 
     @Override
+    public CompletableFuture<Void> releasedFuture() {
+        return released;
+    }
+
+    @Deprecated
+    @Override
     public CompletableFuture<Void> completionFuture() {
-        return completion;
+        return releasedFuture();
     }
 }

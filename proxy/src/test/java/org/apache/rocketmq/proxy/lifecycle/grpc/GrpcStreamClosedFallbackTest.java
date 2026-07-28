@@ -17,6 +17,7 @@
 
 package org.apache.rocketmq.proxy.lifecycle.grpc;
 
+import apache.rocketmq.v2.Code;
 import apache.rocketmq.v2.MessagingServiceGrpc;
 import apache.rocketmq.v2.SendMessageRequest;
 import apache.rocketmq.v2.SendMessageResponse;
@@ -27,7 +28,9 @@ import io.grpc.inprocess.InProcessChannelBuilder;
 import io.grpc.inprocess.InProcessServerBuilder;
 import io.grpc.stub.StreamObserver;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import org.apache.rocketmq.proxy.grpc.v2.common.ResponseBuilder;
 import org.apache.rocketmq.proxy.lifecycle.SendDrainGate;
 import org.junit.After;
 import org.junit.jupiter.api.DisplayName;
@@ -88,15 +91,19 @@ public class GrpcStreamClosedFallbackTest {
                 @Override
                 public void sendMessage(SendMessageRequest request,
                     StreamObserver<SendMessageResponse> responseObserver) {
-                    responseObserver.onNext(SendMessageResponse.newBuilder().build());
+                    responseObserver.onNext(SendMessageResponse.newBuilder()
+                        .setStatus(ResponseBuilder.getInstance().buildStatus(
+                            Code.BAD_REQUEST, "validation failed before Broker dispatch"))
+                        .build());
                     responseObserver.onCompleted();
                 }
             };
 
         MessagingServiceGrpc.MessagingServiceBlockingStub stub = start(gate, openSendRpcs, service);
-        stub.sendMessage(SendMessageRequest.newBuilder().build());
+        SendMessageResponse response = stub.sendMessage(SendMessageRequest.newBuilder().build());
 
         // The permit was admitted, then released purely by the streamClosed fallback.
+        assertThat(response.getStatus().getCode()).isNotEqualTo(Code.OK);
         assertThat(gate.acceptedCount()).isZero();
         assertThat(openSendRpcs.get()).isZero();
         // Admission is still open: this was a normal RPC, not a drain.
@@ -133,12 +140,14 @@ public class GrpcStreamClosedFallbackTest {
     public void closedGateLeavesNoResidue() throws Exception {
         SendDrainGate gate = new SendDrainGate();
         AtomicLong openSendRpcs = new AtomicLong();
+        AtomicBoolean handlerCalled = new AtomicBoolean();
         gate.closeAdmission();
         MessagingServiceGrpc.MessagingServiceImplBase service =
             new MessagingServiceGrpc.MessagingServiceImplBase() {
                 @Override
                 public void sendMessage(SendMessageRequest request,
                     StreamObserver<SendMessageResponse> responseObserver) {
+                    handlerCalled.set(true);
                     responseObserver.onNext(SendMessageResponse.newBuilder().build());
                     responseObserver.onCompleted();
                 }
@@ -154,5 +163,6 @@ public class GrpcStreamClosedFallbackTest {
 
         assertThat(gate.acceptedCount()).isZero();
         assertThat(openSendRpcs.get()).isZero();
+        assertThat(handlerCalled).isFalse();
     }
 }

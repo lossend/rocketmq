@@ -38,6 +38,19 @@ public interface SendLifecycleContext {
     /** Records the protocol (response-write) terminal. */
     void protocolTerminal(ProtocolResult result);
 
-    /** Completes exactly once when the permit is RELEASED (both terminals reached). */
+    /**
+     * Completes exactly once when the permit is RELEASED (both terminals reached).
+     * This is a drain/liveness signal; normal completion does not mean the message
+     * succeeded at the Broker or protocol layer.
+     */
+    default CompletableFuture<Void> releasedFuture() {
+        return completionFuture();
+    }
+
+    /**
+     * @deprecated use {@link #releasedFuture()}; this future never represented
+    * business-message success.
+     */
+    @Deprecated
     CompletableFuture<Void> completionFuture();
 }

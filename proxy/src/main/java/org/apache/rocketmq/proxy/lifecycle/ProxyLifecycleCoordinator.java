@@ -18,6 +18,7 @@
 package org.apache.rocketmq.proxy.lifecycle;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.List;
@@ -26,7 +27,9 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiPredicate;
 import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.logging.org.slf4j.Logger;
 import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
@@ -171,12 +174,19 @@ public final class ProxyLifecycleCoordinator implements ProxyLifecycle {
         }
     }
 
-    void markStarted() {
-        reasonRef.set("started");
-    }
-
-    void markReady() {
-        transition(ProxyLifecycleState.STARTING, ProxyLifecycleState.READY, "ready");
+    /**
+     * Publishes readiness after every startup component has completed successfully.
+     * This is deliberately a single transition so callers cannot expose a partially
+     * started process as ready.
+     */
+    public void onStartupComplete() {
+        Throwable fatal = fatalRef.get();
+        if (fatal != null) {
+            throw new IllegalStateException("cannot become ready after a fatal startup failure", fatal);
+        }
+        if (!transition(ProxyLifecycleState.STARTING, ProxyLifecycleState.READY, "ready")) {
+            throw new IllegalStateException("cannot complete startup from lifecycle state " + state.get());
+        }
     }
 
     /**
@@ -204,7 +214,7 @@ public final class ProxyLifecycleCoordinator implements ProxyLifecycle {
 
     @Override
     public boolean isStarted() {
-        return state.get() != ProxyLifecycleState.STARTING || "started".equals(reasonRef.get());
+        return state.get() != ProxyLifecycleState.STARTING;
     }
 
     @Override
@@ -222,7 +232,13 @@ public final class ProxyLifecycleCoordinator implements ProxyLifecycle {
     public ProxyLifecycleSnapshot snapshot() {
         DrainRun run = drainRunRef.get();
         ProxyLifecycleState s = state.get();
+        // Forced is a sticky outcome of the drain, not merely the current phase.
+        // It must remain visible while the process advances through STOPPING/STOPPED.
         boolean forced = s == ProxyLifecycleState.FORCE_DRAINING;
+        if (!forced && run != null && run.drainFuture().isDone()
+            && !run.drainFuture().isCompletedExceptionally()) {
+            forced = run.drainFuture().join().isForced();
+        }
         return new ProxyLifecycleSnapshot(s, reasonRef.get(), lifecycleEnabled,
             run == null ? null : run.session().drainId(), forced,
             gate.acceptedCount(), gate.isAdmissionClosed());
@@ -325,10 +341,10 @@ public final class ProxyLifecycleCoordinator implements ProxyLifecycle {
                     gate.closeAdmission();
                     return gate.drainedFuture();
                 })
-                .thenCompose(ignored -> {
+                .thenComposeAsync(ignored -> {
                     ShutdownDeadline deadline = effectiveDrainDeadline(session);
                     return allOf(adapters, adapter -> adapter.awaitTerminated(deadline));
-                })
+                }, scheduler::execute)
                 .whenComplete((ignored, error) -> {
                     if (error != null) {
                         forceDrain(run, "drain_error", error);
@@ -353,25 +369,55 @@ public final class ProxyLifecycleCoordinator implements ProxyLifecycle {
     }
 
     private void forceDrain(DrainRun run, String reason, Throwable cause) {
-        ProxyLifecycleState cur = state.get();
-        if (cur == ProxyLifecycleState.FORCE_DRAINING || cur == ProxyLifecycleState.DRAINED) {
-            return;
-        }
-        if (!state.compareAndSet(cur, ProxyLifecycleState.FORCE_DRAINING)) {
+        // Close admission before publishing FORCE_DRAINING so no sender can acquire a
+        // permit after the forced state becomes visible: closeAdmission() happens-before
+        // the state CAS on this thread, so any acquirer observing FORCE_DRAINING sees a
+        // closed gate. closeAdmission() is idempotent, so a force call that loses the
+        // CAS (state already advanced) does no harm.
+        gate.closeAdmission();
+        if (!tryEnterForceDraining(state::get, state::compareAndSet)) {
             return;
         }
         reasonRef.set("forced:" + reason);
         ShutdownDeadline deadline = effectiveDrainDeadline(run.session());
+        List<Throwable> causes = new ArrayList<>();
+        if (cause != null) {
+            causes.add(cause);
+        }
         for (DrainProtocolAdapter adapter : adapters) {
             try {
                 adapter.force(deadline);
-            } catch (Throwable ignored) {
+            } catch (Throwable forceError) {
                 // best-effort: keep forcing the remaining adapters
+                causes.add(forceError);
+                log.warn("failed to force adapter {} during drain {}", adapter.getClass().getName(),
+                    run.session().drainId(), forceError);
             }
         }
-        List<Throwable> causes = cause == null ? java.util.Collections.emptyList()
-            : java.util.Collections.singletonList(cause);
         run.drainFuture().complete(DrainResult.forced(reason, causes));
+    }
+
+    /**
+     * Enters the forced state without losing the hard-deadline signal when a
+     * normal lifecycle transition wins between the state read and CAS. Lifecycle
+     * states only move forward, so a failed CAS must re-read and retry until this
+     * caller wins or observes a state that can no longer be forced.
+     *
+     * <p>The functional arguments keep the CAS-loss path deterministic in unit
+     * tests; production passes the coordinator's atomic state operations.</p>
+     */
+    static boolean tryEnterForceDraining(Supplier<ProxyLifecycleState> currentState,
+        BiPredicate<ProxyLifecycleState, ProxyLifecycleState> compareAndSet) {
+        while (true) {
+            ProxyLifecycleState current = currentState.get();
+            EnumSet<ProxyLifecycleState> allowed = LEGAL.get(current);
+            if (allowed == null || !allowed.contains(ProxyLifecycleState.FORCE_DRAINING)) {
+                return false;
+            }
+            if (compareAndSet.test(current, ProxyLifecycleState.FORCE_DRAINING)) {
+                return true;
+            }
+        }
     }
 
     private static CompletableFuture<Void> allOf(List<DrainProtocolAdapter> adapters,

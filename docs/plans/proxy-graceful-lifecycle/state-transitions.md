@@ -6,7 +6,7 @@
 ## 1. 状态机总览
 
 ```
-STARTING ──markReady──▶ READY
+STARTING ──onStartupComplete──▶ READY
    │                      │
    │                      │ beginDrain() → orchestrate()
    │                      ▼
@@ -57,29 +57,34 @@ boolean transition(ProxyLifecycleState expected, ProxyLifecycleState next, Strin
 
 ## 3. `STARTING → READY`
 
-触发方法 `markReady()`(`:115-117`):
+唯一公开触发方法是 `onStartupComplete()`:
 
 ```java
-void markReady() {
-    transition(ProxyLifecycleState.STARTING, ProxyLifecycleState.READY, "ready");
+public void onStartupComplete() {
+    Throwable fatal = fatalRef.get();
+    if (fatal != null) {
+        throw new IllegalStateException("cannot become ready after a fatal startup failure", fatal);
+    }
+    if (!transition(ProxyLifecycleState.STARTING, ProxyLifecycleState.READY, "ready")) {
+        throw new IllegalStateException("cannot complete startup from lifecycle state " + state.get());
+    }
 }
 ```
 
-调用者 `ProxyRuntime.start()`(`ProxyRuntime.java:64-68`),在所有组件 `start()` 成功后:
+生产调用者是 `ProxyStartup.startAndSignalReady(...)`:先完整执行
+`PROXY_START_AND_SHUTDOWN.start()`,只有正常返回才调用 `onStartupComplete()`。任一组件启动异常都会直接向外传播,coordinator 保持 STARTING,不会短暂发布 READY。
 
 ```java
-public void start() throws Exception {
-    for (StartAndShutdown component : components) {
-        component.start();
-    }
+static void startAndSignalReady(StartAndShutdown startup,
+    ProxyLifecycleCoordinator coordinator) throws Exception {
+    startup.start();
     if (coordinator != null) {
-        coordinator.markStarted();   // 只写 reason="started",不改状态
-        coordinator.markReady();     // STARTING → READY
+        coordinator.onStartupComplete();
     }
 }
 ```
 
-`markStarted()`(`:111-113`)**不是**一条状态边——它只写 `reasonRef="started"`,让 `isStarted()`(供 `/started` 探针)返回 true。
+`/started` 与 `/ready` 现在由同一条成功边原子发布；STARTING 时两者都为 false,进入 READY 后都为 true,不存在只 started 但未 ready 的中间发布窗口。
 
 ## 4. 正常排空链 —— 全部在 `orchestrate(run)` 内(`:216-259`)
 
@@ -129,13 +134,13 @@ private void continueToMigrating(DrainRun run) {
             .thenCompose(ignored -> {
                 // ── 边③  MIGRATING → DRAINING ──
                 transition(ProxyLifecycleState.MIGRATING, ProxyLifecycleState.DRAINING, "draining");
-                gate.closeAdmission();        // admission_closed:唯一一次关闸
+                gate.closeAdmission();        // admission_closed:正常路径关闸点
                 return gate.drainedFuture();  // 等 accepted-inflight 归零
             })
-            .thenCompose(ignored -> {
+            .thenComposeAsync(ignored -> {
                 ShutdownDeadline deadline = effectiveDrainDeadline(session);
                 return allOf(adapters, adapter -> adapter.awaitTerminated(deadline));
-            })
+            }, scheduler::execute)
             .whenComplete((ignored, error) -> {
                 if (error != null) {
                     forceDrain(run, "drain_error", error);   // 任一阶段异常 → 强制
@@ -158,7 +163,7 @@ private void continueToMigrating(DrainRun run) {
 |---|---|---|---|
 | ① `READY→QUIESCING` | `orchestrate` | `quiescing` | 只做两件事:改状态;调可选的 `readinessWithdraw` 钩子(**当前生产接线传的是 `null`,所以是 no-op**)。`/ready` 转 503 是**间接**发生的——`isReady()` 要求 `state==READY`,状态一旦离开 READY 就返回 false。随后**注册 `lbTimer`,在 QUIESCING 停留 `lbDetachTimeoutSeconds`(默认 60s)**,给 EndpointSlice/NLB 摘流留时间;gate 仍开放,存量连接照常。 |
 | ② `QUIESCING→MIGRATING` | `continueToMigrating`(由 `lbTimer` 回调) | `migrating` | **只有 lbCutoff 到点后才执行**。`transition` 返回 false 表示已被 forced/direct-TERM 抢占,直接返回。否则遍历每个 adapter 调 `startMigration()`:gRPC 侧即 `initiateServerDrain()` → `Server.shutdown()` → grpc-java 内建双 GOAWAY。**gate 依然开放**。 |
-| ③ `MIGRATING→DRAINING` | `continueToMigrating` | `draining` | 在 `allNoNewWork`(所有 adapter 的 `noNewWorkReached` 都完成)之后触发;紧接着 `gate.closeAdmission()`——**整个生命周期唯一一次关闸**,此后新 send 被拒;再 `return gate.drainedFuture()` 等已接纳的 send 双终态归零。 |
+| ③ `MIGRATING→DRAINING` | `continueToMigrating` | `draining` | 在 `allNoNewWork`(所有 adapter 的 `noNewWorkReached` 都完成)之后触发;紧接着 `gate.closeAdmission()`——**正常排空路径的关闸线性化点**,此后新 send 被拒;再 `return gate.drainedFuture()` 等已接纳的 send 双终态归零。强制路径也会在 force adapter 之前幂等关同一扇闸。 |
 | ④ `DRAINING→DRAINED` | `continueToMigrating` | `drained` | 在 gate 归零 **且** 每个 adapter 的 `awaitTerminated(deadline)` 都成功后;`transition` 成功则 `future.complete(DrainResult.drained())`,PreStop 的 `.join()` 得以返回。若 `error!=null` 则改走 `forceDrain(run,"drain_error",...)`。 |
 
 ### 为什么 ① 必须等待,而不能立刻迁移
@@ -250,7 +255,7 @@ public void initiateServerDrain() {
 @Override
 public CompletableFuture<Void> awaitTerminated(ShutdownDeadline effectiveDeadline) {
     registry.closeAll(policy);                       // ① 主动结束非 unary 流
-    return registry.drainedFuture().thenCompose(ignored -> {   // ② 等这些流真正 terminal
+    return registry.drainedFuture().thenComposeAsync(ignored -> {   // ② 等这些流真正 terminal
         CompletableFuture<Void> done = new CompletableFuture<>();
         try {
             if (server.awaitServerTermination(effectiveDeadline)) {   // ③ 等 Server 终止
@@ -265,11 +270,21 @@ public CompletableFuture<Void> awaitTerminated(ShutdownDeadline effectiveDeadlin
             Thread.currentThread().interrupt();
         }
         return done;
-    });
+    }, terminationExecutor);
 }
 ```
 
 ① 的 `registry.closeAll(policy)` 按 RPC 类型选 close status(`GrpcDrainStatusPolicy`):Telemetry 用 `Status.OK`(让 5.0.7/5.2.1 客户端走静默的 1 秒 observer renewal),其余非 unary(ReceiveMessage/PullMessage/未来新流)用 `UNAVAILABLE("[PROXY_DRAINING] reconnect")`,避免把被截断的业务流伪装成成功。
+registry 的注册计数 CAS 与 `live` 集合发布必须和 `closeAll` 互斥:否则
+`register` 可能已经把 open count 加 1、却还没执行 `live.put`,此时
+`closeAll` 会永久漏掉这条调用。实现用短 `registrationLock` 把
+“确认未关闭 → count++ → live.put”与“置 closed bit → snapshot live”
+线性化；锁外再逐一发送 close intent,避免业务 terminal 回调在锁内重入。
+若注册已经关闭,interceptor 会按同一 policy 直接关闭调用并且绝不调用
+业务 handler。
+这个 continuation 必须提交给由 `ProxyStartup` 显式创建和托管的
+`ProxyLifecycleTerminator` executor；不能在完成最后一张 permit 的 gRPC tracer 线程上内联阻塞。lifecycle scheduler 与 terminator 相互独立,所以 server wait 卡住时 hard-deadline timer 仍可执行 force。
+
 ③ 的 `awaitServerTermination`(`GrpcServer.java:97-103`)只消费 deadline 剩余时间,返回原始 boolean:
 
 ```java
@@ -318,28 +333,34 @@ public void forceServerShutdown() {
 
 ```java
 private void forceDrain(DrainRun run, String reason, Throwable cause) {
-    ProxyLifecycleState cur = state.get();
-    if (cur == ProxyLifecycleState.FORCE_DRAINING || cur == ProxyLifecycleState.DRAINED) {
-        return;                                    // 已到终态,幂等返回
+    if (!tryEnterForceDraining(state::get, state::compareAndSet)) {
+        return;                                    // 已强制/排空/停止
     }
-    if (!state.compareAndSet(cur, ProxyLifecycleState.FORCE_DRAINING)) {
-        return;                                    // CAS 输了,别的线程已处理
-    }
+    gate.closeAdmission();                         // 先关闸,再做 best-effort force
     reasonRef.set("forced:" + reason);
     ShutdownDeadline deadline = effectiveDrainDeadline(run.session());
+    List<Throwable> causes = new ArrayList<>();
+    if (cause != null) {
+        causes.add(cause);
+    }
     for (DrainProtocolAdapter adapter : adapters) {
         try {
             adapter.force(deadline);               // best-effort:单个失败不影响其余
-        } catch (Throwable ignored) {
+        } catch (Throwable forceError) {
+            causes.add(forceError);                 // 保留异常,继续 force 其余 adapter
         }
     }
-    List<Throwable> causes = cause == null ? Collections.emptyList()
-        : Collections.singletonList(cause);
     run.drainFuture().complete(DrainResult.forced(reason, causes));
 }
 ```
 
-这条线**具体做的事**:直接 CAS 到 `FORCE_DRAINING`(**不经过** `transition()`,因为源状态是任意的,合法边表已覆盖 READY/QUIESCING/MIGRATING/DRAINING→FORCE_DRAINING);写 `reason="forced:..."`;对每个 adapter 调 `force(deadline)`(gRPC 侧 = `forceServerShutdown()` → `Server.shutdownNow()`);最后用 `DrainResult.forced` 完成 future,让等待方(PreStop join)得到「强制」结果而非正常 drained。
+`tryEnterForceDraining` 会在 CAS 失败后**重读并重试**,只在观察到
+`FORCE_DRAINING`、`DRAINED`、`STOPPING` 或 `STOPPED` 时退出。不能把一次
+CAS 失败解释成“别的线程已经 force”:正常线程可能只是把
+`MIGRATING → DRAINING`,而 hard-deadline 的一次性 timer 已经被消费；若此时
+直接返回,后续 gate/transport 卡住会让 drain future 永不完成。
+
+这条线**具体做的事**:循环 CAS 到 `FORCE_DRAINING`(**不经过** `transition()`,因为源状态可能正在沿正常链前进,合法边表已覆盖 STARTING/READY/QUIESCING/MIGRATING/DRAINING→FORCE_DRAINING);CAS 赢家立即关闭 shared gate,确保任何 adapter force 之前已停止新准入;写 `reason="forced:..."`;对每个 adapter 调 `force(deadline)`(gRPC 侧 = `forceServerShutdown()` → `Server.shutdownNow()`),单个 adapter 抛错会被收进 causes 且不妨碍其余 adapter;最后用 `DrainResult.forced` 完成 future,让等待方(PreStop join)得到「强制」结果而非正常 drained。
 
 五个触发点(reason 后缀 → 场景):
 
@@ -418,8 +439,8 @@ CompletableFuture<Void> escalateForStop(ShutdownDeadline stopDeadline) {
 
 | 方法 | 行 | 逻辑 |
 |---|---|---|
-| `isStarted()` | `:143-145` | 非 STARTING,或 `reason=="started"` |
+| `isStarted()` | `:205-208` | 状态不再是 STARTING |
 | `isLive()` | `:147-150` | 无 fatal 且非 STOPPED |
 | `isReady()` | `:152-156` | 无 fatal 且状态恰为 READY |
 | `markFatal(component, cause)` | `:136-140` | 只 CAS 写 `fatalRef` + reason,**不改状态**;经 `isLive/isReady` 间接影响探针 |
-| `snapshot()` | `:158-166` | 打包 state + reason + drainId + forced + gate 计数,供 `/state` |
+| `snapshot()` | `:230-243` | 打包 state + reason + drainId + sticky forced outcome + gate 计数,供 `/state`;forced drain 即使随后推进 STOPPING/STOPPED 仍保持 `forced=true` |

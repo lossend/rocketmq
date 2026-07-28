@@ -232,6 +232,7 @@ permit 的 backend 状态使用 `NOT_STARTED -> STARTED -> TERMINAL` 或 `NOT_ST
 |---|---|---:|---|
 | `enableProxyAdminServer` | `proxy.lifecycle.admin.enabled` | `false` | 可独立于 lifecycle 开启；首次迁移阶段 A 使用。 |
 | `enableProxyGracefulLifecycle` | `proxy.lifecycle.enabled` | `false` | 仅 Cluster mode；严格 profile 必须为 true。 |
+| `enableProxySendDrain` | `proxy.lifecycle.sendDrainEnabled` | `false` | 依赖 lifecycle；显式开启 gRPC send tracer/interceptor、bind pipeline 与 activity decorator。严格生产 profile 必须为 true；关闭时仍保留连接迁移和 active-call drain，但不提供 accepted-send 双终态排空保证。 |
 | `proxyAdminBindAddress` | `proxy.lifecycle.admin.bindAddress` | `0.0.0.0` | health 可被 kubelet/NLB 访问；变更接口仍仅接受真实 loopback peer。 |
 | `proxyAdminPort` | `proxy.lifecycle.admin.port` | `8082` | 1024–65535，且不得与业务/metrics 端口冲突。 |
 | `proxyGrpcConnectionLeaseEnabled` | `proxy.lifecycle.grpcLease.enabled` | `true` | 只在总开关开启时生效；严格 profile 不允许关闭。 |
@@ -754,7 +755,7 @@ public interface ProxyLifecycle {
 }
 ```
 
-实现内部提供 package-private 的 `markStarted()`、`markReady()`、`transition(expected, next, reason)` 和 `CompletableFuture<Void> escalateForStop(ShutdownDeadline stopDeadline)`。状态存入单个 `AtomicReference<ProxyLifecycleState>`；合法边由显式 map/`switch` 校验，任何真实回退、跳过正常边或无 token 的重复推进都抛出并计数，不能仅打印 warn。lb/lease scheduled callback 必须携带 phase generation；TERM 取消与 timer 已入队竞态时，旧 generation 回调安静 no-op，这属于预期取消竞态而非 invariant violation。
+实现提供单一 public `onStartupComplete()`，由 `ProxyStartup` 在完整组件启动链成功返回后原子发布 STARTING→READY；内部保留 package-private 的 `transition(expected, next, reason)` 和 `CompletableFuture<Void> escalateForStop(ShutdownDeadline stopDeadline)`。状态存入单个 `AtomicReference<ProxyLifecycleState>`；合法边由显式 map/`switch` 校验，任何真实回退、跳过正常边或无 token 的重复推进都抛出并计数，不能仅打印 warn。lb/lease scheduled callback 必须携带 phase generation；TERM 取消与 timer 已入队竞态时，旧 generation 回调安静 no-op，这属于预期取消竞态而非 invariant violation。
 
 `beginDrain` 先在本地构造完整 `DrainRun(session, future)`，再用单个 `AtomicReference<DrainRun>.compareAndSet(null, candidate)` 发布；失败者直接返回获胜对象。禁止两个 atomic 分别发布 session/future，否则读者可能观察到 torn pair。获胜线程只向单线程 `ScheduledExecutorService` 提交一次 orchestration；阶段等待使用可取消 scheduled future，不能在 lifecycle thread 上 `sleep`/阻塞到 cutoff。HTTP、PreStop 和 hook 只 join `drainFuture`，不各自执行 drain 步骤。`ProxyRuntime` 另以单个 `AtomicReference<StopRun>` 发布 stop deadline/future。
 

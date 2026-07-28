@@ -17,12 +17,14 @@
 
 package org.apache.rocketmq.proxy.lifecycle;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
 /**
- * Outcome of a drain: either a clean DRAINED terminal or a forced drain. Never
- * describes resource-teardown failures; those belong to {@link StopResult}.
+ * Outcome of a drain: either a clean DRAINED terminal or a forced drain. Forced
+ * results retain failures encountered while forcing protocol drain adapters;
+ * failures from the later owned-resource teardown belong to {@link StopResult}.
  */
 public final class DrainResult {
 
@@ -33,7 +35,8 @@ public final class DrainResult {
     private DrainResult(boolean forced, String reason, List<Throwable> causes) {
         this.forced = forced;
         this.reason = reason;
-        this.causes = causes == null ? Collections.emptyList() : Collections.unmodifiableList(causes);
+        this.causes = causes == null ? Collections.emptyList()
+            : Collections.unmodifiableList(new ArrayList<>(causes));
     }
 
     public static DrainResult drained() {

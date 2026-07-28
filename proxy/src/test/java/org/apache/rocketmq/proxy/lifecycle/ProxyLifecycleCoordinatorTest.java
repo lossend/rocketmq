@@ -21,9 +21,12 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.Test;
 
@@ -41,11 +44,26 @@ public class ProxyLifecycleCoordinatorTest {
     }
 
     @Test
+    @DisplayName("startup completion atomically publishes started and ready")
+    public void startupCompletePublishesReady() {
+        ProxyLifecycleCoordinator coordinator = newCoordinator(new FakeAdapter(), null);
+
+        assertThat(coordinator.isStarted()).isFalse();
+        assertThat(coordinator.isReady()).isFalse();
+
+        coordinator.onStartupComplete();
+
+        assertThat(coordinator.isStarted()).isTrue();
+        assertThat(coordinator.isReady()).isTrue();
+        assertThat(coordinator.state()).isEqualTo(ProxyLifecycleState.READY);
+    }
+
+    @Test
     @DisplayName("repeated beginDrain returns the identical DrainRun instance")
     public void reentrantDrainReusesRun() {
         FakeAdapter adapter = new FakeAdapter();
         ProxyLifecycleCoordinator coordinator = newCoordinator(adapter, null);
-        coordinator.markReady();
+        coordinator.onStartupComplete();
         DrainRun first = coordinator.beginDrain(DrainTrigger.PRESTOP);
         DrainRun second = coordinator.beginDrain(DrainTrigger.ADMIN);
         assertThat(second).isSameAs(first);
@@ -59,7 +77,7 @@ public class ProxyLifecycleCoordinatorTest {
         FakeAdapter adapter = new FakeAdapter();
         AtomicInteger withdrawn = new AtomicInteger();
         ProxyLifecycleCoordinator coordinator = newCoordinator(adapter, withdrawn::incrementAndGet);
-        coordinator.markReady();
+        coordinator.onStartupComplete();
 
         DrainRun run = coordinator.beginDrain(DrainTrigger.PRESTOP);
         assertThat(withdrawn.get()).isEqualTo(1);
@@ -84,7 +102,7 @@ public class ProxyLifecycleCoordinatorTest {
         ProxyLifecycleCoordinator coordinator = new ProxyLifecycleCoordinator(gate,
             Collections.singletonList(adapter), scheduler, clock::get, true, null,
             60, 300, 0.10, 30, 30, 480);
-        coordinator.markReady();
+        coordinator.onStartupComplete();
 
         coordinator.beginDrain(DrainTrigger.PRESTOP);
         scheduler.runScheduledAt(0);   // elapse the lb cutoff so migration starts
@@ -102,7 +120,7 @@ public class ProxyLifecycleCoordinatorTest {
         FakeAdapter adapter = new FakeAdapter();
         AtomicInteger withdrawn = new AtomicInteger();
         ProxyLifecycleCoordinator coordinator = newCoordinator(adapter, withdrawn::incrementAndGet);
-        coordinator.markReady();
+        coordinator.onStartupComplete();
 
         DrainRun run = coordinator.beginDrain(DrainTrigger.PRESTOP);
 
@@ -131,7 +149,7 @@ public class ProxyLifecycleCoordinatorTest {
         ProxyLifecycleMetrics metrics = new ProxyLifecycleMetrics();
         // Report a long-standing quiet window (well past the 20s threshold).
         coordinator.observeLbDetachQuiet(() -> TimeUnit.SECONDS.toNanos(120), 20, metrics);
-        coordinator.markReady();
+        coordinator.onStartupComplete();
 
         coordinator.beginDrain(DrainTrigger.PRESTOP);
         // Even though the listener is quiet, migration must still wait for the cutoff.
@@ -152,7 +170,7 @@ public class ProxyLifecycleCoordinatorTest {
         ProxyLifecycleMetrics metrics = new ProxyLifecycleMetrics();
         // New connections were arriving 2s before the cutoff, below the 20s threshold.
         coordinator.observeLbDetachQuiet(() -> TimeUnit.SECONDS.toNanos(2), 20, metrics);
-        coordinator.markReady();
+        coordinator.onStartupComplete();
 
         coordinator.beginDrain(DrainTrigger.PRESTOP);
         scheduler.runScheduledAt(0);
@@ -166,21 +184,117 @@ public class ProxyLifecycleCoordinatorTest {
     public void noQuietObservationIsHarmless() {
         FakeAdapter adapter = new FakeAdapter();
         ProxyLifecycleCoordinator coordinator = newCoordinator(adapter, null);
-        coordinator.markReady();
+        coordinator.onStartupComplete();
         coordinator.beginDrain(DrainTrigger.PRESTOP);
         scheduler.runScheduledAt(0);
         assertThat(adapter.migrationStarted).isTrue();
     }
 
     @Test
-    @DisplayName("a drain from STARTING escalates straight to FORCE_DRAINING")
+    @DisplayName("a drain from STARTING force-closes admission before returning")
     public void drainFromStartingForces() {
         FakeAdapter adapter = new FakeAdapter();
-        ProxyLifecycleCoordinator coordinator = newCoordinator(adapter, null);
+        SendDrainGate gate = new SendDrainGate();
+        ProxyLifecycleCoordinator coordinator = new ProxyLifecycleCoordinator(gate,
+            Collections.singletonList(adapter), scheduler, clock::get, true, null,
+            60, 300, 0.10, 30, 30, 480);
         DrainRun run = coordinator.beginDrain(DrainTrigger.SIGTERM_FALLBACK);
         assertThat(coordinator.state()).isEqualTo(ProxyLifecycleState.FORCE_DRAINING);
+        assertThat(gate.isAdmissionClosed()).isTrue();
+        assertThat(gate.tryAcquire(SendProtocol.GRPC)).isEmpty();
         assertThat(run.drainFuture()).isCompleted();
         assertThat(run.drainFuture().getNow(null).isForced()).isTrue();
+    }
+
+    @Test
+    @DisplayName("a hard deadline in QUIESCING force-closes admission")
+    public void forceFromQuiescingClosesAdmission() {
+        FakeAdapter adapter = new FakeAdapter();
+        SendDrainGate gate = new SendDrainGate();
+        ProxyLifecycleCoordinator coordinator = new ProxyLifecycleCoordinator(gate,
+            Collections.singletonList(adapter), scheduler, clock::get, true, null,
+            60, 300, 0.10, 30, 30, 480);
+        coordinator.onStartupComplete();
+        coordinator.beginDrain(DrainTrigger.PRESTOP);
+
+        scheduler.runScheduledAt(1);
+
+        assertThat(coordinator.state()).isEqualTo(ProxyLifecycleState.FORCE_DRAINING);
+        assertThat(gate.isAdmissionClosed()).isTrue();
+        assertThat(gate.tryAcquire(SendProtocol.GRPC)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a hard deadline in MIGRATING force-closes admission")
+    public void forceFromMigratingClosesAdmission() {
+        FakeAdapter adapter = new FakeAdapter();
+        SendDrainGate gate = new SendDrainGate();
+        ProxyLifecycleCoordinator coordinator = new ProxyLifecycleCoordinator(gate,
+            Collections.singletonList(adapter), scheduler, clock::get, true, null,
+            60, 300, 0.10, 30, 30, 480);
+        coordinator.onStartupComplete();
+        coordinator.beginDrain(DrainTrigger.PRESTOP);
+        scheduler.runScheduledAt(0);
+
+        scheduler.runScheduledAt(1);
+
+        assertThat(coordinator.state()).isEqualTo(ProxyLifecycleState.FORCE_DRAINING);
+        assertThat(gate.isAdmissionClosed()).isTrue();
+        assertThat(gate.tryAcquire(SendProtocol.GRPC)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("force transition retries when normal drain advances between state read and CAS")
+    public void forceTransitionRetriesAfterConcurrentStateAdvance() {
+        AtomicReference<ProxyLifecycleState> scriptedState =
+            new AtomicReference<>(ProxyLifecycleState.MIGRATING);
+        AtomicInteger casAttempts = new AtomicInteger();
+
+        boolean entered = ProxyLifecycleCoordinator.tryEnterForceDraining(
+            scriptedState::get,
+            (expected, next) -> {
+                if (casAttempts.getAndIncrement() == 0) {
+                    assertThat(expected).isEqualTo(ProxyLifecycleState.MIGRATING);
+                    assertThat(scriptedState.compareAndSet(
+                        ProxyLifecycleState.MIGRATING, ProxyLifecycleState.DRAINING)).isTrue();
+                    return false;
+                }
+                return scriptedState.compareAndSet(expected, next);
+            });
+
+        assertThat(entered).isTrue();
+        assertThat(casAttempts.get()).isEqualTo(2);
+        assertThat(scriptedState.get()).isEqualTo(ProxyLifecycleState.FORCE_DRAINING);
+    }
+
+    @Test
+    @DisplayName("adapter force failures are retained in the forced drain result")
+    public void forceFailuresAreReported() {
+        RuntimeException forceFailure = new RuntimeException("force failed");
+        FakeAdapter adapter = new FakeAdapter();
+        adapter.forceFailure = forceFailure;
+        ProxyLifecycleCoordinator coordinator = newCoordinator(adapter, null);
+
+        DrainResult result = coordinator.beginDrain(DrainTrigger.SIGTERM_FALLBACK)
+            .drainFuture().getNow(null);
+
+        assertThat(result.isForced()).isTrue();
+        assertThat(result.causes()).containsExactly(forceFailure);
+    }
+
+    @Test
+    @DisplayName("forced remains sticky in snapshots after the state advances to STOPPED")
+    public void forcedOutcomeRemainsStickyAfterStop() {
+        ProxyLifecycleCoordinator coordinator = newCoordinator(new FakeAdapter(), null);
+        coordinator.beginDrain(DrainTrigger.SIGTERM_FALLBACK);
+
+        assertThat(coordinator.snapshot().forced()).isTrue();
+        assertThat(coordinator.transition(ProxyLifecycleState.FORCE_DRAINING,
+            ProxyLifecycleState.STOPPING, "stopping")).isTrue();
+        assertThat(coordinator.transition(ProxyLifecycleState.STOPPING,
+            ProxyLifecycleState.STOPPED, "stopped")).isTrue();
+
+        assertThat(coordinator.snapshot().forced()).isTrue();
     }
 
     @Test
@@ -188,7 +302,7 @@ public class ProxyLifecycleCoordinatorTest {
     public void hardDeadlineForces() {
         FakeAdapter adapter = new FakeAdapter();
         ProxyLifecycleCoordinator coordinator = newCoordinator(adapter, null);
-        coordinator.markReady();
+        coordinator.onStartupComplete();
         DrainRun run = coordinator.beginDrain(DrainTrigger.PRESTOP);
         assertThat(run.drainFuture()).isNotCompleted();
         // Fire the scheduled hard-deadline task.
@@ -206,7 +320,7 @@ public class ProxyLifecycleCoordinatorTest {
         ProxyLifecycleCoordinator coordinator = new ProxyLifecycleCoordinator(gate,
             Collections.singletonList(adapter), scheduler, clock::get, true, null,
             60, 300, 0.10, 30, 30, 480);
-        coordinator.markReady();
+        coordinator.onStartupComplete();
         coordinator.beginDrain(DrainTrigger.PRESTOP);
 
         ShutdownDeadline stop = new ShutdownDeadline(clock.get() + 30_000_000_000L, clock::get);
@@ -219,12 +333,52 @@ public class ProxyLifecycleCoordinatorTest {
         assertThat(scheduler.cancelledCount).isGreaterThanOrEqualTo(1);
     }
 
+    @Test
+    @DisplayName("the accepted-send release thread never invokes transport termination")
+    public void permitReleaseDoesNotInvokeAwaitTerminated() throws Exception {
+        AsyncScheduler asyncScheduler = new AsyncScheduler();
+        try {
+            FakeAdapter adapter = new FakeAdapter();
+            adapter.noNewWork.complete(null);
+            adapter.terminated.complete(null);
+            SendDrainGate gate = new SendDrainGate();
+            SendPermit permit = gate.tryAcquire(SendProtocol.GRPC).get();
+            permit.backendStarted();
+            ProxyLifecycleCoordinator coordinator = new ProxyLifecycleCoordinator(gate,
+                Collections.singletonList(adapter), asyncScheduler, System::nanoTime, true, null,
+                0, 0, 0.0, 0, 30, 0);
+            coordinator.onStartupComplete();
+
+            coordinator.beginDrain(DrainTrigger.PRESTOP);
+            asyncScheduler.awaitIdle();
+            asyncScheduler.runScheduledAt(0);
+            assertThat(adapter.awaitThread).isNull();
+
+            Thread tracerThread = new Thread(() -> {
+                permit.backendTerminal(null);
+                permit.protocolTerminal(ProtocolResult.success());
+            }, "test-grpc-tracer");
+            tracerThread.start();
+            tracerThread.join(TimeUnit.SECONDS.toMillis(5));
+            asyncScheduler.awaitIdle();
+
+            assertThat(tracerThread.isAlive()).isFalse();
+            assertThat(adapter.awaitThread).isNotNull();
+            assertThat(adapter.awaitThread.getName()).isEqualTo("test-lifecycle-scheduler");
+            assertThat(coordinator.state()).isEqualTo(ProxyLifecycleState.DRAINED);
+        } finally {
+            asyncScheduler.close();
+        }
+    }
+
     // --- fakes -------------------------------------------------------------
 
     private static final class FakeAdapter implements DrainProtocolAdapter {
         volatile boolean migrationStarted;
         volatile boolean forced;
         volatile ShutdownDeadline forcedDeadline;
+        volatile RuntimeException forceFailure;
+        volatile Thread awaitThread;
         final CompletableFuture<Void> noNewWork = new CompletableFuture<>();
         final CompletableFuture<Void> terminated = new CompletableFuture<>();
 
@@ -245,6 +399,7 @@ public class ProxyLifecycleCoordinatorTest {
 
         @Override
         public CompletableFuture<Void> awaitTerminated(ShutdownDeadline effectiveDeadline) {
+            awaitThread = Thread.currentThread();
             return terminated;
         }
 
@@ -252,6 +407,48 @@ public class ProxyLifecycleCoordinatorTest {
         public void force(ShutdownDeadline effectiveDeadline) {
             forced = true;
             forcedDeadline = effectiveDeadline;
+            if (forceFailure != null) {
+                throw forceFailure;
+            }
+        }
+    }
+
+    private static final class AsyncScheduler implements LifecycleScheduler, AutoCloseable {
+        private final List<Runnable> scheduled = Collections.synchronizedList(new ArrayList<>());
+        private final ExecutorService executor = Executors.newSingleThreadExecutor(
+            task -> new Thread(task, "test-lifecycle-scheduler"));
+
+        @Override
+        public void execute(Runnable task) {
+            executor.execute(task);
+        }
+
+        @Override
+        public ScheduledHandle schedule(Runnable task, long delayNanos) {
+            scheduled.add(task);
+            int index = scheduled.size() - 1;
+            return () -> {
+                scheduled.set(index, null);
+                return true;
+            };
+        }
+
+        void runScheduledAt(int index) throws Exception {
+            Runnable task = scheduled.get(index);
+            if (task != null) {
+                executor.submit(task).get(5, TimeUnit.SECONDS);
+                awaitIdle();
+            }
+        }
+
+        void awaitIdle() throws Exception {
+            executor.submit(() -> {
+            }).get(5, TimeUnit.SECONDS);
+        }
+
+        @Override
+        public void close() {
+            executor.shutdownNow();
         }
     }
 

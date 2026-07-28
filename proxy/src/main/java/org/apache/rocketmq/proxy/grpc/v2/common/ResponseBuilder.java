@@ -72,28 +72,40 @@ public class ResponseBuilder {
         }
         if (t instanceof GrpcProxyException) {
             GrpcProxyException grpcProxyException = (GrpcProxyException) t;
-            return buildStatus(grpcProxyException.getCode(), grpcProxyException.getMessage());
+            return ensureFailureStatus(
+                buildStatus(grpcProxyException.getCode(), grpcProxyException.getMessage()), t);
         }
         if (TopicRouteHelper.isTopicNotExistError(t)) {
-            return buildStatus(Code.TOPIC_NOT_FOUND, t.getMessage());
+            return ensureFailureStatus(buildStatus(Code.TOPIC_NOT_FOUND, t.getMessage()), t);
         }
         if (t instanceof MQBrokerException) {
             MQBrokerException mqBrokerException = (MQBrokerException) t;
-            return buildStatus(buildCode(mqBrokerException.getResponseCode()), mqBrokerException.getErrorMessage());
+            return ensureFailureStatus(
+                buildStatus(buildCode(mqBrokerException.getResponseCode()), mqBrokerException.getErrorMessage()), t);
         }
         if (t instanceof MQClientException) {
             MQClientException mqClientException = (MQClientException) t;
-            return buildStatus(buildCode(mqClientException.getResponseCode()), mqClientException.getErrorMessage());
+            return ensureFailureStatus(
+                buildStatus(buildCode(mqClientException.getResponseCode()), mqClientException.getErrorMessage()), t);
         }
         if (t instanceof RemotingTimeoutException) {
-            return buildStatus(Code.PROXY_TIMEOUT, t.getMessage());
+            return ensureFailureStatus(buildStatus(Code.PROXY_TIMEOUT, t.getMessage()), t);
         }
         if (t instanceof AuthenticationException || t instanceof AuthorizationException) {
-            return buildStatus(Code.UNAUTHORIZED, t.getMessage());
+            return ensureFailureStatus(buildStatus(Code.UNAUTHORIZED, t.getMessage()), t);
         }
 
         log.error("internal server error", t);
-        return buildStatus(Code.INTERNAL_SERVER_ERROR, ExceptionUtils.getErrorDetailMessage(t));
+        return ensureFailureStatus(
+            buildStatus(Code.INTERNAL_SERVER_ERROR, ExceptionUtils.getErrorDetailMessage(t)), t);
+    }
+
+    private Status ensureFailureStatus(Status status, Throwable source) {
+        if (status.getCode() != Code.OK) {
+            return status;
+        }
+        log.error("an exceptional completion was mapped to Code.OK; overriding it with INTERNAL_SERVER_ERROR", source);
+        return buildStatus(Code.INTERNAL_SERVER_ERROR, ExceptionUtils.getErrorDetailMessage(source));
     }
 
     public Status buildStatus(Code code, String message) {

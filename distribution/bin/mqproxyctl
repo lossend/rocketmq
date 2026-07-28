@@ -94,7 +94,11 @@ cmd_drain() {
     scode=$(http GET "/drain/${run_id}")
     sbody=$(cat "$BODY_FILE" 2>/dev/null || true)
     case "$sbody" in
-      *'"state":"DRAINED"'*|*'"state":"FORCE_DRAINING"'*|*'"state":"STOPPED"'*)
+      *'"forced":true'*|*'"state":"FORCE_DRAINING"'*)
+        echo "$sbody"
+        echo "mqproxyctl drain: forced termination was required; graceful drain did not complete" >&2
+        return 6 ;;
+      *'"state":"DRAINED"'*|*'"state":"STOPPED"'*)
         echo "$sbody"
         return 0 ;;
     esac

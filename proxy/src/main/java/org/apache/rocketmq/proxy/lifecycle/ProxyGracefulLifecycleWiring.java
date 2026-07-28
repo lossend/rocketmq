@@ -18,6 +18,8 @@
 package org.apache.rocketmq.proxy.lifecycle;
 
 import java.util.Collections;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.rocketmq.proxy.config.ProxyConfig;
@@ -53,7 +55,7 @@ public final class ProxyGracefulLifecycleWiring {
     public ProxyGracefulLifecycleWiring() {
         this.tracerFactory = new GrpcSendStreamTracerFactory(openSendRpcs);
         this.sendInterceptor = new GrpcSendLifecycleInterceptor(gate);
-        this.activeCallInterceptor = new GrpcActiveCallInterceptor(activeCallRegistry);
+        this.activeCallInterceptor = new GrpcActiveCallInterceptor(activeCallRegistry, drainStatusPolicy);
         this.transportFilter = new GrpcTransportLifecycleFilter(System::nanoTime, this::activeLbCutoffNanos);
     }
 
@@ -92,7 +94,17 @@ public final class ProxyGracefulLifecycleWiring {
      */
     public ProxyLifecycleCoordinator createCoordinator(GrpcDrainAdapter.PhasedGrpcServer grpcServer,
         ProxyConfig config, LifecycleScheduler scheduler) {
-        GrpcDrainAdapter adapter = new GrpcDrainAdapter(grpcServer, activeCallRegistry, drainStatusPolicy);
+        return createCoordinator(grpcServer, config, scheduler, ForkJoinPool.commonPool());
+    }
+
+    /**
+     * Builds the coordinator with an explicitly owned executor for the blocking
+     * gRPC server-termination wait.
+     */
+    public ProxyLifecycleCoordinator createCoordinator(GrpcDrainAdapter.PhasedGrpcServer grpcServer,
+        ProxyConfig config, LifecycleScheduler scheduler, Executor terminationExecutor) {
+        GrpcDrainAdapter adapter = new GrpcDrainAdapter(grpcServer, activeCallRegistry, drainStatusPolicy,
+            terminationExecutor);
         ProxyLifecycleCoordinator coordinator = new ProxyLifecycleCoordinator(
             gate,
             Collections.singletonList(adapter),

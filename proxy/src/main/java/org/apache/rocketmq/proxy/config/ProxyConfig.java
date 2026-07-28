@@ -113,6 +113,7 @@ public class ProxyConfig implements ConfigFile {
      */
     private boolean enableProxyAdminServer = false;
     private boolean enableProxyGracefulLifecycle = false;
+    private boolean enableProxySendDrain = false;
     private String proxyAdminBindAddress = "0.0.0.0";
     private int proxyAdminPort = 8082;
     private boolean proxyGrpcConnectionLeaseEnabled = true;
@@ -1637,6 +1638,14 @@ public class ProxyConfig implements ConfigFile {
         this.enableProxyGracefulLifecycle = enableProxyGracefulLifecycle;
     }
 
+    public boolean isEnableProxySendDrain() {
+        return enableProxySendDrain;
+    }
+
+    public void setEnableProxySendDrain(boolean enableProxySendDrain) {
+        this.enableProxySendDrain = enableProxySendDrain;
+    }
+
     public String getProxyAdminBindAddress() {
         return proxyAdminBindAddress;
     }
@@ -1741,6 +1750,10 @@ public class ProxyConfig implements ConfigFile {
      */
     public void validateGracefulLifecycle() {
         if (!enableProxyGracefulLifecycle) {
+            if (enableProxySendDrain) {
+                throw new IllegalArgumentException(
+                    "enableProxySendDrain requires enableProxyGracefulLifecycle to be enabled");
+            }
             return;
         }
         List<String> errors = new ArrayList<>();

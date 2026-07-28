@@ -162,12 +162,17 @@ public class GrpcMessagingApplication extends MessagingServiceGrpc.MessagingServ
                 .pipe(new AuthorizationPipeline(authConfig, messagingProcessor))
                 .pipe(new AuthenticationPipeline(authConfig, messagingProcessor));
         }
-        // Runs after ContextInitPipeline: copies the send permit off the gRPC Context
-        // while still on the service thread. Inert when the lifecycle is disabled.
-        pipeline = pipeline.pipe(new SendLifecycleBindPipeline());
+        boolean sendDrainEnabled = ConfigurationManager.getProxyConfig().isEnableProxySendDrain();
+        if (sendDrainEnabled) {
+            // Runs after ContextInitPipeline: copies the send permit off the gRPC Context
+            // while still on the service thread.
+            pipeline = pipeline.pipe(new SendLifecycleBindPipeline());
+        }
         pipeline = pipeline.pipe(new ContextInitPipeline());
-        GrpcMessagingActivity activity = new SendLifecycleMessagingActivity(
-            new DefaultGrpcMessagingActivity(messagingProcessor));
+        GrpcMessagingActivity delegate = new DefaultGrpcMessagingActivity(messagingProcessor);
+        GrpcMessagingActivity activity = sendDrainEnabled
+            ? new SendLifecycleMessagingActivity(delegate)
+            : delegate;
         return new GrpcMessagingApplication(activity, pipeline);
     }
 
