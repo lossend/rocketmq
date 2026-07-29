@@ -23,6 +23,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.rocketmq.proxy.config.ProxyConfig;
 import org.apache.rocketmq.proxy.lifecycle.grpc.GrpcDrainAdapter;
+import org.apache.rocketmq.proxy.lifecycle.readiness.ReadinessProbeRegistry;
 import org.apache.rocketmq.proxy.lifecycle.warmup.WarmupRegistry;
 import org.apache.rocketmq.proxy.lifecycle.warmup.WarmupTasks;
 import org.junit.Test;
@@ -149,6 +150,38 @@ public class ProxyGracefulLifecycleWarmupTest {
             assertThat(coordinator.state()).isEqualTo(ProxyLifecycleState.STARTING);
         }
         assertThat(coordinator.isLive()).isTrue();
+    }
+
+    @Test
+    @DisplayName("a warmup-only task runs once and is never re-invoked by the readiness endpoint")
+    public void warmupOnlyTaskIsNotReinvokedAtRuntime() {
+        ProxyGracefulLifecycleWiring wiring = new ProxyGracefulLifecycleWiring();
+        QueueingScheduler scheduler = new QueueingScheduler();
+        ProxyLifecycleCoordinator coordinator = wiring.createCoordinator(
+            new FakePhasedServer(), strictConfig(), scheduler, Runnable::run);
+
+        AtomicInteger warmupInvocations = new AtomicInteger();
+        WarmupRegistry warmupRegistry = new WarmupRegistry();
+        warmupRegistry.register(WarmupTasks.supplied("load-local-cache",
+            WarmupTasks.PRIORITY_PROCESSOR, FailureScope.LOCAL_FATAL, () -> {
+                warmupInvocations.incrementAndGet();
+                return true;
+            }));
+        // Runtime readiness probing is registered separately and does not include the
+        // warmup-only task, so it is never re-evaluated after startup.
+        ReadinessProbeRegistry probeRegistry = new ReadinessProbeRegistry();
+
+        wiring.startWarmup(warmupRegistry, probeRegistry, strictConfig(), scheduler,
+            coordinator::onStartupComplete);
+
+        assertThat(coordinator.state()).isEqualTo(ProxyLifecycleState.READY);
+        assertThat(warmupInvocations.get()).isEqualTo(1);
+
+        // Querying /ready-for-traffic repeatedly must not re-invoke the warmup-only task.
+        for (int i = 0; i < 5; i++) {
+            assertThat(coordinator.isReadyForTraffic()).isTrue();
+        }
+        assertThat(warmupInvocations.get()).isEqualTo(1);
     }
 
     private static final class FakePhasedServer implements GrpcDrainAdapter.PhasedGrpcServer {

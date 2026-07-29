@@ -33,6 +33,7 @@ import java.util.function.Supplier;
 import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.logging.org.slf4j.Logger;
 import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
+import org.apache.rocketmq.proxy.lifecycle.readiness.ReadinessEvaluator;
 
 /**
  * Single-owner lifecycle coordinator. State lives in one {@link AtomicReference};
@@ -76,10 +77,10 @@ public final class ProxyLifecycleCoordinator implements ProxyLifecycle {
     private volatile LifecycleScheduler.ScheduledHandle lbTimer;
     private volatile LifecycleScheduler.ScheduledHandle hardDeadlineTimer;
 
-    // Provider-health barrier backing isReadyForTraffic(). Null until warmup wiring
+    // Provider-health evaluator backing isReadyForTraffic(). Null until warmup wiring
     // installs it; when null the traffic predicate falls back to isReady() so an
     // unwired coordinator never regresses.
-    private volatile ReadinessBarrier readinessBarrier;
+    private volatile ReadinessEvaluator readinessEvaluator;
 
     // Optional lb-detach quiet-window observation. Diagnostic only: it never shortens
     // the wait, because a locally idle listener does not prove the provider has
@@ -258,13 +259,13 @@ public final class ProxyLifecycleCoordinator implements ProxyLifecycle {
     }
 
     /**
-     * Installs the provider-health barrier that backs {@link #isReadyForTraffic()}.
+     * Installs the provider-health evaluator that backs {@link #isReadyForTraffic()}.
      * Called once by the warmup wiring before READY is published.
      *
-     * @param barrier the readiness barrier evaluating shared-dependency health
+     * @param evaluator the readiness evaluator evaluating shared-dependency health
      */
-    public void setReadinessBarrier(ReadinessBarrier barrier) {
-        this.readinessBarrier = barrier;
+    public void setReadinessEvaluator(ReadinessEvaluator evaluator) {
+        this.readinessEvaluator = evaluator;
     }
 
     @Override
@@ -272,8 +273,8 @@ public final class ProxyLifecycleCoordinator implements ProxyLifecycle {
         if (fatalRef.get() != null || state.get() != ProxyLifecycleState.READY) {
             return false;
         }
-        ReadinessBarrier barrier = readinessBarrier;
-        return barrier == null || barrier.isReadyForTraffic();
+        ReadinessEvaluator evaluator = readinessEvaluator;
+        return evaluator == null || evaluator.isReadyForTraffic();
     }
 
     @Override

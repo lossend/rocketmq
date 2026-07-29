@@ -23,10 +23,10 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.apache.rocketmq.proxy.lifecycle.FailureScope;
 import org.apache.rocketmq.proxy.lifecycle.LifecycleScheduler;
 import org.apache.rocketmq.proxy.lifecycle.ProxyLifecycleCoordinator;
-import org.apache.rocketmq.proxy.lifecycle.ReadinessBarrier;
-import org.apache.rocketmq.proxy.lifecycle.ReadinessContributor;
 import org.apache.rocketmq.proxy.lifecycle.ReadinessResult;
 import org.apache.rocketmq.proxy.lifecycle.SendDrainGate;
+import org.apache.rocketmq.proxy.lifecycle.readiness.ReadinessEvaluator;
+import org.apache.rocketmq.proxy.lifecycle.readiness.ReadinessProbe;
 import org.junit.Test;
 import org.junit.jupiter.api.DisplayName;
 
@@ -38,12 +38,11 @@ public class ReadyForTrafficDivergenceTest {
     @DisplayName("after READY, a shared-dependency failure keeps /ready 200 but drops /ready-for-traffic to 503")
     public void sharedDependencyDivergesTheTwoEndpoints() {
         AtomicReference<ReadinessResult> dep = new AtomicReference<>(ReadinessResult.success());
-        ReadinessBarrier barrier = new ReadinessBarrier(
-            Collections.singletonList(sharedDependency(dep)), 1);
-        assertThat(barrier.tryCompleteWarmup()).isTrue();
+        ReadinessEvaluator evaluator = new ReadinessEvaluator(
+            Collections.singletonList(sharedDependency(dep)), 1, () -> true);
 
         ProxyLifecycleCoordinator coordinator = newCoordinator();
-        coordinator.setReadinessBarrier(barrier);
+        coordinator.setReadinessEvaluator(evaluator);
         coordinator.onStartupComplete();
         CoordinatorAdminHandlers handlers = new CoordinatorAdminHandlers(coordinator, Runnable::run);
 
@@ -51,15 +50,16 @@ public class ReadyForTrafficDivergenceTest {
         assertThat(handlers.ready().status()).isEqualTo(200);
         assertThat(handlers.readyForTraffic().status()).isEqualTo(200);
 
-        // dependency blip: /ready stays up (fail-open), /ready-for-traffic fails closed
+        // dependency blip: /ready stays up (fail-open, unaffected by the evaluator),
+        // /ready-for-traffic fails closed
         dep.set(ReadinessResult.failure("nameserver blip"));
         assertThat(handlers.ready().status()).isEqualTo(200);
         assertThat(handlers.readyForTraffic().status()).isEqualTo(503);
     }
 
     @Test
-    @DisplayName("without a barrier installed, /ready-for-traffic falls back to the /ready predicate")
-    public void noBarrierFallsBackToReady() {
+    @DisplayName("without an evaluator installed, /ready-for-traffic falls back to the /ready predicate")
+    public void noEvaluatorFallsBackToReady() {
         ProxyLifecycleCoordinator coordinator = newCoordinator();
         coordinator.onStartupComplete();
         CoordinatorAdminHandlers handlers = new CoordinatorAdminHandlers(coordinator, Runnable::run);
@@ -68,8 +68,8 @@ public class ReadyForTrafficDivergenceTest {
         assertThat(handlers.readyForTraffic().status()).isEqualTo(200);
     }
 
-    private static ReadinessContributor sharedDependency(AtomicReference<ReadinessResult> holder) {
-        return new ReadinessContributor() {
+    private static ReadinessProbe sharedDependency(AtomicReference<ReadinessResult> holder) {
+        return new ReadinessProbe() {
             @Override
             public String name() {
                 return "nameserver";

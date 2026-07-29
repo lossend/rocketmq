@@ -51,6 +51,8 @@ import org.apache.rocketmq.proxy.lifecycle.ShutdownDeadline;
 import org.apache.rocketmq.proxy.lifecycle.FailureScope;
 import org.apache.rocketmq.proxy.lifecycle.admin.CoordinatorAdminHandlers;
 import org.apache.rocketmq.proxy.lifecycle.admin.ProxyAdminServer;
+import org.apache.rocketmq.proxy.lifecycle.readiness.ReadinessProbeRegistry;
+import org.apache.rocketmq.proxy.lifecycle.readiness.ReadinessProbes;
 import org.apache.rocketmq.proxy.lifecycle.warmup.WarmupRegistry;
 import org.apache.rocketmq.proxy.lifecycle.warmup.WarmupTasks;
 import org.apache.rocketmq.proxy.grpc.v2.GrpcMessagingApplication;
@@ -66,6 +68,7 @@ import java.util.Date;
 import java.util.List;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 
 public class ProxyStartup {
     private static final Logger log = LoggerFactory.getLogger(LoggerName.PROXY_LOGGER_NAME);
@@ -134,9 +137,11 @@ public class ProxyStartup {
             final ProxyGracefulLifecycleWiring wiringRef = lifecycleWiring;
             final ProxyConfig configRef = proxyConfig;
             final ProxyLifecycleCoordinator readyCoordinator = coordinator;
-            startAndSignalReady(PROXY_START_AND_SHUTDOWN, coordinator,
-                () -> wiringRef.startWarmup(buildWarmupRegistry(configRef), configRef,
-                    readyCoordinator::onStartupComplete));
+            startAndSignalReady(PROXY_START_AND_SHUTDOWN, coordinator, () -> {
+                LifecycleRegistries registries = buildLifecycleRegistries(configRef);
+                wiringRef.startWarmup(registries.warmupRegistry, registries.probeRegistry, configRef,
+                    readyCoordinator::onStartupComplete);
+            });
 
             final ProxyAdminServer adminServerRef = adminServer;
             final ProxyLifecycleCoordinator coordinatorRef = coordinator;
@@ -309,30 +314,32 @@ public class ProxyStartup {
     }
 
     /**
-     * Builds the core-subset warmup contributors. The listener/processor signals are
-     * true by the time warmup runs (their {@code start()} has returned), so they act
-     * as extension points; the only genuinely asynchronous signal is NameServer
-     * reachability, probed through a dedicated lightweight client. Returns an empty
-     * list when NameServer is not configured (e.g. local mode), so warmup completes
-     * immediately and READY is not held back.
+     * Builds the startup warmup registry and the runtime readiness probe registry from one
+     * shared probe client. Warmup is a one-time gate (listeners/processor local signals plus
+     * NameServer/broker checks); the readiness probes are the subset that should keep running
+     * forever to back {@code /ready-for-traffic} (NameServer/broker — not the local signals,
+     * which do not un-start). Returns an empty warmup registry's worth of local-only signals
+     * and an empty probe registry when NameServer is not configured (e.g. local mode), so
+     * warmup completes immediately and READY is not held back.
      *
      * @param config proxy configuration supplying NameServer access and probe timeout
-     * @return the ordered contributor list for the warmup barrier
+     * @return the warmup registry and readiness probe registry sharing one probe client
      */
-    private static WarmupRegistry buildWarmupRegistry(ProxyConfig config) {
-        WarmupRegistry registry = new WarmupRegistry();
+    private static LifecycleRegistries buildLifecycleRegistries(ProxyConfig config) {
+        WarmupRegistry warmupRegistry = new WarmupRegistry();
+        ReadinessProbeRegistry probeRegistry = new ReadinessProbeRegistry();
         // Local signals are already satisfied by the time warmup runs; they carry failure
-        // scope and act as extension points.
-        registry.register(WarmupTasks.supplied("grpc-listener-bound",
+        // scope and act as extension points. They do not un-start, so they are warmup-only.
+        warmupRegistry.register(WarmupTasks.supplied("grpc-listener-bound",
             WarmupTasks.PRIORITY_GRPC_LISTENER, FailureScope.LOCAL_FATAL, () -> true));
-        registry.register(WarmupTasks.supplied("remoting-listener-bound",
+        warmupRegistry.register(WarmupTasks.supplied("remoting-listener-bound",
             WarmupTasks.PRIORITY_REMOTING_LISTENER, FailureScope.LOCAL_FATAL, () -> true));
-        registry.register(WarmupTasks.supplied("messaging-processor-started",
+        warmupRegistry.register(WarmupTasks.supplied("messaging-processor-started",
             WarmupTasks.PRIORITY_PROCESSOR, FailureScope.LOCAL_FATAL, () -> true));
 
         if (StringUtils.isBlank(config.getNamesrvAddr()) && StringUtils.isBlank(config.getNamesrvDomain())) {
             log.warn("no NameServer configured; warmup barrier uses local signals only");
-            return registry;
+            return new LifecycleRegistries(warmupRegistry, probeRegistry);
         }
         NameserverAccessConfig nameserverAccessConfig = new NameserverAccessConfig(config.getNamesrvAddr(),
             config.getNamesrvDomain(), config.getNamesrvDomainSubgroup());
@@ -351,7 +358,7 @@ public class ProxyStartup {
             probeScheduler.shutdownNow();
         });
         long probeTimeoutMillis = TimeUnit.SECONDS.toMillis(3);
-        registry.register(WarmupTasks.nameServerReachable(WarmupTasks.PRIORITY_NAMESERVER, () -> {
+        BooleanSupplier nameServerProbe = () -> {
             try {
                 probeFactory.getClient().getBrokerClusterInfo(probeTimeoutMillis);
                 return true;
@@ -359,17 +366,31 @@ public class ProxyStartup {
                 log.info("warmup NameServer probe failed: {}", e.getMessage());
                 return false;
             }
-        }));
+        };
+        warmupRegistry.register(WarmupTasks.nameServerReachable(WarmupTasks.PRIORITY_NAMESERVER, nameServerProbe));
+        probeRegistry.register(ReadinessProbes.nameServerReachable(nameServerProbe));
 
         java.util.function.Function<String, List<String>> brokerAddrLookup =
             topic -> lookupBrokerAddrs(probeFactory, topic, probeTimeoutMillis);
         java.util.function.Predicate<String> brokerProbe =
             addr -> probeBroker(probeFactory, addr, probeTimeoutMillis);
         for (String topic : parseWarmupTopics(config.getProxyWarmupTopics())) {
-            registry.register(WarmupTasks.brokerReachable(topic, WarmupTasks.PRIORITY_BROKER,
+            warmupRegistry.register(WarmupTasks.brokerReachable(topic, WarmupTasks.PRIORITY_BROKER,
                 brokerAddrLookup, brokerProbe));
+            probeRegistry.register(ReadinessProbes.brokerReachable(topic, brokerAddrLookup, brokerProbe));
         }
-        return registry;
+        return new LifecycleRegistries(warmupRegistry, probeRegistry);
+    }
+
+    /** Pairs the startup warmup registry with the runtime readiness probe registry. */
+    private static final class LifecycleRegistries {
+        private final WarmupRegistry warmupRegistry;
+        private final ReadinessProbeRegistry probeRegistry;
+
+        private LifecycleRegistries(WarmupRegistry warmupRegistry, ReadinessProbeRegistry probeRegistry) {
+            this.warmupRegistry = warmupRegistry;
+            this.probeRegistry = probeRegistry;
+        }
     }
 
     private static List<String> parseWarmupTopics(String csv) {
