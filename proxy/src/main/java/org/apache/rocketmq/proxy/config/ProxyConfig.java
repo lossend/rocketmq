@@ -116,13 +116,48 @@ public class ProxyConfig implements ConfigFile {
     private boolean enableProxySendDrain = false;
     private String proxyAdminBindAddress = "0.0.0.0";
     private int proxyAdminPort = 8082;
+    /**
+     * When true, gRPC connections advertise a bounded lease (via GOAWAY/max-connection-age)
+     * so long-lived clients periodically reconnect and can be redistributed off a draining
+     * instance. When false, no lease is imposed on gRPC connections.
+     */
     private boolean proxyGrpcConnectionLeaseEnabled = true;
+    /**
+     * Base lifetime, in seconds, granted to a client connection before the proxy asks it to
+     * reconnect. Bounds how long a connection may outlive a rebalance or a draining instance.
+     */
     private int proxyConnectionLeaseSeconds = 300;
+    /**
+     * Extra grace period, in seconds, added on top of the lease before the connection is
+     * forcibly closed, giving in-flight calls time to finish after the reconnect signal.
+     */
     private int proxyConnectionLeaseGraceSeconds = 30;
+    /**
+     * Randomization ratio (0.0-1.0) applied to the remoting connection lease, spreading
+     * reconnects over a window to avoid a synchronized reconnect storm. 0.10 = +/-10%.
+     */
     private double proxyRemotingLeaseJitterRatio = 0.10;
+    /**
+     * Diagnostic-only window, in seconds, over which the proxy observes whether new business
+     * connections are still arriving near the load-balancer detach cutoff. Used to calibrate
+     * {@link #proxyLbDetachTimeoutSeconds} against real provider timing; does not gate shutdown.
+     */
     private int proxyLbDetachQuietSeconds = 20;
+    /**
+     * Maximum time, in seconds, to wait during shutdown for the external load balancer to stop
+     * routing new traffic to this instance (target deregistration) before proceeding to drain.
+     */
     private int proxyLbDetachTimeoutSeconds = 60;
+    /**
+     * Maximum time, in seconds, to wait for in-flight send requests to drain during shutdown
+     * before the send gate is closed and remaining sends are rejected.
+     */
     private int proxySendDrainTimeoutSeconds = 30;
+    /**
+     * Maximum time, in seconds, allowed for the startup warmup barrier to complete. If warmup
+     * does not finish within this budget, readiness (READY) is published anyway to avoid a stuck
+     * startup.
+     */
     private int proxyWarmupTimeoutSeconds = 60;
     /**
      * Comma-separated topics whose route and broker reachability are prewarmed before
